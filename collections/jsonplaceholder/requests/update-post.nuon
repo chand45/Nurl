@@ -1,0 +1,21 @@
+{
+    name: "update-post"
+    description: "Update an existing post"
+    method: "PUT"
+    url: "{{base_url}}/posts/{{post_id}}"
+    headers: {
+        "Content-Type": "application/json"
+    }
+    body: {
+        type: "json"
+        content: {
+            id: "{{post_id}}"
+            title: "{{post_title}}"
+            body: "{{post_body}}"
+            userId: 1
+        }
+    }
+    auth: null
+    tests: null
+    chain: null
+}

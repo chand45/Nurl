@@ -1,0 +1,14 @@
+# Secrets - never commit
+secrets.nuon
+
+# History - local only
+history/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Editor files
+.vscode/
+*.swp
+*~

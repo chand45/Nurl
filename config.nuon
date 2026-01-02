@@ -1,0 +1,1 @@
+{default_environment: dev, default_headers: {Content-Type: application/json, Accept: application/json}, timeout_seconds: 30, history_retention_days: 30, editor: code, colors: {success: green, error: red, warning: yellow, info: blue}}

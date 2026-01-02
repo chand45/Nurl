@@ -1,0 +1,11 @@
+{
+    name: "get-users"
+    description: "Get all users"
+    method: "GET"
+    url: "{{base_url}}/users"
+    headers: {}
+    body: null
+    auth: null
+    tests: null
+    chain: null
+}

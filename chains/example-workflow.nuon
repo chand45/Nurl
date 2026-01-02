@@ -1,0 +1,32 @@
+{
+    name: "example-workflow"
+    description: "Example chain that creates a post and then retrieves it"
+    created_at: "2024-01-02T00:00:00Z"
+    steps: [
+        {
+            request: "create-post"
+            use: {
+                post_title: "Chain Test Post"
+                post_body: "This post was created via request chaining"
+            }
+            extract: {
+                new_id: "body.id"
+            }
+        }
+        {
+            request: "get-post"
+            use: {
+                post_id: "{{new_id}}"
+            }
+            extract: {
+                retrieved_title: "body.title"
+            }
+        }
+        {
+            request: "get-comments"
+            use: {
+                post_id: "1"
+            }
+        }
+    ]
+}

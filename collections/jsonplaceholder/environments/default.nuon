@@ -1,0 +1,10 @@
+{
+    name: "default"
+    description: "Default environment for JSONPlaceholder API"
+    variables: {
+        base_url: "https://jsonplaceholder.typicode.com"
+        post_id: "1"
+        post_title: "Test Post Title"
+        post_body: "This is a test post body created via API"
+    }
+}

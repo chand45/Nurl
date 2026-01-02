@@ -1,0 +1,24 @@
+{
+    name: "create-post"
+    description: "Create a new post"
+    method: "POST"
+    url: "{{base_url}}/posts"
+    headers: {
+        "Content-Type": "application/json"
+    }
+    body: {
+        type: "json"
+        content: {
+            title: "{{post_title}}"
+            body: "{{post_body}}"
+            userId: 1
+        }
+    }
+    auth: null
+    tests: null
+    chain: {
+        extract: {
+            new_post_id: "body.id"
+        }
+    }
+}

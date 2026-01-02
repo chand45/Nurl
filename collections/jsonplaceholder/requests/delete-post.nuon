@@ -1,0 +1,11 @@
+{
+    name: "delete-post"
+    description: "Delete a post"
+    method: "DELETE"
+    url: "{{base_url}}/posts/{{post_id}}"
+    headers: {}
+    body: null
+    auth: null
+    tests: null
+    chain: null
+}
