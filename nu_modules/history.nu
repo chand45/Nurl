@@ -258,6 +258,7 @@ export def "api history resend" [
     id: string               # History entry ID
     --environment (-e): string = ""  # Override environment
     --raw (-r)               # Return raw result
+    --dry-run (-d)           # Output curl command instead of executing
 ] {
     let entry = (find-history-entry $id)
 
@@ -282,10 +283,12 @@ export def "api history resend" [
         ""
     }
 
-    print $"(ansi dark_gray)Resending: ($entry.request.method) ($entry.request.url)(ansi reset)"
+    if not $dry_run {
+        print $"(ansi dark_gray)Resending: ($entry.request.method) ($entry.request.url)(ansi reset)"
+    }
 
     # Execute request
-    api request -m $entry.request.method $entry.request.url -b $body -H $entry.request.headers --raw=$raw
+    api request -m $entry.request.method $entry.request.url -b $body -H $entry.request.headers --raw=$raw --dry-run=$dry_run
 }
 
 # Search history

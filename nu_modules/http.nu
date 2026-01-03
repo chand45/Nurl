@@ -111,6 +111,85 @@ def build-curl-args [
     $args
 }
 
+# Build curl arguments for display (cleaner output for --dry-run)
+def build-curl-args-for-display [
+    method: string
+    url: string
+    headers: record
+    body?: string
+    auth?: record
+] {
+    mut args = [
+        "-X" $method
+    ]
+
+    # Add headers
+    for header in ($headers | transpose key value) {
+        $args = ($args | append ["-H" $"($header.key): ($header.value)"])
+    }
+
+    # Add authentication if provided
+    if $auth != null {
+        match ($auth.type? | default "none") {
+            "bearer" => {
+                $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"])
+            }
+            "basic" => {
+                $args = ($args | append ["-u" $"($auth.username):($auth.password)"])
+            }
+            "apikey_header" => {
+                $args = ($args | append ["-H" $"($auth.header_name): ($auth.key)"])
+            }
+            "apikey_query" => {
+                # Will be handled in URL
+            }
+            _ => {}
+        }
+    }
+
+    # Add body if provided
+    if $body != null and $body != "" {
+        $args = ($args | append ["-d" $body])
+    }
+
+    $args
+}
+
+# Convert curl arguments to a copyable shell command string
+def curl-args-to-string [
+    args: list      # The curl arguments list
+    url: string     # The URL to request
+] {
+    mut parts = ["curl"]
+
+    for arg in $args {
+        # Check if argument needs quoting
+        let needs_quote = ($arg | str contains "'") or ($arg | str contains '"') or ($arg | str contains " ") or ($arg | str contains "$") or ($arg | str contains "&") or ($arg | str contains "?") or ($arg | str contains "=") or ($arg | str contains ";") or ($arg | str contains "(") or ($arg | str contains ")") or ($arg | str contains "{") or ($arg | str contains "}")
+
+        if $needs_quote {
+            if ($arg | str contains "'") {
+                # Escape single quotes using '\'' pattern
+                let escaped = ($arg | str replace --all "'" "'\\''")
+                $parts = ($parts | append $"'($escaped)'")
+            } else {
+                $parts = ($parts | append $"'($arg)'")
+            }
+        } else {
+            $parts = ($parts | append $arg)
+        }
+    }
+
+    # Add URL at the end (always quote it for safety)
+    if ($url | str contains "'") {
+        let escaped_url = ($url | str replace --all "'" "'\\''")
+        $parts = ($parts | append $"'($escaped_url)'")
+    } else {
+        $parts = ($parts | append $"'($url)'")
+    }
+
+    $parts | str join " "
+}
+
 # Parse curl response output
 def parse-curl-response [output: string] {
     # Split response into headers and body
@@ -195,6 +274,7 @@ def execute-request [
     --auth (-a): record = {}
     --no-interpolate   # Skip variable interpolation
     --no-history       # Don't save to history
+    --dry-run (-d)     # Output curl command instead of executing
 ] {
     # Merge default headers with provided headers
     let all_headers = (get-default-headers | merge $headers)
@@ -227,6 +307,14 @@ def execute-request [
 
     # Build curl arguments
     let curl_args = (build-curl-args $method $request_url $final_headers $final_body $auth)
+
+    # Handle dry-run mode - output curl command instead of executing
+    if $dry_run {
+        let display_args = (build-curl-args-for-display $method $request_url $final_headers $final_body $auth)
+        let curl_command = (curl-args-to-string $display_args $request_url)
+        print $curl_command
+        return { dry_run: true, command: $curl_command }
+    }
 
     # Execute curl
     let start_time = (date now)
@@ -292,11 +380,16 @@ export def "api get" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request "GET" $url -H $headers -a $auth --no-history=$no_history)
+    let result = (execute-request "GET" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -315,11 +408,16 @@ export def "api post" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request "POST" $url -H $headers -b $body -a $auth --no-history=$no_history)
+    let result = (execute-request "POST" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -338,11 +436,16 @@ export def "api put" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request "PUT" $url -H $headers -b $body -a $auth --no-history=$no_history)
+    let result = (execute-request "PUT" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -361,11 +464,16 @@ export def "api patch" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request "PATCH" $url -H $headers -b $body -a $auth --no-history=$no_history)
+    let result = (execute-request "PATCH" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -383,11 +491,16 @@ export def "api delete" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request "DELETE" $url -H $headers -a $auth --no-history=$no_history)
+    let result = (execute-request "DELETE" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -407,11 +520,16 @@ export def "api request" [
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
-    let result = (execute-request $method $url -H $headers -b $body -a $auth --no-history=$no_history)
+    let result = (execute-request $method $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     if $raw {
@@ -429,6 +547,7 @@ export def "api send" [
     --collection (-c): string = "" # Collection name
     --raw (-r)                     # Return raw result
     --vars (-v): record = {}       # Extra variables
+    --dry-run (-d)                 # Output curl command instead of executing
 ] {
     let root = ($env.API_ROOT? | default (pwd))
 
@@ -497,10 +616,14 @@ export def "api send" [
     }
 
     # Execute request
-    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth)
+    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run)
 
     if $result == null {
         return null
+    }
+
+    if ($result.dry_run? | default false) {
+        return $result
     }
 
     # Run tests if defined
