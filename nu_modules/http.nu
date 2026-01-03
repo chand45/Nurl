@@ -1,6 +1,8 @@
 # HTTP Request Module
 # Core HTTP request functionality using curl
 
+use log.nu *
+
 # Internal function to save history (avoids module scoping issues)
 def save-to-history [request: record, response: record] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -321,7 +323,7 @@ def execute-request [
     let output = (curl ...$curl_args $request_url | complete)
 
     if $output.exit_code != 0 {
-        print $"(ansi red)Request failed: ($output.stderr)(ansi reset)"
+        log error $"Request failed: ($output.stderr)"
         return null
     }
 
@@ -352,23 +354,16 @@ def execute-request [
 # Format and display response
 def display-response [result: record] {
     let response = $result.response
-    let status_color = if $response.status >= 200 and $response.status < 300 {
-        "green"
-    } else if $response.status >= 400 {
-        "red"
-    } else {
-        "yellow"
-    }
 
-    print $"(ansi $status_color)($response.status) ($response.status_text)(ansi reset) (ansi dark_gray)($response.time_ms)ms, ($response.size_bytes) bytes(ansi reset)"
-    print ""
+    # Log status line (only shown with --debug)
+    log status $response.status $response.status_text $response.time_ms $response.size_bytes
 
-    # Print response body
+    # Print response body (only shown with --debug)
     if $response.body != null {
         if ($response.body | describe | str starts-with "record") or ($response.body | describe | str starts-with "list") {
-            $response.body | to json | print
+            log debug ($response.body | to json)
         } else {
-            print $response.body
+            log debug ($response.body | into string)
         }
     }
 }
@@ -381,21 +376,27 @@ export def "api get" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request "GET" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -409,21 +410,27 @@ export def "api post" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request "POST" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -437,21 +444,27 @@ export def "api put" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request "PUT" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -465,21 +478,27 @@ export def "api patch" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request "PATCH" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -492,21 +511,27 @@ export def "api delete" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request "DELETE" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -521,21 +546,27 @@ export def "api request" [
     --raw (-r)                     # Return raw result without display
     --no-history                   # Don't save to history
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let result = (execute-request $method $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -548,7 +579,9 @@ export def "api send" [
     --raw (-r)                     # Return raw result
     --vars (-v): record = {}       # Extra variables
     --dry-run (-d)                 # Output curl command instead of executing
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let root = ($env.API_ROOT? | default (pwd))
 
     # Find request file
@@ -568,7 +601,8 @@ export def "api send" [
         }
 
         if $found_path == null {
-            print $"(ansi red)Request '($name)' not found(ansi reset)"
+            log error $"Request '($name)' not found"
+            if $debug { $env.API_DEBUG = false }
             return null
         }
 
@@ -585,7 +619,8 @@ export def "api send" [
         # Try direct path
         let direct_path = $root | path join "collections" $"($name).nuon"
         if not ($direct_path | path exists) {
-            print $"(ansi red)Request '($name)' not found(ansi reset)"
+            log error $"Request '($name)' not found"
+            if $debug { $env.API_DEBUG = false }
             return null
         }
     }
@@ -619,17 +654,19 @@ export def "api send" [
     let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run)
 
     if $result == null {
+        if $debug { $env.API_DEBUG = false }
         return null
     }
 
     if ($result.dry_run? | default false) {
+        if $debug { $env.API_DEBUG = false }
         return $result
     }
 
     # Run tests if defined
     if ($request.tests? | default "") != "" {
         # Tests would be executed here
-        print $"(ansi dark_gray)Tests: not implemented yet(ansi reset)"
+        log debug "Tests: not implemented yet"
     }
 
     # Extract chain variables if defined
@@ -642,14 +679,16 @@ export def "api send" [
             }
         }
         if not ($extracted | is-empty) {
-            print $"(ansi dark_gray)Extracted: ($extracted | to nuon)(ansi reset)"
+            log debug $"Extracted: ($extracted | to nuon)"
         }
     }
 
     if $raw {
+        if $debug { $env.API_DEBUG = false }
         $result
     } else {
         display-response $result
+        if $debug { $env.API_DEBUG = false }
         $result
     }
 }
@@ -662,7 +701,9 @@ export def "api request create" [
     --headers (-H): record = {}    # Headers
     --body (-b): string = ""       # Body
     --collection (-c): string = "default"  # Collection name
+    --debug                        # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let root = ($env.API_ROOT? | default (pwd))
     let collection_path = ($root | path join "collections" $collection)
 
@@ -708,18 +749,22 @@ export def "api request create" [
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
     } | to nuon | save $request_file
 
-    print $"(ansi green)Request '($name)' created in collection '($collection)'(ansi reset)"
+    log success $"Request '($name)' created in collection '($collection)'"
+    if $debug { $env.API_DEBUG = false }
 }
 
 # List saved requests
 export def "api request list" [
     --collection (-c): string = ""  # Filter by collection
+    --debug                         # Show verbose output
 ] {
+    if $debug { $env.API_DEBUG = true }
     let root = ($env.API_ROOT? | default (pwd))
     let collections_dir = ($root | path join "collections")
 
     if not ($collections_dir | path exists) {
-        print "(ansi yellow)No collections found(ansi reset)"
+        log warn "No collections found"
+        if $debug { $env.API_DEBUG = false }
         return []
     }
 
@@ -757,10 +802,11 @@ export def "api request list" [
     }
 
     if ($requests | is-empty) {
-        print "(ansi yellow)No requests found(ansi reset)"
+        log warn "No requests found"
     } else {
         $requests | table
     }
+    if $debug { $env.API_DEBUG = false }
 }
 
 # Show response headers
