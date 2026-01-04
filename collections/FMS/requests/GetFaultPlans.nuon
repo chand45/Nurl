@@ -1,0 +1,1 @@
+{name: GetFaultPlans, collection: FMS, method: GET, url: "{{base_url}}/api/fault-plans", headers: {}, body: null, auth: { type: "bearer", token_ref: "dststoken" }, pre_request: null, tests: null, chain: null, created_at: "2026-01-05T00:20:13Z"}
