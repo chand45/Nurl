@@ -2,6 +2,8 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
+use auth.nu ["api auth get-config"]
 
 # Internal function to save history (avoids module scoping issues)
 def save-to-history [request: record, response: record] {
@@ -382,7 +384,8 @@ export def "api get" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request "GET" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -416,7 +419,8 @@ export def "api post" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request "POST" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "POST" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -450,7 +454,8 @@ export def "api put" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request "PUT" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "PUT" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -484,7 +489,8 @@ export def "api patch" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request "PATCH" $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "PATCH" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -517,7 +523,8 @@ export def "api delete" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request "DELETE" $url -H $headers -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -552,7 +559,8 @@ export def "api request" [
     --debug                        # Show verbose output
 ] {
     if $debug { $env.API_DEBUG = true }
-    let result = (execute-request $method $url -H $headers -b $body -a $auth --no-history=$no_history --dry-run=$dry_run)
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request $method $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
