@@ -695,8 +695,8 @@ export def "api send" [
 # Create a new saved request
 export def "api request create" [
     name: string                   # Request name
-    --method (-m): string = "GET"  # HTTP method
-    --url (-u): string             # Request URL
+    method: string                 # HTTP method
+    url: string                    # Request URL
     --headers (-H): record = {}    # Headers
     --body (-b): string = ""       # Body
     --collection (-c): string = "default"  # Collection name
@@ -737,6 +737,7 @@ export def "api request create" [
 
     {
         name: $name
+        collection: $collection
         method: $method
         url: $url
         headers: $headers
@@ -800,12 +801,116 @@ export def "api request list" [
         } | flatten
     }
 
+    if $debug { $env.API_DEBUG = false }
+
     if ($requests | is-empty) {
-        log warn "No requests found"
+        print $"(ansi yellow)No requests found(ansi reset)"
     } else {
         $requests | table
     }
-    if $debug { $env.API_DEBUG = false }
+}
+
+# Show details of a saved request
+export def "api request show" [
+    name: string                   # Request name
+    --collection (-c): string = ""  # Collection name (searches all if not specified)
+] {
+    let root = ($env.API_ROOT? | default (pwd))
+    let collections_dir = ($root | path join "collections")
+
+    let request_file = if $collection != "" {
+        # Search in specific collection
+        $root | path join "collections" $collection "requests" $"($name).nuon"
+    } else {
+        # Search across all collections
+        let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
+        let found = $colls | each {|coll_path|
+            let file = ($coll_path | path join "requests" $"($name).nuon")
+            if ($file | path exists) { $file } else { null }
+        } | where {|f| $f != null }
+        if ($found | is-empty) { null } else { $found | first }
+    }
+
+    if $request_file == null or not ($request_file | path exists) {
+        let scope = if $collection != "" { $"collection '($collection)'" } else { "any collection" }
+        print $"(ansi red)Request '($name)' not found in ($scope)(ansi reset)"
+        return
+    }
+
+    open $request_file
+}
+
+# Update an existing saved request
+export def "api request update" [
+    name: string                   # Request name
+    --method (-m): string          # New HTTP method
+    --url (-u): string             # New URL
+    --headers (-H): record         # New headers
+    --body (-b): string            # New body
+    --collection (-c): string = "default"  # Collection name
+] {
+    let root = ($env.API_ROOT? | default (pwd))
+    let request_file = ($root | path join "collections" $collection "requests" $"($name).nuon")
+
+    if not ($request_file | path exists) {
+        print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    mut req = (open $request_file)
+
+    if $method != null {
+        $req = ($req | upsert method $method)
+    }
+    if $url != null {
+        $req = ($req | upsert url $url)
+    }
+    if $headers != null {
+        $req = ($req | upsert headers $headers)
+    }
+    if $body != null {
+        let body_content = if $body != "" {
+            try {
+                $body | from json
+            } catch {
+                $body
+            }
+        } else {
+            null
+        }
+        $req = ($req | upsert body (if $body_content != null { { type: "json", content: $body_content } } else { null }))
+    }
+
+    $req = ($req | upsert updated_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
+    $req | to nuon | save -f $request_file
+
+    print $"(ansi green)Request '($name)' updated in collection '($collection)'(ansi reset)"
+}
+
+# Delete a saved request
+export def "api request delete" [
+    name: string                   # Request name
+    --collection (-c): string = "default"  # Collection name
+    --force (-f)                   # Skip confirmation prompt
+] {
+    let root = ($env.API_ROOT? | default (pwd))
+    let request_file = ($root | path join "collections" $collection "requests" $"($name).nuon")
+
+    if not ($request_file | path exists) {
+        print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    if not $force {
+        let confirm = (input $"Delete request '($name)' from collection '($collection)'? [y/N] ")
+        if $confirm !~ "^[yY]" {
+            print "Cancelled"
+            return
+        }
+    }
+
+    rm $request_file
+    print $"(ansi green)Request '($name)' deleted from collection '($collection)'(ansi reset)"
 }
 
 # Show response headers
