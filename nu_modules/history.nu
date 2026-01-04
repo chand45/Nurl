@@ -166,61 +166,6 @@ export def "api history show" [
         return null
     }
 
-    print $"(ansi blue)History Entry: ($entry.id)(ansi reset)"
-    print $"Timestamp: ($entry.timestamp)"
-    print $"Environment: ($entry.environment? | default 'none')"
-    print ""
-
-    print $"(ansi yellow)Request:(ansi reset)"
-    print $"  Method: ($entry.request.method)"
-    print $"  URL: ($entry.request.url)"
-
-    if ($entry.request.headers | is-not-empty) {
-        print "  Headers:"
-        $entry.request.headers | transpose key value | each {|h|
-            print $"    ($h.key): ($h.value)"
-        }
-    }
-
-    if ($entry.request.body? | default null) != null {
-        print "  Body:"
-        if ($entry.request.body | describe | str starts-with "record") or ($entry.request.body | describe | str starts-with "list") {
-            $entry.request.body | to json | lines | each {|line| print $"    ($line)" }
-        } else {
-            print $"    ($entry.request.body)"
-        }
-    }
-
-    print ""
-    let status_color = if $entry.response.status >= 200 and $entry.response.status < 300 {
-        "green"
-    } else if $entry.response.status >= 400 {
-        "red"
-    } else {
-        "yellow"
-    }
-
-    print $"(ansi yellow)Response:(ansi reset)"
-    print $"  Status: (ansi $status_color)($entry.response.status) ($entry.response.status_text)(ansi reset)"
-    print $"  Time: ($entry.response.time_ms)ms"
-    print $"  Size: ($entry.response.size_bytes) bytes"
-
-    if ($entry.response.headers | is-not-empty) {
-        print "  Headers:"
-        $entry.response.headers | transpose key value | each {|h|
-            print $"    ($h.key): ($h.value)"
-        }
-    }
-
-    if ($entry.response.body? | default null) != null {
-        print "  Body:"
-        if ($entry.response.body | describe | str starts-with "record") or ($entry.response.body | describe | str starts-with "list") {
-            $entry.response.body | to json | lines | each {|line| print $"    ($line)" }
-        } else {
-            print $"    ($entry.response.body)"
-        }
-    }
-
     $entry
 }
 
