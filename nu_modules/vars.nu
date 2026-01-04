@@ -228,7 +228,7 @@ export def "api vars list" [
     --include-secrets (-s)  # Include secret variable names
 ] {
     print $"(ansi blue)Built-in Variables:(ansi reset)"
-    [
+    print ([
         { name: "{{$uuid}}", description: "Random UUID v4" }
         { name: "{{$timestamp}}", description: "ISO 8601 timestamp" }
         { name: "{{$timestamp_unix}}", description: "Unix timestamp (seconds)" }
@@ -237,17 +237,17 @@ export def "api vars list" [
         { name: "{{$random_email}}", description: "Random email address" }
         { name: "{{$date}}", description: "Current date (YYYY-MM-DD)" }
         { name: "{{$time}}", description: "Current time (HH:MM:SS)" }
-    ] | table
+    ] | table)
 
     print ""
     print $"(ansi blue)Global Variables:(ansi reset)"
     let global_vars = (load-global-vars)
     if ($global_vars | is-empty) {
-        print "(ansi yellow)No global variables set. Use 'api vars set <key> <value>' to add.(ansi reset)"
+        print $"(ansi yellow)No global variables set. Use 'api vars set <key> <value>' to add.(ansi reset)"
     } else {
-        $global_vars | transpose name value | each {|row|
+        print ($global_vars | transpose name value | each {|row|
             { name: $"{{($row.name)}}", value: $row.value }
-        } | table
+        } | table)
     }
 
     if $include_secrets {

@@ -362,10 +362,11 @@ def display-response [result: record] {
 
     # Print response body (only shown with --debug)
     if $response.body != null {
-        if ($response.body | describe | str starts-with "record") or ($response.body | describe | str starts-with "list") {
+        let body_type = ($response.body | describe)
+        if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
             log debug ($response.body | to json)
         } else {
-            log debug ($response.body | into string)
+            log debug (try { $response.body | into string } catch { $response.body | to json })
         }
     }
 }
@@ -747,7 +748,7 @@ export def "api request create" [
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
     } | to nuon | save $request_file
 
-    log success $"Request '($name)' created in collection '($collection)'"
+    print $"(ansi green)Request '($name)' created in collection '($collection)'(ansi reset)"
     if $debug { $env.API_DEBUG = false }
 }
 

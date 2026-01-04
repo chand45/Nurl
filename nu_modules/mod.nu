@@ -318,22 +318,34 @@ export def "api collection export" [
         $"($name)-collection.zip"
     }
 
-    # Create a temporary export directory
-    let export_dir = ($root | path join ".export-temp" $name)
-    mkdir $export_dir
+    # Create a temporary export directory and copy collection into it
+    let export_temp = ($root | path join ".export-temp")
+    mkdir $export_temp
 
-    # Copy collection files (excluding any local-only files)
-    cp -r $collection_dir $export_dir
+    # Copy collection directory to export temp (creates .export-temp/$name/)
+    cp -r $collection_dir $export_temp
 
-    # Create zip using tar (cross-platform)
-    cd ($root | path join ".export-temp")
+    # Create tar archive from the export temp directory
+    cd $export_temp
     tar -czf $"../($output_file)" $name
     cd $root
 
     # Cleanup
-    rm -rf ($root | path join ".export-temp")
+    rm -rf $export_temp
 
     print $"(ansi green)Collection exported to: ($output_file)(ansi reset)"
+}
+
+# Convert Windows path to Unix path for tar compatibility
+def to-unix-path [path: string] {
+    # Try cygpath first, fall back to manual conversion
+    let result = (do { cygpath -u $path } | complete)
+    if $result.exit_code == 0 {
+        $result.stdout | str trim
+    } else {
+        # Manual conversion: C:\path -> /c/path
+        $path | str replace --regex '^([A-Za-z]):' { |m| $"/($m.0 | str downcase | str substring 0..1)" } | str replace --all '\\' '/'
+    }
 }
 
 # Import collection from a file
@@ -347,11 +359,16 @@ export def "api collection import" [
         return
     }
 
+    # Get absolute path and convert to Unix-style for tar compatibility on Windows
+    let abs_file = ($file | path expand)
+    let unix_file = (to-unix-path $abs_file)
+
     # Extract to temporary directory
     let temp_dir = ($root | path join ".import-temp")
+    let unix_temp = (to-unix-path $temp_dir)
     mkdir $temp_dir
 
-    tar -xzf $file -C $temp_dir
+    tar -xzf $unix_file -C $unix_temp
 
     # Find collection directory
     let imported = ls $temp_dir | where type == dir | first
@@ -653,9 +670,9 @@ export def "api collection env show" [
     print ""
 
     if ($env_data.variables? | default {} | is-empty) {
-        print "(ansi yellow)No variables set(ansi reset)"
+        print $"(ansi yellow)No variables set(ansi reset)"
     } else {
-        $env_data.variables | transpose key value | table
+        print ($env_data.variables | transpose key value | table)
     }
 }
 
