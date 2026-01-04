@@ -7,7 +7,6 @@ def get-api-root [] {
 }
 
 # Export submodules
-export use env.nu *
 export use vars.nu *
 export use http.nu *
 export use auth.nu *
@@ -788,60 +787,4 @@ export def "api collection env delete" [
     }
 
     print $"(ansi green)Environment '($name)' deleted from collection '($collection)'(ansi reset)"
-}
-
-# --- Migration Helper ---
-
-# Migrate root-level environments to a collection
-export def "api migrate-envs" [
-    collection: string  # Target collection to migrate environments to
-] {
-    let root = (get-api-root)
-    let old_envs_dir = ($root | path join "environments")
-
-    if not ($old_envs_dir | path exists) {
-        print "(ansi yellow)No root-level environments to migrate(ansi reset)"
-        return
-    }
-
-    let env_files = try { ls $old_envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
-
-    if ($env_files | is-empty) {
-        print "(ansi yellow)No environment files found in environments/(ansi reset)"
-        return
-    }
-
-    # Check if collection exists
-    if not (check-collection-exists $collection) {
-        print $"Creating collection '($collection)'..."
-        api collection create $collection
-    }
-
-    let new_envs_dir = ($root | path join "collections" $collection "environments")
-    if not ($new_envs_dir | path exists) {
-        mkdir $new_envs_dir
-    }
-
-    print $"(ansi blue)Migrating environments to collection '($collection)':(ansi reset)"
-
-    for file in $env_files {
-        let env_data = (open $file)
-        let name = ($file | path basename)
-        let new_path = ($new_envs_dir | path join $name)
-
-        if ($new_path | path exists) {
-            print $"  (ansi yellow)Skipped: ($name) (already exists)(ansi reset)"
-        } else {
-            cp $file $new_path
-            print $"  (ansi green)Migrated: ($name)(ansi reset)"
-        }
-    }
-
-    print ""
-    print $"(ansi green)Migration complete!(ansi reset)"
-    print ""
-    print "Next steps:"
-    print $"  1. Set active environment: api collection env use ($collection) <env-name>"
-    print $"  2. Delete old environments folder: rm -rf ($old_envs_dir)"
-    print $"  3. Remove 'default_environment' from config.nuon if present"
 }
