@@ -1,5 +1,13 @@
 # Environment Management Module
-# Handles environment variables for different contexts (dev, staging, prod, etc.)
+# DEPRECATED: Root-level environments are deprecated.
+# Use collection-level environments instead: api collection env <command>
+
+# Helper to show deprecation warning
+def show-deprecation-warning [new_command: string] {
+    print $"(ansi yellow)DEPRECATED: Root-level environments are deprecated.(ansi reset)"
+    print $"Use '($new_command)' instead."
+    print ""
+}
 
 # Get the environments directory path
 def get-envs-dir [] {
@@ -21,12 +29,14 @@ def get-env-path [name: string] {
     (get-envs-dir) | path join $"($name).nuon"
 }
 
-# List all environments
+# List all environments (DEPRECATED)
 export def "api env list" [] {
+    show-deprecation-warning "api collection env list <collection>"
+
     let dir = (get-envs-dir)
 
     if not ($dir | path exists) {
-        print "(ansi yellow)No environments found. Create one with: api env create <name>(ansi reset)"
+        print "(ansi yellow)No root-level environments found.(ansi reset)"
         return []
     }
 
@@ -38,7 +48,7 @@ export def "api env list" [] {
     } else { "" }
 
     if ($envs | is-empty) {
-        print "(ansi yellow)No environments found. Create one with: api env create <name>(ansi reset)"
+        print "(ansi yellow)No root-level environments found.(ansi reset)"
         return []
     }
 
@@ -52,11 +62,13 @@ export def "api env list" [] {
     } | table
 }
 
-# Create a new environment
+# Create a new environment (DEPRECATED)
 export def "api env create" [
     name: string  # Environment name (e.g., dev, staging, prod)
     --activate (-a)  # Activate this environment after creation
 ] {
+    show-deprecation-warning "api collection env create <collection> <name>"
+
     let dir = (ensure-envs-dir)
     let env_path = (get-env-path $name)
 
@@ -79,8 +91,10 @@ export def "api env create" [
     }
 }
 
-# Switch to an environment
+# Switch to an environment (DEPRECATED)
 export def "api env use" [name: string] {
+    show-deprecation-warning "api collection env use <collection> <name>"
+
     let env_path = (get-env-path $name)
 
     if not ($env_path | path exists) {
@@ -105,10 +119,12 @@ export def "api env use" [name: string] {
     print $"(ansi green)Switched to environment: ($name)(ansi reset)"
 }
 
-# Show environment variables
+# Show environment variables (DEPRECATED)
 export def "api env show" [
     name?: string  # Environment name (defaults to current)
 ] {
+    show-deprecation-warning "api collection env show <collection> [name]"
+
     let target = if $name != null {
         $name
     } else {
@@ -122,7 +138,7 @@ export def "api env show" [
     }
 
     if $target == null {
-        print "(ansi yellow)No environment selected. Use: api env use <name>(ansi reset)"
+        print "(ansi yellow)No environment selected.(ansi reset)"
         return
     }
 
@@ -148,12 +164,14 @@ export def "api env show" [
     }
 }
 
-# Set a variable in the current environment
+# Set a variable in the current environment (DEPRECATED)
 export def "api env set" [
     key: string    # Variable name
     value: string  # Variable value
     --target (-t): string  # Target environment (defaults to current)
 ] {
+    show-deprecation-warning "api collection env set <collection> <key> <value>"
+
     let target_env = if $target != null {
         $target
     } else {
@@ -167,7 +185,7 @@ export def "api env set" [
     }
 
     if $target_env == null {
-        print "(ansi red)No environment selected. Use: api env use <name>(ansi reset)"
+        print "(ansi red)No environment selected.(ansi reset)"
         return
     }
 
@@ -185,11 +203,13 @@ export def "api env set" [
     print $"(ansi green)Set ($key) = ($value) in ($target_env)(ansi reset)"
 }
 
-# Unset (remove) a variable from the current environment
+# Unset (remove) a variable from the current environment (DEPRECATED)
 export def "api env unset" [
     key: string  # Variable name to remove
     --target (-t): string  # Target environment (defaults to current)
 ] {
+    show-deprecation-warning "api collection env unset <collection> <key>"
+
     let target_env = if $target != null {
         $target
     } else {
@@ -203,7 +223,7 @@ export def "api env unset" [
     }
 
     if $target_env == null {
-        print "(ansi red)No environment selected. Use: api env use <name>(ansi reset)"
+        print "(ansi red)No environment selected.(ansi reset)"
         return
     }
 
@@ -227,11 +247,13 @@ export def "api env unset" [
     print $"(ansi green)Removed ($key) from ($target_env)(ansi reset)"
 }
 
-# Delete an environment
+# Delete an environment (DEPRECATED)
 export def "api env delete" [
     name: string  # Environment name to delete
     --force (-f)  # Skip confirmation
 ] {
+    show-deprecation-warning "api collection env delete <collection> <name>"
+
     let env_path = (get-env-path $name)
 
     if not ($env_path | path exists) {
@@ -263,11 +285,13 @@ export def "api env delete" [
     print $"(ansi green)Environment '($name)' deleted(ansi reset)"
 }
 
-# Copy an environment
+# Copy an environment (DEPRECATED)
 export def "api env copy" [
     source: string  # Source environment name
     target: string  # Target environment name
 ] {
+    show-deprecation-warning "Use api collection env create followed by api collection env set"
+
     let source_path = (get-env-path $source)
     let target_path = (get-env-path $target)
 
@@ -289,26 +313,16 @@ export def "api env copy" [
     print $"(ansi green)Copied environment '($source)' to '($target)'(ansi reset)"
 }
 
-# Get all variables from current environment (for internal use)
+# Get all variables from global variables (for backward compatibility)
+# This now returns global variables instead of root-level environment variables
 export def "api env get-vars" [] {
+    # Return global variables for backward compatibility
     let root = ($env.API_ROOT? | default (pwd))
-    let config_path = ($root | path join "config.nuon")
+    let vars_path = ($root | path join "variables.nuon")
 
-    let current = if ($config_path | path exists) {
-        (open $config_path).default_environment?
+    if ($vars_path | path exists) {
+        open $vars_path
     } else {
-        null
+        {}
     }
-
-    if $current == null {
-        return {}
-    }
-
-    let env_path = (get-env-path $current)
-
-    if not ($env_path | path exists) {
-        return {}
-    }
-
-    (open $env_path).variables? | default {}
 }

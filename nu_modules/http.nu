@@ -277,27 +277,29 @@ def execute-request [
     --no-interpolate   # Skip variable interpolation
     --no-history       # Don't save to history
     --dry-run (-d)     # Output curl command instead of executing
+    --collection (-c): string = ""   # Collection context for variable resolution
+    --extra-vars (-v): record = {}   # Extra variables for interpolation
 ] {
     # Merge default headers with provided headers
     let all_headers = (get-default-headers | merge $headers)
 
-    # Interpolate variables
+    # Interpolate variables with collection context
     let final_url = if $no_interpolate {
         $url
     } else {
-        api vars interpolate $url
+        api vars interpolate $url -c $collection -v $extra_vars
     }
 
     let final_headers = if $no_interpolate {
         $all_headers
     } else {
-        api vars interpolate-record $all_headers
+        api vars interpolate-record $all_headers -c $collection -v $extra_vars
     }
 
     let final_body = if $no_interpolate or $body == "" {
         $body
     } else {
-        api vars interpolate $body
+        api vars interpolate $body -c $collection -v $extra_vars
     }
 
     # Handle API key in query string
@@ -574,7 +576,6 @@ export def "api request" [
 # Send a saved request by name
 export def "api send" [
     name: string                   # Request name (path in collection)
-    --environment (-e): string = ""  # Environment to use
     --collection (-c): string = "" # Collection name
     --raw (-r)                     # Return raw result
     --vars (-v): record = {}       # Extra variables
@@ -584,7 +585,8 @@ export def "api send" [
     if $debug { $env.API_DEBUG = true }
     let root = ($env.API_ROOT? | default (pwd))
 
-    # Find request file
+    # Find request file and determine collection name
+    mut coll_name = $collection
     let collection_path = if $collection != "" {
         $root | path join "collections" $collection
     } else {
@@ -596,6 +598,7 @@ export def "api send" [
             let request_file = ($coll_path | path join "requests" $"($name).nuon")
             if ($request_file | path exists) {
                 $found_path = $coll_path
+                $coll_name = ($coll_path | path basename)
                 break
             }
         }
@@ -628,11 +631,6 @@ export def "api send" [
     # Load request
     let request = (open $request_path)
 
-    # Switch environment temporarily if specified
-    if $environment != "" {
-        api env use $environment
-    }
-
     # Build headers
     let headers = ($request.headers? | default {})
 
@@ -650,8 +648,8 @@ export def "api send" [
         {}
     }
 
-    # Execute request
-    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run)
+    # Execute request with collection context for variable resolution
+    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }

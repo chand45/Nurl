@@ -36,7 +36,6 @@ export def "api init" [] {
     let config_path = ($root | path join "config.nuon")
     if not ($config_path | path exists) {
         {
-            default_environment: null
             default_headers: {
                 "Content-Type": "application/json"
                 "Accept": "application/json"
@@ -53,6 +52,12 @@ export def "api init" [] {
         } | to nuon | save $config_path
     }
 
+    # Create global variables if it doesn't exist
+    let vars_path = ($root | path join "variables.nuon")
+    if not ($vars_path | path exists) {
+        {} | to nuon | save $vars_path
+    }
+
     # Create secrets if it doesn't exist
     let secrets_path = ($root | path join "secrets.nuon")
     if not ($secrets_path | path exists) {
@@ -66,19 +71,25 @@ export def "api init" [] {
 
     print $"(ansi green)API workspace initialized at: ($root)(ansi reset)"
     print "  - config.nuon: Global configuration"
+    print "  - variables.nuon: Global variables"
     print "  - secrets.nuon: Credentials storage (gitignored)"
-    print "  - collections/: Request collections"
+    print "  - collections/: Request collections (with per-collection environments)"
     print "  - history/: Request/response history"
 }
 
 # Show current API client status
 export def "api status" [] {
     let root = (get-api-root)
-    let config = (api config get)
 
     print $"(ansi blue)API Client Status(ansi reset)"
     print $"Root: ($root)"
-    print $"Current Environment: ($config.default_environment? | default 'none')"
+
+    # Count global variables
+    let vars_path = ($root | path join "variables.nuon")
+    let global_vars_count = if ($vars_path | path exists) {
+        (open $vars_path) | columns | length
+    } else { 0 }
+    print $"Global Variables: ($global_vars_count)"
 
     # Count collections
     let collections_path = ($root | path join "collections")
@@ -105,7 +116,6 @@ export def "api config get" [] {
         open $config_path
     } else {
         {
-            default_environment: null
             default_headers: {
                 "Content-Type": "application/json"
                 "Accept": "application/json"
@@ -140,13 +150,19 @@ export def "api help" [] {
   api config get                Show configuration
   api config set <key> <value>  Set configuration
 
-(ansi yellow)Environments:(ansi reset)
-  api env list                  List all environments
-  api env create <name>         Create new environment
-  api env use <name>            Switch active environment
-  api env show [name]           Show environment variables
-  api env set <key> <value>     Set variable in current env
-  api env delete <name>         Delete environment
+(ansi yellow)Global Variables:(ansi reset)
+  api vars list                 List global variables and built-ins
+  api vars set <key> <value>    Set a global variable
+  api vars unset <key>          Remove a global variable
+
+(ansi yellow)Collection Environments:(ansi reset)
+  api collection env list <c>        List environments for collection
+  api collection env create <c> <n>  Create environment in collection
+  api collection env use <c> <n>     Switch active environment
+  api collection env show <c> [n]    Show environment variables
+  api collection env set <c> <k> <v> Set variable in active/specified env
+  api collection env unset <c> <k>   Remove variable from active/specified env
+  api collection env delete <c> <n>  Delete environment from collection
 
 (ansi yellow)Authentication:(ansi reset)
   api auth bearer set <n> <t>   Set bearer token
@@ -156,12 +172,12 @@ export def "api help" [] {
   api auth show                 Show auth status
 
 (ansi yellow)Requests:(ansi reset)
-  api get <url>                 GET request
+  api get <url>                 GET request [global vars]
   api post <url> -b <body>      POST request
   api put <url> -b <body>       PUT request
   api patch <url> -b <body>     PATCH request
   api delete <url>              DELETE request
-  api send <name>               Send saved request
+  api send <name> -c <coll>     Send saved request [collection env]
   api request create <name>     Create new request
 
 (ansi yellow)History:(ansi reset)
@@ -173,14 +189,22 @@ export def "api help" [] {
 (ansi yellow)Collections:(ansi reset)
   api collection list           List collections
   api collection create <name>  Create collection
+  api collection show <name>    Show collection details
   api collection export <name>  Export collection
   api collection import <file>  Import collection
 
 (ansi yellow)Chaining:(ansi reset)
   api chain run <file>          Run request chain
+  api chain exec <file>         Execute chain from file
 
 (ansi yellow)TUI:(ansi reset)
   api tui                       Launch terminal UI
+
+(ansi dark_gray)Variable Resolution Order [narrowest wins]:(ansi reset)
+  1. Request --vars flag
+  2. Collection active environment
+  3. Global variables
+  4. Built-in vars
 "
 }
 
@@ -192,7 +216,7 @@ export def "api collection list" [] {
     let collections_dir = ($root | path join "collections")
 
     if not ($collections_dir | path exists) {
-        print "(ansi yellow)No collections found(ansi reset)"
+        print $"(ansi yellow)No collections found(ansi reset)"
         return []
     }
 
@@ -217,7 +241,7 @@ export def "api collection list" [] {
     }
 
     if ($collections | is-empty) {
-        print "(ansi yellow)No collections found(ansi reset)"
+        print $"(ansi yellow)No collections found(ansi reset)"
     } else {
         $collections | table
     }
@@ -379,13 +403,33 @@ export def "api collection show" [name: string] {
     if ($meta.description? | default "") != "" {
         print $"Description: ($meta.description)"
     }
+
+    # List collection environments
+    let envs_dir = ($collection_dir | path join "environments")
+    if ($envs_dir | path exists) {
+        let env_files = try { ls $envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
+        let envs = $env_files | each {|f|
+            let data = (open $f)
+            {
+                name: ($data.name? | default ($f | path basename | str replace ".nuon" ""))
+                description: ($data.description? | default "" | str substring 0..40)
+                variables: ($data.variables? | default {} | columns | length)
+            }
+        }
+
+        if not ($envs | is-empty) {
+            print $"(ansi yellow)Environments:(ansi reset)"
+            print ($envs | table)
+        }
+    }
     print ""
 
     # List requests
+    print $"(ansi yellow)Requests:(ansi reset)"
     let requests_dir = ($collection_dir | path join "requests")
-    if ($requests_dir | path exists) {
+    let requests = if ($requests_dir | path exists) {
         let request_files = try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] }
-        let requests = $request_files | each {|f|
+        $request_files | each {|f|
             let req = (open $f)
             {
                 name: ($req.name? | default ($f | path basename | str replace ".nuon" ""))
@@ -393,26 +437,11 @@ export def "api collection show" [name: string] {
                 url: ($req.url? | default "" | str substring 0..50)
             }
         }
-
-        if not ($requests | is-empty) {
-            print "(ansi yellow)Requests:(ansi reset)"
-            $requests | table
-        }
+    } else {
+        []
     }
 
-    # List collection environments
-    let envs_dir = ($collection_dir | path join "environments")
-    if ($envs_dir | path exists) {
-        let envs = try { ls $envs_dir | where name =~ '\.nuon$' | get name | each {|f| $f | path basename | str replace ".nuon" "" } } catch { [] }
-
-        if not ($envs | is-empty) {
-            print ""
-            print "(ansi yellow)Environments:(ansi reset)"
-            $envs | each {|e| print $"  - ($e)" }
-        }
-    }
-
-    $meta
+    $requests
 }
 
 # Copy a collection
@@ -446,4 +475,356 @@ export def "api collection copy" [
     }
 
     print $"(ansi green)Collection '($source)' copied to '($target)'(ansi reset)"
+}
+
+# --- Collection Environment Management ---
+
+# Helper: Get collection meta path
+def get-coll-meta-path [collection: string] {
+    let root = (get-api-root)
+    $root | path join "collections" $collection "meta.nuon"
+}
+
+# Helper: Load collection meta
+def load-coll-meta [collection: string] {
+    let path = (get-coll-meta-path $collection)
+    if ($path | path exists) {
+        open $path
+    } else {
+        { active_environment: null }
+    }
+}
+
+# Helper: Save collection meta
+def save-coll-meta [collection: string, meta: record] {
+    let path = (get-coll-meta-path $collection)
+    $meta | to nuon | save -f $path
+}
+
+# Helper: Get collection environment file path
+def get-coll-env-path [collection: string, env_name: string] {
+    let root = (get-api-root)
+    $root | path join "collections" $collection "environments" $"($env_name).nuon"
+}
+
+# Helper: Check if collection exists
+def check-collection-exists [collection: string] {
+    let root = (get-api-root)
+    let collection_dir = ($root | path join "collections" $collection)
+    if not ($collection_dir | path exists) {
+        print $"(ansi red)Collection '($collection)' not found(ansi reset)"
+        return false
+    }
+    true
+}
+
+# List environments for a collection
+export def "api collection env list" [
+    collection: string  # Collection name
+] {
+    if not (check-collection-exists $collection) { return [] }
+
+    let root = (get-api-root)
+    let envs_dir = ($root | path join "collections" $collection "environments")
+
+    if not ($envs_dir | path exists) {
+        print $"(ansi yellow)No environments found for collection '($collection)'(ansi reset)"
+        print $"Use 'api collection env create ($collection) <name>' to create one."
+        return []
+    }
+
+    let meta = (load-coll-meta $collection)
+    let active = ($meta.active_environment? | default "")
+
+    let env_files = try { ls $envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
+
+    if ($env_files | is-empty) {
+        print $"(ansi yellow)No environments found for collection '($collection)'(ansi reset)"
+        print $"Use 'api collection env create ($collection) <name>' to create one."
+        return []
+    }
+
+    $env_files | each {|f|
+        let data = (open $f)
+        let name = ($data.name? | default ($f | path basename | str replace ".nuon" ""))
+        {
+            name: $name
+            active: (if $name == $active { "✓" } else { "" })
+            variables: ($data.variables? | default {} | columns | length)
+            description: ($data.description? | default "" | str substring 0..40)
+        }
+    } | table
+}
+
+# Create a new environment for a collection
+export def "api collection env create" [
+    collection: string  # Collection name
+    name: string        # Environment name
+    --activate (-a)     # Activate after creation
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let root = (get-api-root)
+    let envs_dir = ($root | path join "collections" $collection "environments")
+
+    if not ($envs_dir | path exists) {
+        mkdir $envs_dir
+    }
+
+    let env_path = ($envs_dir | path join $"($name).nuon")
+
+    if ($env_path | path exists) {
+        print $"(ansi red)Environment '($name)' already exists in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    {
+        name: $name
+        description: ""
+        variables: {}
+        created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
+    } | to nuon | save $env_path
+
+    print $"(ansi green)Environment '($name)' created in collection '($collection)'(ansi reset)"
+
+    if $activate {
+        api collection env use $collection $name
+    }
+}
+
+# Switch active environment for a collection
+export def "api collection env use" [
+    collection: string  # Collection name
+    name: string        # Environment name
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let env_path = (get-coll-env-path $collection $name)
+
+    if not ($env_path | path exists) {
+        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
+        print "Available environments:"
+        api collection env list $collection
+        return
+    }
+
+    mut meta = (load-coll-meta $collection)
+    $meta = ($meta | upsert active_environment $name)
+    save-coll-meta $collection $meta
+
+    print $"(ansi green)Switched to environment '($name)' for collection '($collection)'(ansi reset)"
+}
+
+# Show environment variables for a collection
+export def "api collection env show" [
+    collection: string  # Collection name
+    name?: string       # Environment name (defaults to active)
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let meta = (load-coll-meta $collection)
+
+    let target = if $name != null {
+        $name
+    } else {
+        $meta.active_environment? | default null
+    }
+
+    if $target == null {
+        print $"(ansi yellow)No active environment for collection '($collection)'(ansi reset)"
+        print $"Use 'api collection env use ($collection) <name>' to activate one."
+        return
+    }
+
+    let env_path = (get-coll-env-path $collection $target)
+
+    if not ($env_path | path exists) {
+        print $"(ansi red)Environment '($target)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    let env_data = (open $env_path)
+
+    print $"(ansi blue)Collection: ($collection)(ansi reset)"
+    print $"(ansi blue)Environment: ($target)(ansi reset)"
+    if ($env_data.description? | default "" | is-not-empty) {
+        print $"Description: ($env_data.description)"
+    }
+    print ""
+
+    if ($env_data.variables? | default {} | is-empty) {
+        print "(ansi yellow)No variables set(ansi reset)"
+    } else {
+        $env_data.variables | transpose key value | table
+    }
+}
+
+# Set a variable in a collection's environment
+export def "api collection env set" [
+    collection: string  # Collection name
+    key: string         # Variable name
+    value: string       # Variable value
+    --target (-t): string  # Target environment (defaults to active)
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let meta = (load-coll-meta $collection)
+
+    let target_env = if $target != null {
+        $target
+    } else {
+        $meta.active_environment? | default null
+    }
+
+    if $target_env == null {
+        print $"(ansi red)No active environment for collection '($collection)'(ansi reset)"
+        print "Use --target to specify an environment or activate one first."
+        return
+    }
+
+    let env_path = (get-coll-env-path $collection $target_env)
+
+    if not ($env_path | path exists) {
+        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    mut env_data = (open $env_path)
+    $env_data = ($env_data | upsert variables ($env_data.variables | upsert $key $value))
+    $env_data | to nuon | save -f $env_path
+
+    print $"(ansi green)Set ($key) = ($value) in ($collection)/($target_env)(ansi reset)"
+}
+
+# Unset a variable in a collection's environment
+export def "api collection env unset" [
+    collection: string  # Collection name
+    key: string         # Variable name to remove
+    --target (-t): string  # Target environment (defaults to active)
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let meta = (load-coll-meta $collection)
+
+    let target_env = if $target != null {
+        $target
+    } else {
+        $meta.active_environment? | default null
+    }
+
+    if $target_env == null {
+        print $"(ansi red)No active environment for collection '($collection)'(ansi reset)"
+        print "Use --target to specify an environment or activate one first."
+        return
+    }
+
+    let env_path = (get-coll-env-path $collection $target_env)
+
+    if not ($env_path | path exists) {
+        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    mut env_data = (open $env_path)
+
+    if not ($key in ($env_data.variables? | default {})) {
+        print $"(ansi yellow)Variable '($key)' not found in ($collection)/($target_env)(ansi reset)"
+        return
+    }
+
+    $env_data = ($env_data | upsert variables ($env_data.variables | reject $key))
+    $env_data | to nuon | save -f $env_path
+
+    print $"(ansi green)Removed ($key) from ($collection)/($target_env)(ansi reset)"
+}
+
+# Delete an environment from a collection
+export def "api collection env delete" [
+    collection: string  # Collection name
+    name: string        # Environment name to delete
+    --force (-f)        # Skip confirmation
+] {
+    if not (check-collection-exists $collection) { return }
+
+    let env_path = (get-coll-env-path $collection $name)
+
+    if not ($env_path | path exists) {
+        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
+        return
+    }
+
+    if not $force {
+        let confirm = (input $"Delete environment '($name)' from collection '($collection)'? [y/N] ")
+        if $confirm !~ "^[yY]" {
+            print "Cancelled"
+            return
+        }
+    }
+
+    rm $env_path
+
+    # Clear active environment if this was it
+    mut meta = (load-coll-meta $collection)
+    if ($meta.active_environment? == $name) {
+        $meta = ($meta | upsert active_environment null)
+        save-coll-meta $collection $meta
+    }
+
+    print $"(ansi green)Environment '($name)' deleted from collection '($collection)'(ansi reset)"
+}
+
+# --- Migration Helper ---
+
+# Migrate root-level environments to a collection
+export def "api migrate-envs" [
+    collection: string  # Target collection to migrate environments to
+] {
+    let root = (get-api-root)
+    let old_envs_dir = ($root | path join "environments")
+
+    if not ($old_envs_dir | path exists) {
+        print "(ansi yellow)No root-level environments to migrate(ansi reset)"
+        return
+    }
+
+    let env_files = try { ls $old_envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
+
+    if ($env_files | is-empty) {
+        print "(ansi yellow)No environment files found in environments/(ansi reset)"
+        return
+    }
+
+    # Check if collection exists
+    if not (check-collection-exists $collection) {
+        print $"Creating collection '($collection)'..."
+        api collection create $collection
+    }
+
+    let new_envs_dir = ($root | path join "collections" $collection "environments")
+    if not ($new_envs_dir | path exists) {
+        mkdir $new_envs_dir
+    }
+
+    print $"(ansi blue)Migrating environments to collection '($collection)':(ansi reset)"
+
+    for file in $env_files {
+        let env_data = (open $file)
+        let name = ($file | path basename)
+        let new_path = ($new_envs_dir | path join $name)
+
+        if ($new_path | path exists) {
+            print $"  (ansi yellow)Skipped: ($name) (already exists)(ansi reset)"
+        } else {
+            cp $file $new_path
+            print $"  (ansi green)Migrated: ($name)(ansi reset)"
+        }
+    }
+
+    print ""
+    print $"(ansi green)Migration complete!(ansi reset)"
+    print ""
+    print "Next steps:"
+    print $"  1. Set active environment: api collection env use ($collection) <env-name>"
+    print $"  2. Delete old environments folder: rm -rf ($old_envs_dir)"
+    print $"  3. Remove 'default_environment' from config.nuon if present"
 }
