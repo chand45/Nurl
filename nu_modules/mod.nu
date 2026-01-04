@@ -177,7 +177,13 @@ export def "api help" [] {
   api patch <url> -b <body>     PATCH request
   api delete <url>              DELETE request
   api send <name> -c <coll>     Send saved request [collection env]
-  api request create <name>     Create new request
+
+(ansi yellow)Saved Requests:(ansi reset)
+  api request create <n> <m> <u> Create request [name method url]
+  api request list              List saved requests
+  api request show <name>       Show request details
+  api request update <name>     Update request fields
+  api request delete <name>     Delete saved request
 
 (ansi yellow)History:(ansi reset)
   api history list              List recent requests
