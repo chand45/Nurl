@@ -1,1 +1,0 @@
-{name: dev, description: "Development environment", variables: {base_url: "https://jsonplaceholder.typicode.com", post_id: "1", post_title: "My Test Post", post_body: "This is test content", api_key: "test123"}}
