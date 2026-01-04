@@ -17,7 +17,8 @@ api help
 
 ## Features
 
-- **Environment Management**: Create and switch between dev, staging, prod environments
+- **Global Variables**: Workspace-wide variables in `variables.nuon`
+- **Collection Environments**: Per-collection switchable environments (dev, staging, prod)
 - **Variable Interpolation**: Use `{{variable}}` syntax in URLs, headers, and bodies
 - **Authentication**: Bearer tokens, Basic Auth, API Keys, OAuth2
 - **History**: Automatic request/response logging with search and resend
@@ -25,35 +26,65 @@ api help
 - **Collections**: Shareable request collections (git-friendly)
 - **TUI**: Interactive terminal UI for browsing and testing
 
+## Variable Resolution
+
+Variables are resolved in this order (narrowest wins):
+1. Request `--vars` flag (highest priority)
+2. Collection's active environment
+3. Global variables (`variables.nuon`)
+4. Built-in variables
+
 ## Usage Examples
 
-### Environment Setup
+### Global Variables
 
 ```nushell
-# Create and use an environment
-api env create dev
-api env use dev
+# Set global variables (available to all requests)
+api vars set api_version "v1"
+api vars set timeout "30"
 
-# Set variables
-api env set base_url "http://localhost:3000"
-api env set api_version "v1"
+# List global variables
+api vars list
 
-# Show current environment
-api env show
+# Remove a global variable
+api vars unset timeout
+```
+
+### Collection Environments
+
+```nushell
+# Create an environment for a collection
+api collection env create my-api dev
+api collection env create my-api prod
+
+# Set variables in an environment
+api collection env use my-api dev
+api collection env set my-api base_url "http://localhost:3000"
+api collection env set my-api api_key "dev-key-123"
+
+# Switch environments
+api collection env use my-api prod
+api collection env set my-api base_url "https://api.example.com"
+
+# Show environment variables
+api collection env show my-api
 ```
 
 ### Making Requests
 
 ```nushell
-# Simple requests
+# Simple requests (use global variables only)
 api get "https://api.example.com/users"
 api post "https://api.example.com/users" -b '{"name": "John"}'
 
-# Using environment variables
+# Using variables
 api get "{{base_url}}/{{api_version}}/users"
 
 # With headers
 api get "{{base_url}}/users" -H { "X-Custom-Header": "value" }
+
+# Send saved request (uses collection environment + global vars)
+api send get-users -c my-api
 ```
 
 ### Authentication
@@ -147,18 +178,24 @@ Use these in any request:
 ApiRequests/
 ├── api.nu                 # Entry point (source this file)
 ├── config.nuon            # Global configuration
+├── variables.nuon         # Global variables
 ├── secrets.nuon           # Credentials (gitignored)
 ├── nu_modules/            # Core modules
-│   ├── mod.nu             # Main module
+│   ├── mod.nu             # Main module + collection commands
 │   ├── http.nu            # HTTP requests
 │   ├── auth.nu            # Authentication
-│   ├── env.nu             # Environments
 │   ├── vars.nu            # Variable interpolation
 │   ├── history.nu         # Request history
 │   ├── chain.nu           # Request chaining
 │   └── tui.nu             # Terminal UI
 ├── collections/           # Request collections
-├── environments/          # Environment files
+│   └── <collection>/
+│       ├── collection.nuon    # Collection metadata
+│       ├── meta.nuon          # Active environment tracking
+│       ├── environments/      # Collection-specific environments
+│       │   ├── dev.nuon
+│       │   └── prod.nuon
+│       └── requests/          # Saved requests
 ├── chains/                # Chain definitions
 └── history/               # Request/response history
 ```
@@ -173,18 +210,18 @@ ApiRequests/
 The included `jsonplaceholder` collection demonstrates using the [JSONPlaceholder](https://jsonplaceholder.typicode.com) API:
 
 ```nushell
-# Set up environment
-api env use dev
+# Set up collection environment
+api collection env use jsonplaceholder default
 
 # Get all posts
-api send get-posts -c jsonplaceholder
+api send get-posts
 
 # Get a specific post
-api env set post_id "1"
-api send get-post -c jsonplaceholder
+api collection env set jsonplaceholder post_id "1"
+api send get-post
 
 # Create a post
-api send create-post -c jsonplaceholder
+api send create-post
 
 # Run the example chain
 api chain exec example-workflow

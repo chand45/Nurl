@@ -364,7 +364,7 @@ export def "api auth show" [] {
         $secrets.tokens | transpose name config | each {|row|
             let masked = ($row.config.bearer | str substring 0..10) + "..."
             print $"  - ($row.name): ($masked)"
-        }
+        } | ignore
     }
 
     print ""
@@ -374,7 +374,7 @@ export def "api auth show" [] {
     } else {
         $secrets.basic_auth | transpose name config | each {|row|
             print $"  - ($row.name): ($row.config.username)"
-        }
+        } | ignore
     }
 
     print ""
@@ -390,7 +390,7 @@ export def "api auth show" [] {
                 $"header:($row.config.header_name)"
             }
             print $"  - ($row.name): ($masked) (($location))"
-        }
+        } | ignore
     }
 
     print ""
@@ -402,15 +402,15 @@ export def "api auth show" [] {
             let status = if ($row.config.access_token? | default null) != null {
                 let expires = ($row.config.expires_at? | default "")
                 if $expires != "" {
-                    $"(ansi green)active(ansi reset) (expires: ($expires))"
+                    $"(ansi green)active(ansi reset) \(expires: ($expires)\)"
                 } else {
-                    "(ansi green)active(ansi reset)"
+                    $"(ansi green)active(ansi reset)"
                 }
             } else {
-                "(ansi yellow)not authenticated(ansi reset)"
+                $"(ansi yellow)not authenticated(ansi reset)"
             }
             print $"  - ($row.name): ($status)"
-        }
+        } | ignore
     }
 }
 

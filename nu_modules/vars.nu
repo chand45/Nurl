@@ -1,6 +1,91 @@
 # Variable Interpolation Module
 # Handles {{variable}} replacement and built-in dynamic variables
 
+# ============================================================================
+# Global Variables Management
+# ============================================================================
+
+# Get the global variables file path
+def get-global-vars-path [] {
+    let root = ($env.API_ROOT? | default (pwd))
+    $root | path join "variables.nuon"
+}
+
+# Load global variables from variables.nuon
+def load-global-vars [] {
+    let path = (get-global-vars-path)
+    if ($path | path exists) {
+        open $path
+    } else {
+        {}
+    }
+}
+
+# Save global variables to variables.nuon
+def save-global-vars [vars: record] {
+    let path = (get-global-vars-path)
+    $vars | to nuon | save -f $path
+}
+
+# Get collection meta path
+def get-collection-meta-path [collection: string] {
+    let root = ($env.API_ROOT? | default (pwd))
+    $root | path join "collections" $collection "meta.nuon"
+}
+
+# Load collection meta
+def load-collection-meta [collection: string] {
+    let path = (get-collection-meta-path $collection)
+    if ($path | path exists) {
+        open $path
+    } else {
+        { active_environment: null }
+    }
+}
+
+# Get collection environment path
+def get-collection-env-path [collection: string, env_name: string] {
+    let root = ($env.API_ROOT? | default (pwd))
+    $root | path join "collections" $collection "environments" $"($env_name).nuon"
+}
+
+# Get merged variables with proper layering
+# Resolution order (narrowest wins):
+#   1. extra_vars (request-level --vars)
+#   2. Collection's active environment
+#   3. Global variables (variables.nuon)
+export def "api vars get-merged" [
+    --collection (-c): string = ""  # Collection for context
+    --extra-vars (-v): record = {}  # Request-level overrides
+] {
+    # Layer 1: Start with global variables (lowest priority)
+    mut merged = (load-global-vars)
+
+    # Layer 2: Overlay collection's active environment
+    if $collection != "" {
+        let meta = (load-collection-meta $collection)
+        let active_env = ($meta.active_environment? | default null)
+
+        if $active_env != null {
+            let env_path = (get-collection-env-path $collection $active_env)
+            if ($env_path | path exists) {
+                let env_data = (open $env_path)
+                let env_vars = ($env_data.variables? | default {})
+                $merged = ($merged | merge $env_vars)
+            }
+        }
+    }
+
+    # Layer 3: Overlay extra vars (highest priority)
+    $merged = ($merged | merge $extra_vars)
+
+    $merged
+}
+
+# ============================================================================
+# Secrets Management
+# ============================================================================
+
 # Get secrets from secrets.nuon
 def get-secrets [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -35,20 +120,21 @@ def get-builtin-var [name: string] {
 
 # Interpolate variables in a string
 # Supports: {{var_name}}, {{$uuid}}, {{$timestamp}}, etc.
+# Resolution order: extra-vars > collection env > global vars > built-ins
 export def "api vars interpolate" [
-    text: string                   # Text containing {{variables}}
-    --extra-vars (-v): record = {} # Additional variables to use
-    --env-vars (-e): record = {}   # Pre-fetched environment variables
+    text: string                     # Text containing {{variables}}
+    --extra-vars (-v): record = {}   # Additional variables (highest priority)
+    --collection (-c): string = ""   # Collection context for variable resolution
+    --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
 ] {
-    # Get environment variables if not provided
-    let env_variables = if ($env_vars | is-empty) {
-        api env get-vars
+    # Get merged variables with proper layering
+    let all_vars = if not ($env_vars | is-empty) {
+        # Backward compatibility: if env_vars provided, use them merged with extra_vars
+        $env_vars | merge $extra_vars
     } else {
-        $env_vars
+        # New layered resolution: global vars < collection env < extra vars
+        api vars get-merged -c $collection -v $extra_vars
     }
-
-    # Merge all variable sources (extra-vars take precedence)
-    let all_vars = ($env_variables | merge $extra_vars)
 
     # Find all {{...}} patterns
     mut result = $text
@@ -92,31 +178,34 @@ export def "api vars interpolate" [
 }
 
 # Interpolate variables in a record (recursively)
+# Resolution order: extra-vars > collection env > global vars > built-ins
 export def "api vars interpolate-record" [
     data: record
     --extra-vars (-v): record = {}
-    --env-vars (-e): record = {}
+    --collection (-c): string = ""   # Collection context for variable resolution
+    --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
 ] {
     # Return empty record if input is empty
     if ($data | is-empty) {
         return {}
     }
 
-    let env_variables = if ($env_vars | is-empty) {
-        api env get-vars
+    # Pre-fetch merged variables once for efficiency
+    let merged_vars = if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
     } else {
-        $env_vars
+        api vars get-merged -c $collection -v $extra_vars
     }
 
     let rows = ($data | transpose key value | each {|row|
         let new_value = match ($row.value | describe | str replace -r '<.*' '') {
-            "string" => (api vars interpolate $row.value -v $extra_vars -e $env_variables)
-            "record" => (api vars interpolate-record $row.value -v $extra_vars -e $env_variables)
+            "string" => (api vars interpolate $row.value -v $extra_vars -c $collection -e $merged_vars)
+            "record" => (api vars interpolate-record $row.value -v $extra_vars -c $collection -e $merged_vars)
             "list" => ($row.value | each {|item|
                 if ($item | describe | str starts-with "string") {
-                    api vars interpolate $item -v $extra_vars -e $env_variables
+                    api vars interpolate $item -v $extra_vars -c $collection -e $merged_vars
                 } else if ($item | describe | str starts-with "record") {
-                    api vars interpolate-record $item -v $extra_vars -e $env_variables
+                    api vars interpolate-record $item -v $extra_vars -c $collection -e $merged_vars
                 } else {
                     $item
                 }
@@ -134,12 +223,12 @@ export def "api vars interpolate-record" [
     $rows | reduce {|it, acc| $acc | merge $it }
 }
 
-# List all available variables
+# List all available variables (global variables and built-ins)
 export def "api vars list" [
     --include-secrets (-s)  # Include secret variable names
 ] {
     print $"(ansi blue)Built-in Variables:(ansi reset)"
-    [
+    print ([
         { name: "{{$uuid}}", description: "Random UUID v4" }
         { name: "{{$timestamp}}", description: "ISO 8601 timestamp" }
         { name: "{{$timestamp_unix}}", description: "Unix timestamp (seconds)" }
@@ -148,17 +237,17 @@ export def "api vars list" [
         { name: "{{$random_email}}", description: "Random email address" }
         { name: "{{$date}}", description: "Current date (YYYY-MM-DD)" }
         { name: "{{$time}}", description: "Current time (HH:MM:SS)" }
-    ] | table
+    ] | table)
 
     print ""
-    print $"(ansi blue)Environment Variables:(ansi reset)"
-    let env_vars = (api env get-vars)
-    if ($env_vars | is-empty) {
-        print "(ansi yellow)No environment variables set(ansi reset)"
+    print $"(ansi blue)Global Variables:(ansi reset)"
+    let global_vars = (load-global-vars)
+    if ($global_vars | is-empty) {
+        print $"(ansi yellow)No global variables set. Use 'api vars set <key> <value>' to add.(ansi reset)"
     } else {
-        $env_vars | transpose name value | each {|row|
+        print ($global_vars | transpose name value | each {|row|
             { name: $"{{($row.name)}}", value: $row.value }
-        } | table
+        } | table)
     }
 
     if $include_secrets {
@@ -180,6 +269,31 @@ export def "api vars list" [
             }
         }
     }
+}
+
+# Set a global variable
+export def "api vars set" [
+    key: string    # Variable name
+    value: string  # Variable value
+] {
+    mut vars = (load-global-vars)
+    $vars = ($vars | upsert $key $value)
+    save-global-vars $vars
+    print $"(ansi green)Global variable set: ($key) = ($value)(ansi reset)"
+}
+
+# Remove a global variable
+export def "api vars unset" [
+    key: string  # Variable name to remove
+] {
+    mut vars = (load-global-vars)
+    if not ($key in $vars) {
+        print $"(ansi yellow)Variable '($key)' not found in global variables(ansi reset)"
+        return
+    }
+    $vars = ($vars | reject $key)
+    save-global-vars $vars
+    print $"(ansi green)Global variable removed: ($key)(ansi reset)"
 }
 
 # Test variable interpolation

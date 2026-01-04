@@ -4,8 +4,9 @@
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
-    --stop-on-error (-s)  # Stop execution on first error
-    --quiet (-q)          # Suppress output
+    --stop-on-error (-s)   # Stop execution on first error
+    --quiet (-q)           # Suppress output
+    --collection (-c): string = ""  # Collection context for variable resolution
 ] {
     mut context = {}  # Variables extracted from responses
     mut results = []
@@ -18,10 +19,15 @@ export def "api chain run" [
             print $"(ansi blue)Step ($step_num): ($step.request? | default 'inline request')(ansi reset)"
         }
 
-        # Get request configuration
+        # Get request configuration and determine collection context
+        mut step_collection = $collection
         let request_config = if ($step.request? | default null) != null {
-            # Load saved request
-            load-saved-request $step.request
+            # Load saved request (and get collection name)
+            let loaded = (load-saved-request-with-collection $step.request)
+            if $loaded != null and $step_collection == "" {
+                $step_collection = ($loaded.collection? | default "")
+            }
+            $loaded.request? | default null
         } else {
             # Use inline request config
             $step
@@ -39,23 +45,23 @@ export def "api chain run" [
         let step_vars = ($step.use? | default {})
         let all_vars = ($context | merge $step_vars)
 
-        # Interpolate URL
-        let url = (api vars interpolate ($request_config.url? | default "") -v $all_vars)
+        # Interpolate URL with collection context
+        let url = (api vars interpolate ($request_config.url? | default "") -v $all_vars -c $step_collection)
 
-        # Interpolate headers
+        # Interpolate headers with collection context
         let headers = if ($request_config.headers? | default null) != null {
-            api vars interpolate-record $request_config.headers -v $all_vars
+            api vars interpolate-record $request_config.headers -v $all_vars -c $step_collection
         } else {
             {}
         }
 
-        # Interpolate body
+        # Interpolate body with collection context
         let body = if ($request_config.body?.content? | default null) != null {
             if ($request_config.body.content | describe | str starts-with "record") or ($request_config.body.content | describe | str starts-with "list") {
-                let interpolated = (api vars interpolate-record $request_config.body.content -v $all_vars)
+                let interpolated = (api vars interpolate-record $request_config.body.content -v $all_vars -c $step_collection)
                 $interpolated | to json
             } else {
-                api vars interpolate ($request_config.body.content | into string) -v $all_vars
+                api vars interpolate ($request_config.body.content | into string) -v $all_vars -c $step_collection
             }
         } else {
             ""
@@ -179,8 +185,14 @@ export def "api chain exec" [
     api chain run $steps --stop-on-error=$stop_on_error --quiet=$quiet
 }
 
-# Load saved request by name
+# Load saved request by name (returns just the request)
 def load-saved-request [name: string] {
+    let result = (load-saved-request-with-collection $name)
+    $result.request? | default null
+}
+
+# Load saved request by name and return collection name too
+def load-saved-request-with-collection [name: string] {
     let root = ($env.API_ROOT? | default (pwd))
     let collections_dir = ($root | path join "collections")
 
@@ -195,7 +207,10 @@ def load-saved-request [name: string] {
         if ($requests_dir | path exists) {
             let request_file = ($requests_dir | path join $"($name).nuon")
             if ($request_file | path exists) {
-                return (open $request_file)
+                return {
+                    request: (open $request_file)
+                    collection: ($coll_path | path basename)
+                }
             }
         }
     }
