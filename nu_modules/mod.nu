@@ -415,33 +415,7 @@ export def "api collection show" [name: string] {
         { name: $name, description: "" }
     }
 
-    print $"(ansi blue)Collection: ($meta.name)(ansi reset)"
-    if ($meta.description? | default "") != "" {
-        print $"Description: ($meta.description)"
-    }
-
-    # List collection environments
-    let envs_dir = ($collection_dir | path join "environments")
-    if ($envs_dir | path exists) {
-        let env_files = try { ls $envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
-        let envs = $env_files | each {|f|
-            let data = (open $f)
-            {
-                name: ($data.name? | default ($f | path basename | str replace ".nuon" ""))
-                description: ($data.description? | default "" | str substring 0..40)
-                variables: ($data.variables? | default {} | columns | length)
-            }
-        }
-
-        if not ($envs | is-empty) {
-            print $"(ansi yellow)Environments:(ansi reset)"
-            print ($envs | table)
-        }
-    }
-    print ""
-
     # List requests
-    print $"(ansi yellow)Requests:(ansi reset)"
     let requests_dir = ($collection_dir | path join "requests")
     let requests = if ($requests_dir | path exists) {
         let request_files = try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] }
