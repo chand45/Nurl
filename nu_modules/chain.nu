@@ -1,6 +1,10 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
+use auth.nu ["api auth get-config"]
+use http.nu ["api request"]
+
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
