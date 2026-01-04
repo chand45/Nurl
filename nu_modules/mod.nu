@@ -189,8 +189,6 @@ export def "api help" [] {
   api collection list           List collections
   api collection create <name>  Create collection
   api collection show <name>    Show collection details
-  api collection export <name>  Export collection
-  api collection import <file>  Import collection
 
 (ansi yellow)Chaining:(ansi reset)
   api chain run <file>          Run request chain
@@ -296,106 +294,6 @@ export def "api collection delete" [
 
     rm -rf $collection_dir
     print $"(ansi green)Collection '($name)' deleted(ansi reset)"
-}
-
-# Export collection to a zip file
-export def "api collection export" [
-    name: string                  # Collection name
-    --output (-o): string = ""    # Output file path
-] {
-    let root = (get-api-root)
-    let collection_dir = ($root | path join "collections" $name)
-
-    if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' not found(ansi reset)"
-        return
-    }
-
-    let output_file = if $output != "" {
-        $output
-    } else {
-        $"($name)-collection.zip"
-    }
-
-    # Create a temporary export directory and copy collection into it
-    let export_temp = ($root | path join ".export-temp")
-    mkdir $export_temp
-
-    # Copy collection directory to export temp (creates .export-temp/$name/)
-    cp -r $collection_dir $export_temp
-
-    # Create tar archive from the export temp directory
-    cd $export_temp
-    tar -czf $"../($output_file)" $name
-    cd $root
-
-    # Cleanup
-    rm -rf $export_temp
-
-    print $"(ansi green)Collection exported to: ($output_file)(ansi reset)"
-}
-
-# Convert Windows path to Unix path for tar compatibility
-def to-unix-path [path: string] {
-    # Try cygpath first, fall back to manual conversion
-    let result = (do { cygpath -u $path } | complete)
-    if $result.exit_code == 0 {
-        $result.stdout | str trim
-    } else {
-        # Manual conversion: C:\path -> /c/path
-        $path | str replace --regex '^([A-Za-z]):' { |m| $"/($m.0 | str downcase | str substring 0..1)" } | str replace --all '\\' '/'
-    }
-}
-
-# Import collection from a file
-export def "api collection import" [
-    file: string  # Path to collection archive
-] {
-    let root = (get-api-root)
-
-    if not ($file | path exists) {
-        print $"(ansi red)File not found: ($file)(ansi reset)"
-        return
-    }
-
-    # Get absolute path and convert to Unix-style for tar compatibility on Windows
-    let abs_file = ($file | path expand)
-    let unix_file = (to-unix-path $abs_file)
-
-    # Extract to temporary directory
-    let temp_dir = ($root | path join ".import-temp")
-    let unix_temp = (to-unix-path $temp_dir)
-    mkdir $temp_dir
-
-    tar -xzf $unix_file -C $unix_temp
-
-    # Find collection directory
-    let imported = ls $temp_dir | where type == dir | first
-
-    if $imported == null {
-        rm -rf $temp_dir
-        print $"(ansi red)Invalid collection archive(ansi reset)"
-        return
-    }
-
-    let collection_name = ($imported.name | path basename)
-    let target_dir = ($root | path join "collections" $collection_name)
-
-    if ($target_dir | path exists) {
-        let confirm = (input $"Collection '($collection_name)' already exists. Overwrite? [y/N] ")
-        if $confirm !~ "^[yY]" {
-            rm -rf $temp_dir
-            print "Cancelled"
-            return
-        }
-        rm -rf $target_dir
-    }
-
-    mv $imported.name $target_dir
-
-    rm -rf $temp_dir
-
-    print $"(ansi green)Collection '($collection_name)' imported(ansi reset)"
 }
 
 # Show collection details
