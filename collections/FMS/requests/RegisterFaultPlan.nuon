@@ -6,7 +6,60 @@
     headers: {
 
     },
-    body: null,
+    body: {
+      type: json,
+      content: {
+        "PlanName": "CG Test Plan-6",
+        "PlanId": "{{planId}}",
+        "Description": "PF control plane poweroff drills fault plan for Testing FMS-FIS Integration",
+        "Version": 1,
+        "Status": "Draft",
+        "FaultActions": [
+          {
+            "ExecutionId": "{{executionId}}",
+            "ActionId": "pilotfish.pfmf.power-on.v1",
+            "ProviderId": "78bde4dc-d35a-4608-ab35-68456e0eb679",
+            "ExecutionOrder": 2,
+            "ExecutionName": "PowerOn MF CP",
+            "TargetScope": null,
+            "Parameters": {
+              "ClusterName": "CBN03C",
+              "ExecutionType": "Test",
+              "CloudName": "PublicPilotFish",
+              "MachineFunctions": {
+                "CP": "Autopilot"
+              }
+            },
+            "Dependencies": [],
+            "SafetySettings": null,
+            "Result": null,
+            "ContinueOnDependencyFailure": false,
+            "DependencyTimeout": "00:30:00"
+          },
+          {
+            "ExecutionId": "{{executionId2}}",
+            "ActionId": "pilotfish.pfmf.power-on.v1",
+            "ProviderId": "78bde4dc-d35a-4608-ab35-68456e0eb679",
+            "ExecutionOrder": 2,
+            "ExecutionName": "PowerOn MF CP",
+            "TargetScope": null,
+            "Parameters": {
+              "ClusterName": "CBN03C",
+              "ExecutionType": "Test",
+              "CloudName": "PublicPilotFish",
+              "MachineFunctions": {
+                "CP": "Autopilot"
+              }
+            },
+            "Dependencies": [],
+            "SafetySettings": null,
+            "Result": null,
+            "ContinueOnDependencyFailure": false,
+            "DependencyTimeout": "00:30:00"
+          }
+        ]
+      }
+    },
     auth: {
         type: bearer,
         token_ref: dststoken
