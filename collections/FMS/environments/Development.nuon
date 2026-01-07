@@ -1,1 +1,8 @@
-{name: Development, description: "", variables: {base_url: "http://localhost:7071"}, created_at: "2026-01-04T23:33:04Z"}
+{
+    name: Development,
+    description: "",
+    variables: {
+        base_url: "http://localhost:7071"
+    },
+    created_at: "2026-01-04T23:33:04Z"
+}

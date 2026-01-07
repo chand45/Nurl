@@ -723,7 +723,7 @@ export def "api request create" [
             name: $collection
             description: ""
             created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-        } | to nuon | save ($collection_path | path join "collection.nuon")
+        } | to nuon --indent 4 | save ($collection_path | path join "collection.nuon")
     }
 
     let requests_path = ($collection_path | path join "requests")
@@ -755,7 +755,7 @@ export def "api request create" [
         tests: null
         chain: null
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-    } | to nuon | save $request_file
+    } | to nuon --indent 4 | save $request_file
 
     print $"(ansi green)Request '($name)' created in collection '($collection)'(ansi reset)"
     if $debug { $env.API_DEBUG = false }
@@ -890,7 +890,7 @@ export def "api request update" [
     }
 
     $req = ($req | upsert updated_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
-    $req | to nuon | save -f $request_file
+    $req | to nuon --indent 4 | save -f $request_file
 
     print $"(ansi green)Request '($name)' updated in collection '($collection)'(ansi reset)"
 }

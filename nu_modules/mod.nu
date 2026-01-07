@@ -272,7 +272,7 @@ export def "api collection create" [
         description: $description
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
         version: "1.0"
-    } | to nuon | save ($collection_dir | path join "collection.nuon")
+    } | to nuon --indent 4 | save ($collection_dir | path join "collection.nuon")
 
     print $"(ansi green)Collection '($name)' created(ansi reset)"
 }
@@ -365,7 +365,7 @@ export def "api collection copy" [
         mut meta = (open $coll_file)
         $meta = ($meta | upsert name $target)
         $meta = ($meta | upsert created_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
-        $meta | to nuon | save -f $coll_file
+        $meta | to nuon --indent 4 | save -f $coll_file
     }
 
     print $"(ansi green)Collection '($source)' copied to '($target)'(ansi reset)"
@@ -392,7 +392,7 @@ def load-coll-meta [collection: string] {
 # Helper: Save collection meta
 def save-coll-meta [collection: string, meta: record] {
     let path = (get-coll-meta-path $collection)
-    $meta | to nuon | save -f $path
+    $meta | to nuon --indent 4 | save -f $path
 }
 
 # Helper: Get collection environment file path
@@ -477,7 +477,7 @@ export def "api collection env create" [
         description: ""
         variables: {}
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-    } | to nuon | save $env_path
+    } | to nuon --indent 4 | save $env_path
 
     print $"(ansi green)Environment '($name)' created in collection '($collection)'(ansi reset)"
 
@@ -585,7 +585,7 @@ export def "api collection env set" [
 
     mut env_data = (open $env_path)
     $env_data = ($env_data | upsert variables ($env_data.variables | upsert $key $value))
-    $env_data | to nuon | save -f $env_path
+    $env_data | to nuon --indent 4 | save -f $env_path
 
     print $"(ansi green)Set ($key) = ($value) in ($collection)/($target_env)(ansi reset)"
 }
@@ -627,7 +627,7 @@ export def "api collection env unset" [
     }
 
     $env_data = ($env_data | upsert variables ($env_data.variables | reject $key))
-    $env_data | to nuon | save -f $env_path
+    $env_data | to nuon --indent 4 | save -f $env_path
 
     print $"(ansi green)Removed ($key) from ($collection)/($target_env)(ansi reset)"
 }
