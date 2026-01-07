@@ -707,6 +707,7 @@ export def "api request create" [
     url: string                    # Request URL
     --headers (-H): record = {}    # Headers
     --body (-b): string = ""       # Body
+    --auth (-a): record = {}       # Authentication config (e.g., {type: bearer, token_ref: mytoken})
     --collection (-c): string = "default"  # Collection name
     --debug                        # Show verbose output
 ] {
@@ -750,7 +751,7 @@ export def "api request create" [
         url: $url
         headers: $headers
         body: (if $body_content != null { { type: "json", content: $body_content } } else { null })
-        auth: null
+        auth: (if ($auth | is-empty) { null } else { $auth })
         pre_request: null
         tests: null
         chain: null
@@ -855,6 +856,7 @@ export def "api request update" [
     --url (-u): string             # New URL
     --headers (-H): record         # New headers
     --body (-b): string            # New body
+    --auth (-a): record            # New authentication config (e.g., {type: bearer, token_ref: mytoken})
     --collection (-c): string = "default"  # Collection name
 ] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -887,6 +889,9 @@ export def "api request update" [
             null
         }
         $req = ($req | upsert body (if $body_content != null { { type: "json", content: $body_content } } else { null }))
+    }
+    if $auth != null {
+        $req = ($req | upsert auth $auth)
     }
 
     $req = ($req | upsert updated_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
