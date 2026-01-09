@@ -246,7 +246,7 @@ export def "api collection list" [] {
     if ($collections | is-empty) {
         print $"(ansi yellow)No collections found(ansi reset)"
     } else {
-        $collections | table
+        $collections
     }
 }
 
@@ -447,7 +447,7 @@ export def "api collection env list" [
             variables: ($data.variables? | default {} | columns | length)
             description: ($data.description? | default "" | str substring 0..40)
         }
-    } | table
+    }
 }
 
 # Create a new environment for a collection

@@ -152,7 +152,7 @@ export def "api history list" [
             url: ($entry.request.url? | default "" | str substring 0..50)
             time_ms: ($entry.response.time_ms? | default 0)
         }
-    } | table
+    }
 }
 
 # Show detailed history entry
@@ -291,7 +291,7 @@ export def "api history search" [
     if ($results | is-empty) {
         print $"(ansi yellow)No results for '($query)'(ansi reset)"
     } else {
-        $results | table
+        $results
     }
 }
 

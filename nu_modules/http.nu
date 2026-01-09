@@ -901,7 +901,7 @@ export def "api request list" [
     if ($requests | is-empty) {
         print $"(ansi yellow)No requests found(ansi reset)"
     } else {
-        $requests | table
+        $requests
     }
 }
 
@@ -1023,14 +1023,14 @@ export def "api request delete" [
 
 # Show response headers
 export def "api headers" [result: record] {
-    $result.response.headers | transpose key value | table
+    $result.response.headers | transpose key value
 }
 
 # Format response as table (for JSON arrays)
 export def "api table" [result: record] {
     let body = $result.response.body
     if ($body | describe | str starts-with "list") {
-        $body | table
+        $body
     } else {
         $body
     }

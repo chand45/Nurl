@@ -436,5 +436,5 @@ export def "api auth list" [] {
         $auth_list = ($auth_list | append { name: $item.name, type: "oauth2" })
     }
 
-    $auth_list | table
+    $auth_list
 }

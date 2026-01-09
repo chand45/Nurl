@@ -294,7 +294,7 @@ export def "api chain list" [] {
             description: ($chain.description? | default "")
             steps: ($chain.steps? | default [] | length)
         }
-    } | table
+    }
 }
 
 # Show chain details
