@@ -64,6 +64,35 @@ def get-timeout [] {
     }
 }
 
+# Resolve body from multiple input sources (inline record, file)
+# Priority: body-file > inline body
+# Returns: JSON string ready for request
+def resolve-body [
+    --body (-b): record = {}       # Inline body as record
+    --body-file (-f): string = ""  # Path to file containing body
+] {
+    # Body file takes priority
+    if $body_file != "" {
+        if not ($body_file | path exists) {
+            log error $"Body file not found: ($body_file)"
+            return null
+        }
+
+        let file_content = (open $body_file --raw | str trim)
+
+        # Try to validate as JSON, but allow raw content
+        try {
+            $file_content | from json | to json
+        } catch {
+            $file_content
+        }
+    } else if not ($body | is-empty) {
+        $body | to json
+    } else {
+        ""
+    }
+}
+
 # Build curl command arguments
 def build-curl-args [
     method: string
@@ -410,7 +439,8 @@ export def "api get" [
 # POST request
 export def "api post" [
     url: string                    # URL to request
-    --body (-b): string = ""       # Request body (JSON string)
+    --body (-b): record = {}       # Request body as record
+    --body-file (-f): string = ""  # Read body from file
     --headers (-H): record = {}    # Additional headers
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
@@ -420,7 +450,15 @@ export def "api post" [
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "POST" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+
+    # Resolve body from multiple sources
+    let final_body = (resolve-body -b $body -f $body_file)
+    if $final_body == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    let result = (execute-request "POST" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -445,7 +483,8 @@ export def "api post" [
 # PUT request
 export def "api put" [
     url: string                    # URL to request
-    --body (-b): string = ""       # Request body (JSON string)
+    --body (-b): record = {}       # Request body as record
+    --body-file (-f): string = ""  # Read body from file
     --headers (-H): record = {}    # Additional headers
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
@@ -455,7 +494,15 @@ export def "api put" [
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "PUT" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+
+    # Resolve body from multiple sources
+    let final_body = (resolve-body -b $body -f $body_file)
+    if $final_body == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    let result = (execute-request "PUT" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -480,7 +527,8 @@ export def "api put" [
 # PATCH request
 export def "api patch" [
     url: string                    # URL to request
-    --body (-b): string = ""       # Request body (JSON string)
+    --body (-b): record = {}       # Request body as record
+    --body-file (-f): string = ""  # Read body from file
     --headers (-H): record = {}    # Additional headers
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
@@ -490,7 +538,15 @@ export def "api patch" [
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "PATCH" $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+
+    # Resolve body from multiple sources
+    let final_body = (resolve-body -b $body -f $body_file)
+    if $final_body == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    let result = (execute-request "PATCH" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -550,7 +606,8 @@ export def "api delete" [
 export def "api request" [
     --method (-m): string = "GET"  # HTTP method
     url: string                    # URL to request
-    --body (-b): string = ""       # Request body
+    --body (-b): record = {}       # Request body as record
+    --body-file (-f): string = ""  # Read body from file
     --headers (-H): record = {}    # Additional headers
     --auth (-a): record = {}       # Authentication config
     --raw (-r)                     # Return raw result without display
@@ -560,7 +617,15 @@ export def "api request" [
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request $method $url -H $headers -b $body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+
+    # Resolve body from multiple sources
+    let final_body = (resolve-body -b $body -f $body_file)
+    if $final_body == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    let result = (execute-request $method $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -586,6 +651,8 @@ export def "api request" [
 export def "api send" [
     name: string                   # Request name (path in collection)
     --collection (-c): string = "" # Collection name
+    --body (-b): record = {}       # Override request body as record
+    --body-file (-f): string = ""  # Override request body from file
     --raw (-r)                     # Return raw result
     --vars (-v): record = {}       # Extra variables
     --dry-run (-d)                 # Output curl command instead of executing
@@ -643,8 +710,17 @@ export def "api send" [
     # Build headers
     let headers = ($request.headers? | default {})
 
-    # Build body
-    let body = if ($request.body?.content? | default null) != null {
+    # Build body - check for override first, then use saved body
+    let body = if (not ($body | is-empty)) or $body_file != "" {
+        # Body override provided - resolve from override sources
+        let override_body = (resolve-body -b $body -f $body_file)
+        if $override_body == null {
+            if $debug { $env.API_DEBUG = false }
+            return null
+        }
+        $override_body
+    } else if ($request.body?.content? | default null) != null {
+        # Use saved request body
         $request.body.content | to json
     } else {
         ""
@@ -706,7 +782,8 @@ export def "api request create" [
     method: string                 # HTTP method
     url: string                    # Request URL
     --headers (-H): record = {}    # Headers
-    --body (-b): string = ""       # Body
+    --body (-b): record = {}       # Body as record
+    --body-file (-f): string = ""  # Read body from file
     --auth (-a): record = {}       # Authentication config (e.g., {type: bearer, token_ref: mytoken})
     --collection (-c): string = "default"  # Collection name
     --debug                        # Show verbose output
@@ -734,12 +811,21 @@ export def "api request create" [
 
     let request_file = ($requests_path | path join $"($name).nuon")
 
-    let body_content = if $body != "" {
-        try {
-            $body | from json
-        } catch {
-            $body
+    # Resolve body - prefer file, then inline record
+    let body_content = if $body_file != "" {
+        if not ($body_file | path exists) {
+            log error $"Body file not found: ($body_file)"
+            if $debug { $env.API_DEBUG = false }
+            return
         }
+        let file_content = (open $body_file --raw | str trim)
+        try {
+            $file_content | from json
+        } catch {
+            $file_content
+        }
+    } else if not ($body | is-empty) {
+        $body
     } else {
         null
     }
@@ -855,7 +941,8 @@ export def "api request update" [
     --method (-m): string          # New HTTP method
     --url (-u): string             # New URL
     --headers (-H): record         # New headers
-    --body (-b): string            # New body
+    --body (-b): record            # New body as record
+    --body-file (-f): string       # New body from file
     --auth (-a): record            # New authentication config (e.g., {type: bearer, token_ref: mytoken})
     --collection (-c): string = "default"  # Collection name
 ] {
@@ -878,13 +965,21 @@ export def "api request update" [
     if $headers != null {
         $req = ($req | upsert headers $headers)
     }
-    if $body != null {
-        let body_content = if $body != "" {
-            try {
-                $body | from json
-            } catch {
-                $body
+    # Handle body update from either inline record or file
+    if $body != null or $body_file != null {
+        let body_content = if $body_file != null and $body_file != "" {
+            if not ($body_file | path exists) {
+                log error $"Body file not found: ($body_file)"
+                return
             }
+            let file_content = (open $body_file --raw | str trim)
+            try {
+                $file_content | from json
+            } catch {
+                $file_content
+            }
+        } else if $body != null and not ($body | is-empty) {
+            $body
         } else {
             null
         }
