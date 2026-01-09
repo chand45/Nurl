@@ -900,9 +900,10 @@ export def "api request list" [
 
     if ($requests | is-empty) {
         print $"(ansi yellow)No requests found(ansi reset)"
-    } else {
-        $requests
+        return []
     }
+
+    $requests
 }
 
 # Show details of a saved request

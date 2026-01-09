@@ -80,22 +80,17 @@ export def "api init" [] {
 export def "api status" [] {
     let root = (get-api-root)
 
-    print $"(ansi blue)API Client Status(ansi reset)"
-    print $"Root: ($root)"
-
     # Count global variables
     let vars_path = ($root | path join "variables.nuon")
     let global_vars_count = if ($vars_path | path exists) {
         (open $vars_path) | columns | length
     } else { 0 }
-    print $"Global Variables: ($global_vars_count)"
 
     # Count collections
     let collections_path = ($root | path join "collections")
     let collection_count = if ($collections_path | path exists) {
         ls $collections_path | where type == dir | length
     } else { 0 }
-    print $"Collections: ($collection_count)"
 
     # Count history entries
     let history_path = ($root | path join "history")
@@ -103,7 +98,13 @@ export def "api status" [] {
         let subdirs = try { ls $history_path | where type == dir | get name } catch { [] }
         $subdirs | each {|d| try { ls $d | where name =~ '\.nuon$' | length } catch { 0 } } | math sum
     } else { 0 }
-    print $"History entries: ($history_count)"
+
+    {
+        root: $root
+        global_vars: $global_vars_count
+        collections: $collection_count
+        history_entries: $history_count
+    }
 }
 
 # Get configuration
@@ -245,9 +246,10 @@ export def "api collection list" [] {
 
     if ($collections | is-empty) {
         print $"(ansi yellow)No collections found(ansi reset)"
-    } else {
-        $collections
+        return []
     }
+
+    $collections
 }
 
 # Create a new collection
@@ -514,7 +516,7 @@ export def "api collection env show" [
     collection: string  # Collection name
     name?: string       # Environment name (defaults to active)
 ] {
-    if not (check-collection-exists $collection) { return }
+    if not (check-collection-exists $collection) { return null }
 
     let meta = (load-coll-meta $collection)
 
@@ -527,29 +529,23 @@ export def "api collection env show" [
     if $target == null {
         print $"(ansi yellow)No active environment for collection '($collection)'(ansi reset)"
         print $"Use 'api collection env use ($collection) <name>' to activate one."
-        return
+        return null
     }
 
     let env_path = (get-coll-env-path $collection $target)
 
     if not ($env_path | path exists) {
         print $"(ansi red)Environment '($target)' not found in collection '($collection)'(ansi reset)"
-        return
+        return null
     }
 
     let env_data = (open $env_path)
 
-    print $"(ansi blue)Collection: ($collection)(ansi reset)"
-    print $"(ansi blue)Environment: ($target)(ansi reset)"
-    if ($env_data.description? | default "" | is-not-empty) {
-        print $"Description: ($env_data.description)"
-    }
-    print ""
-
-    if ($env_data.variables? | default {} | is-empty) {
-        print $"(ansi yellow)No variables set(ansi reset)"
-    } else {
-        print ($env_data.variables | transpose key value | table)
+    {
+        collection: $collection
+        environment: $target
+        description: ($env_data.description? | default "")
+        variables: ($env_data.variables? | default {} | transpose key value)
     }
 }
 

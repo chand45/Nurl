@@ -227,48 +227,46 @@ export def "api vars interpolate-record" [
 export def "api vars list" [
     --include-secrets (-s)  # Include secret variable names
 ] {
-    print $"(ansi blue)Built-in Variables:(ansi reset)"
-    print ([
-        { name: "{{$uuid}}", description: "Random UUID v4" }
-        { name: "{{$timestamp}}", description: "ISO 8601 timestamp" }
-        { name: "{{$timestamp_unix}}", description: "Unix timestamp (seconds)" }
-        { name: "{{$random_int}}", description: "Random integer 0-999999" }
-        { name: "{{$random_string}}", description: "Random 16-char string" }
-        { name: "{{$random_email}}", description: "Random email address" }
-        { name: "{{$date}}", description: "Current date (YYYY-MM-DD)" }
-        { name: "{{$time}}", description: "Current time (HH:MM:SS)" }
-    ] | table)
+    mut result = []
 
-    print ""
-    print $"(ansi blue)Global Variables:(ansi reset)"
+    # Built-in variables
+    $result = ($result | append ([
+        { name: "{{$uuid}}", value: null, type: "builtin", description: "Random UUID v4" }
+        { name: "{{$timestamp}}", value: null, type: "builtin", description: "ISO 8601 timestamp" }
+        { name: "{{$timestamp_unix}}", value: null, type: "builtin", description: "Unix timestamp (seconds)" }
+        { name: "{{$random_int}}", value: null, type: "builtin", description: "Random integer 0-999999" }
+        { name: "{{$random_string}}", value: null, type: "builtin", description: "Random 16-char string" }
+        { name: "{{$random_email}}", value: null, type: "builtin", description: "Random email address" }
+        { name: "{{$date}}", value: null, type: "builtin", description: "Current date (YYYY-MM-DD)" }
+        { name: "{{$time}}", value: null, type: "builtin", description: "Current time (HH:MM:SS)" }
+    ]))
+
+    # Global variables
     let global_vars = (load-global-vars)
-    if ($global_vars | is-empty) {
-        print $"(ansi yellow)No global variables set. Use 'api vars set <key> <value>' to add.(ansi reset)"
-    } else {
-        print ($global_vars | transpose name value | each {|row|
-            { name: $"{{($row.name)}}", value: $row.value }
-        } | table)
+    if not ($global_vars | is-empty) {
+        $result = ($result | append ($global_vars | transpose name value | each {|row|
+            { name: $"{{($row.name)}}", value: $row.value, type: "global", description: null }
+        }))
     }
 
+    # Secret variables (names only, values masked)
     if $include_secrets {
-        print ""
-        print $"(ansi blue)Secret Variables:(ansi reset)"
         let secrets = (get-secrets)
 
         if not ($secrets.tokens | is-empty) {
-            print "  Tokens:"
-            $secrets.tokens | transpose name value | each {|row|
-                print $"    - {{bearer_token_($row.name)}}"
-            }
+            $result = ($result | append ($secrets.tokens | transpose name value | each {|row|
+                { name: $"{{bearer_token_($row.name)}}", value: "***", type: "secret", description: "Bearer token" }
+            }))
         }
 
         if not ($secrets.api_keys | is-empty) {
-            print "  API Keys:"
-            $secrets.api_keys | transpose name value | each {|row|
-                print $"    - {{api_key_($row.name)}}"
-            }
+            $result = ($result | append ($secrets.api_keys | transpose name value | each {|row|
+                { name: $"{{api_key_($row.name)}}", value: "***", type: "secret", description: "API key" }
+            }))
         }
     }
+
+    $result
 }
 
 # Set a global variable

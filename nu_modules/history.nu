@@ -290,9 +290,10 @@ export def "api history search" [
 
     if ($results | is-empty) {
         print $"(ansi yellow)No results for '($query)'(ansi reset)"
-    } else {
-        $results
+        return []
     }
+
+    $results
 }
 
 # Clear old history entries
