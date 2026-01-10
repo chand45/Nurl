@@ -1,6 +1,16 @@
 # Authentication Module
 # Handles Bearer, Basic, API Key, and OAuth2 authentication
 
+# Truncate a string to max length with ellipsis
+def truncate-value [value: any, max_len: int = 40] {
+    let str_val = if $value == null { "" } else { $value | into string }
+    if ($str_val | str length) > $max_len {
+        $"($str_val | str substring 0..$max_len)..."
+    } else {
+        $str_val
+    }
+}
+
 # Get secrets file path
 def get-secrets-path [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -354,35 +364,35 @@ export def "api auth get-config" [auth_spec: record] {
 }
 
 # Show all authentication configurations
-export def "api auth show" [] {
+export def "api auth show" [
+    --full (-f)  # Show full values without truncation
+] {
     let secrets = (load-secrets)
     mut result = []
 
     # Bearer tokens
     if not ($secrets.tokens | is-empty) {
         $result = ($result | append ($secrets.tokens | transpose name config | each {|row|
-            let masked = ($row.config.bearer | str substring 0..10) + "..."
-            { name: $row.name, type: "bearer", status: "configured", masked_value: $masked }
+            { name: $row.name, type: "bearer", status: "configured", value: $row.config.bearer }
         }))
     }
 
     # Basic auth
     if not ($secrets.basic_auth | is-empty) {
         $result = ($result | append ($secrets.basic_auth | transpose name config | each {|row|
-            { name: $row.name, type: "basic", status: "configured", masked_value: $row.config.username }
+            { name: $row.name, type: "basic", status: "configured", value: $row.config.username }
         }))
     }
 
     # API keys
     if not ($secrets.api_keys | is-empty) {
         $result = ($result | append ($secrets.api_keys | transpose name config | each {|row|
-            let masked = ($row.config.key | str substring 0..10) + "..."
             let location = if ($row.config.type? | default "header") == "query" {
                 $"query:($row.config.param_name)"
             } else {
                 $"header:($row.config.header_name)"
             }
-            { name: $row.name, type: "apikey", status: $location, masked_value: $masked }
+            { name: $row.name, type: "apikey", status: $location, value: $row.config.key }
         }))
     }
 
@@ -395,11 +405,24 @@ export def "api auth show" [] {
             } else {
                 "not authenticated"
             }
-            { name: $row.name, type: "oauth2", status: $status, masked_value: null }
+            let token = ($row.config.access_token? | default "")
+            { name: $row.name, type: "oauth2", status: $status, value: $token }
         }))
     }
 
-    $result
+    # Apply truncation for display unless --full flag is set
+    if $full {
+        $result
+    } else {
+        $result | each {|row|
+            {
+                name: (truncate-value $row.name 15)
+                type: $row.type
+                status: (truncate-value $row.status 20)
+                value: (truncate-value $row.value 15)
+            }
+        }
+    }
 }
 
 # List authentication names
