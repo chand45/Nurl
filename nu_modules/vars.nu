@@ -49,6 +49,27 @@ def get-collection-env-path [collection: string, env_name: string] {
     $root | path join "collections" $collection "environments" $"($env_name).nuon"
 }
 
+# List all collections in the workspace
+def list-collections [] {
+    let root = ($env.API_ROOT? | default (pwd))
+    let collections_path = ($root | path join "collections")
+    if ($collections_path | path exists) {
+        ls $collections_path | where type == dir | get name | path basename
+    } else {
+        []
+    }
+}
+
+# Truncate a string to max length with ellipsis
+def truncate-value [value: any, max_len: int = 10] {
+    let str_val = if $value == null { "" } else { $value | into string }
+    if ($str_val | str length) > $max_len {
+        $"($str_val | str substring 0..$max_len)..."
+    } else {
+        $str_val
+    }
+}
+
 # Get merged variables with proper layering
 # Resolution order (narrowest wins):
 #   1. extra_vars (request-level --vars)
@@ -226,27 +247,49 @@ export def "api vars interpolate-record" [
 # List all available variables (global variables and built-ins)
 export def "api vars list" [
     --include-secrets (-s)  # Include secret variable names
+    --full (-f)             # Show full values without truncation
 ] {
     mut result = []
 
     # Built-in variables
     $result = ($result | append ([
-        { name: "{{$uuid}}", value: null, type: "builtin", description: "Random UUID v4" }
-        { name: "{{$timestamp}}", value: null, type: "builtin", description: "ISO 8601 timestamp" }
-        { name: "{{$timestamp_unix}}", value: null, type: "builtin", description: "Unix timestamp (seconds)" }
-        { name: "{{$random_int}}", value: null, type: "builtin", description: "Random integer 0-999999" }
-        { name: "{{$random_string}}", value: null, type: "builtin", description: "Random 16-char string" }
-        { name: "{{$random_email}}", value: null, type: "builtin", description: "Random email address" }
-        { name: "{{$date}}", value: null, type: "builtin", description: "Current date (YYYY-MM-DD)" }
-        { name: "{{$time}}", value: null, type: "builtin", description: "Current time (HH:MM:SS)" }
+        { name: "{{$uuid}}", value: "", type: "builtin", description: "Random UUID v4" }
+        { name: "{{$timestamp}}", value: "", type: "builtin", description: "ISO 8601 timestamp" }
+        { name: "{{$timestamp_unix}}", value: "", type: "builtin", description: "Unix timestamp (seconds)" }
+        { name: "{{$random_int}}", value: "", type: "builtin", description: "Random integer 0-999999" }
+        { name: "{{$random_string}}", value: "", type: "builtin", description: "Random 16-char string" }
+        { name: "{{$random_email}}", value: "", type: "builtin", description: "Random email address" }
+        { name: "{{$date}}", value: "", type: "builtin", description: "Current date (YYYY-MM-DD)" }
+        { name: "{{$time}}", value: "", type: "builtin", description: "Current time (HH:MM:SS)" }
     ]))
 
     # Global variables
     let global_vars = (load-global-vars)
     if not ($global_vars | is-empty) {
         $result = ($result | append ($global_vars | transpose name value | each {|row|
-            { name: $"{{($row.name)}}", value: $row.value, type: "global", description: null }
+            { name: $"{{($row.name)}}", value: ($row.value | into string), type: "global", description: "" }
         }))
+    }
+
+    # Collection environment variables (from active environment of each collection)
+    let collections = (list-collections)
+    for collection in $collections {
+        let meta = (load-collection-meta $collection)
+        let active_env = ($meta.active_environment? | default null)
+
+        if $active_env != null {
+            let env_path = (get-collection-env-path $collection $active_env)
+            if ($env_path | path exists) {
+                let env_data = (open $env_path)
+                let env_vars = ($env_data.variables? | default {})
+                if not ($env_vars | is-empty) {
+                    let type_label = $"($collection):($active_env)"
+                    $result = ($result | append ($env_vars | transpose name value | each {|row|
+                        { name: $"{{($row.name)}}", value: ($row.value | into string), type: $type_label, description: "" }
+                    }))
+                }
+            }
+        }
     }
 
     # Secret variables (names only, values masked)
@@ -266,7 +309,19 @@ export def "api vars list" [
         }
     }
 
-    $result
+    # Apply truncation for display unless --full flag is set
+    if $full {
+        $result
+    } else {
+        $result | each {|row|
+            {
+                name: $row.name
+                value: (truncate-value $row.value 40)
+                type: (truncate-value $row.type 20)
+                description: (truncate-value $row.description 25)
+            }
+        }
+    }
 }
 
 # Set a global variable
