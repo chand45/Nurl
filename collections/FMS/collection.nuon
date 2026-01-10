@@ -1,0 +1,6 @@
+{
+    name: FMS,
+    description: "APIs supported by Fault Management Service",
+    created_at: "2026-01-04T23:32:09Z",
+    version: "1.0"
+}

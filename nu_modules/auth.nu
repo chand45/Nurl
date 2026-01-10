@@ -356,62 +356,50 @@ export def "api auth get-config" [auth_spec: record] {
 # Show all authentication configurations
 export def "api auth show" [] {
     let secrets = (load-secrets)
+    mut result = []
 
-    print $"(ansi blue)Bearer Tokens:(ansi reset)"
-    if ($secrets.tokens | is-empty) {
-        print "  (none)"
-    } else {
-        $secrets.tokens | transpose name config | each {|row|
+    # Bearer tokens
+    if not ($secrets.tokens | is-empty) {
+        $result = ($result | append ($secrets.tokens | transpose name config | each {|row|
             let masked = ($row.config.bearer | str substring 0..10) + "..."
-            print $"  - ($row.name): ($masked)"
-        } | ignore
+            { name: $row.name, type: "bearer", status: "configured", masked_value: $masked }
+        }))
     }
 
-    print ""
-    print $"(ansi blue)Basic Auth:(ansi reset)"
-    if ($secrets.basic_auth | is-empty) {
-        print "  (none)"
-    } else {
-        $secrets.basic_auth | transpose name config | each {|row|
-            print $"  - ($row.name): ($row.config.username)"
-        } | ignore
+    # Basic auth
+    if not ($secrets.basic_auth | is-empty) {
+        $result = ($result | append ($secrets.basic_auth | transpose name config | each {|row|
+            { name: $row.name, type: "basic", status: "configured", masked_value: $row.config.username }
+        }))
     }
 
-    print ""
-    print $"(ansi blue)API Keys:(ansi reset)"
-    if ($secrets.api_keys | is-empty) {
-        print "  (none)"
-    } else {
-        $secrets.api_keys | transpose name config | each {|row|
+    # API keys
+    if not ($secrets.api_keys | is-empty) {
+        $result = ($result | append ($secrets.api_keys | transpose name config | each {|row|
             let masked = ($row.config.key | str substring 0..10) + "..."
             let location = if ($row.config.type? | default "header") == "query" {
                 $"query:($row.config.param_name)"
             } else {
                 $"header:($row.config.header_name)"
             }
-            print $"  - ($row.name): ($masked) (($location))"
-        } | ignore
+            { name: $row.name, type: "apikey", status: $location, masked_value: $masked }
+        }))
     }
 
-    print ""
-    print $"(ansi blue)OAuth2:(ansi reset)"
-    if ($secrets.oauth | is-empty) {
-        print "  (none)"
-    } else {
-        $secrets.oauth | transpose name config | each {|row|
+    # OAuth2
+    if not ($secrets.oauth | is-empty) {
+        $result = ($result | append ($secrets.oauth | transpose name config | each {|row|
             let status = if ($row.config.access_token? | default null) != null {
                 let expires = ($row.config.expires_at? | default "")
-                if $expires != "" {
-                    $"(ansi green)active(ansi reset) \(expires: ($expires)\)"
-                } else {
-                    $"(ansi green)active(ansi reset)"
-                }
+                if $expires != "" { $"active (expires: ($expires))" } else { "active" }
             } else {
-                $"(ansi yellow)not authenticated(ansi reset)"
+                "not authenticated"
             }
-            print $"  - ($row.name): ($status)"
-        } | ignore
+            { name: $row.name, type: "oauth2", status: $status, masked_value: null }
+        }))
     }
+
+    $result
 }
 
 # List authentication names
@@ -436,5 +424,5 @@ export def "api auth list" [] {
         $auth_list = ($auth_list | append { name: $item.name, type: "oauth2" })
     }
 
-    $auth_list | table
+    $auth_list
 }

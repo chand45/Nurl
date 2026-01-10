@@ -294,7 +294,7 @@ export def "api chain list" [] {
             description: ($chain.description? | default "")
             steps: ($chain.steps? | default [] | length)
         }
-    } | table
+    }
 }
 
 # Show chain details
@@ -307,30 +307,7 @@ export def "api chain show" [name: string] {
         return null
     }
 
-    let chain = (open $file_path)
-
-    print $"(ansi blue)Chain: ($chain.name? | default $name)(ansi reset)"
-    if ($chain.description? | default "") != "" {
-        print $"Description: ($chain.description)"
-    }
-    print ""
-
-    print "(ansi yellow)Steps:(ansi reset)"
-    mut step_num = 0
-    for step in ($chain.steps? | default []) {
-        $step_num = $step_num + 1
-        print $"  ($step_num). ($step.request? | default 'inline')"
-
-        if ($step.extract? | default null) != null {
-            print $"     Extract: ($step.extract | transpose | each {|e| $e.column0 } | str join ', ')"
-        }
-
-        if ($step.use? | default null) != null {
-            print $"     Use: ($step.use | transpose | each {|e| $e.column0 } | str join ', ')"
-        }
-    }
-
-    $chain
+    open $file_path
 }
 
 # Delete a chain
