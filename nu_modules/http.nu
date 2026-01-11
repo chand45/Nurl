@@ -348,7 +348,7 @@ def execute-request [
         let display_args = (build-curl-args-for-display $method $request_url $final_headers $final_body $auth)
         let curl_command = (curl-args-to-string $display_args $request_url)
         print $curl_command
-        return { dry_run: true, command: $curl_command }
+        return null
     }
 
     # Execute curl
