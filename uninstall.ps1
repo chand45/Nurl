@@ -1,5 +1,5 @@
 # Nurl Uninstallation Script for Windows
-# Usage: irm https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts/uninstall.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 

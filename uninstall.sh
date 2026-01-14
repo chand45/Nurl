@@ -1,6 +1,6 @@
 #!/bin/bash
 # Nurl Uninstallation Script for Linux/macOS
-# Usage: curl -sSL https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts/uninstall.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash
 
 set -e
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Nurl Installation Script for Linux/macOS
-# Usage: curl -sSL https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 
 set -e
 
@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 NURL_HOME="$HOME/.nurl"
-REPO_URL="https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts"
+REPO_URL="https://raw.githubusercontent.com/chand45/Nurl/main"
 NUSHELL_CONFIG_DIR="$HOME/.config/nushell"
 
 echo -e "${BLUE}Installing Nurl - Terminal API Client${NC}"
