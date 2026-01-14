@@ -50,7 +50,8 @@ foreach ($module in $Modules) {
 Write-Host "[3/4] Creating default configuration..."
 
 if (-not (Test-Path "$NurlHome\config.nuon")) {
-    @'
+    # Use WriteAllText to avoid BOM - Nushell's nuon parser doesn't handle BOM
+    $configContent = @'
 {
     default_headers: {
         "Content-Type": "application/json"
@@ -66,22 +67,24 @@ if (-not (Test-Path "$NurlHome\config.nuon")) {
         info: "blue"
     }
 }
-'@ | Set-Content -Path "$NurlHome\config.nuon" -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText("$NurlHome\config.nuon", $configContent)
 }
 
 if (-not (Test-Path "$NurlHome\variables.nuon")) {
-    "{}" | Set-Content -Path "$NurlHome\variables.nuon" -Encoding UTF8
+    [System.IO.File]::WriteAllText("$NurlHome\variables.nuon", "{}")
 }
 
 if (-not (Test-Path "$NurlHome\secrets.nuon")) {
-    @'
+    $secretsContent = @'
 {
     tokens: {}
     oauth: {}
     api_keys: {}
     basic_auth: {}
 }
-'@ | Set-Content -Path "$NurlHome\secrets.nuon" -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText("$NurlHome\secrets.nuon", $secretsContent)
 }
 
 # Add to Nushell config
@@ -103,8 +106,8 @@ if ($ConfigContent -match "\.nurl[/\\]api\.nu") {
 } else {
     Add-Content -Path $ConfigPath -Value ""
     Add-Content -Path $ConfigPath -Value "# Nurl - Terminal API Client"
-    # Use $env.USERPROFILE for Windows compatibility
-    Add-Content -Path $ConfigPath -Value 'source $"($env.USERPROFILE)\.nurl\api.nu"'
+    # Use ~ which Nushell expands at parse-time (source requires parse-time constants)
+    Add-Content -Path $ConfigPath -Value 'source ~/.nurl/api.nu'
     Write-Host "  Added nurl to Nushell config"
 }
 
@@ -124,7 +127,7 @@ if ($IsUpdate) {
 
 Write-Host ""
 Write-Host "Restart your terminal or run:"
-Write-Host '  source $"($env.USERPROFILE)\.nurl\api.nu"' -ForegroundColor Blue
+Write-Host '  source ~/.nurl/api.nu' -ForegroundColor Blue
 Write-Host ""
 Write-Host "Then try:"
 Write-Host "  api help" -ForegroundColor Blue
