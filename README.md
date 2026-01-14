@@ -37,12 +37,26 @@
 
 ## Installation
 
+### Quick Install (Recommended)
+
+**Linux / macOS:**
+```bash
+curl -sSL https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/install.ps1 | iex
+```
+
+This installs Nurl to `~/.nurl` and automatically configures your Nushell. Restart your terminal and you're ready to go!
+
+### Manual Install (Alternative)
+
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nurl.git
-
-# Navigate to the directory
-cd nurl
+git clone https://github.com/cgaddam_microsoft/Nurl.git
+cd Nurl
 ```
 
 Then in Nushell:
@@ -50,10 +64,25 @@ Then in Nushell:
 ```nushell
 # Load Nurl (add to your config.nu for permanent use)
 source api.nu
-
-# Initialize workspace
-api init
 ```
+
+### Updating
+
+Run the same install command again - it will update the code while preserving your collections, history, and configuration.
+
+### Uninstalling
+
+**Linux / macOS:**
+```bash
+curl -sSL https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/uninstall.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/uninstall.ps1 | iex
+```
+
+Your data will be backed up before removal.
 
 ---
 
@@ -473,12 +502,14 @@ Global settings are stored in `config.nuon`:
 <details>
 <summary>Click to expand</summary>
 
+When installed via the install script, Nurl lives in `~/.nurl`:
+
 ```
-nurl/
-├── api.nu                 # Entry point (source this file)
+~/.nurl/
+├── api.nu                 # Entry point (auto-sourced via config.nu)
 ├── config.nuon            # Global configuration
 ├── variables.nuon         # Global variables
-├── secrets.nuon           # Credentials (gitignored)
+├── secrets.nuon           # Credentials (sensitive - never commit!)
 ├── nu_modules/            # Core modules
 │   ├── mod.nu             # Main module + collection commands
 │   ├── http.nu            # HTTP requests via curl
@@ -486,7 +517,8 @@ nurl/
 │   ├── vars.nu            # Variable interpolation
 │   ├── history.nu         # Request history
 │   ├── chain.nu           # Request chaining
-│   └── tui.nu             # Terminal UI
+│   ├── tui.nu             # Terminal UI
+│   └── log.nu             # Logging utilities
 ├── collections/           # Request collections
 │   └── <collection>/
 │       ├── collection.nuon    # Collection metadata
@@ -496,7 +528,7 @@ nurl/
 │       │   └── prod.nuon
 │       └── requests/          # Saved request definitions
 ├── chains/                # Chain definitions
-└── history/               # Request/response history
+└── history/               # Request/response history (by date)
 ```
 
 </details>
