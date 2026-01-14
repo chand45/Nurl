@@ -46,6 +46,35 @@ foreach ($module in $Modules) {
     Invoke-WebRequest -Uri "$RepoUrl/nu_modules/$module" -OutFile "$NurlHome\nu_modules\$module" -UseBasicParsing
 }
 
+# Download example collection (jsonplaceholder) - only on fresh install
+if (-not (Test-Path "$NurlHome\collections\jsonplaceholder")) {
+    Write-Host "  Downloading example collection: jsonplaceholder"
+    New-Item -ItemType Directory -Force -Path "$NurlHome\collections\jsonplaceholder\environments" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$NurlHome\collections\jsonplaceholder\requests" | Out-Null
+
+    # Collection metadata
+    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/collection.nuon" -OutFile "$NurlHome\collections\jsonplaceholder\collection.nuon" -UseBasicParsing
+    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/meta.nuon" -OutFile "$NurlHome\collections\jsonplaceholder\meta.nuon" -UseBasicParsing
+
+    # Environments
+    $Envs = @("default.nuon", "dev.nuon", "staging.nuon")
+    foreach ($env in $Envs) {
+        Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/environments/$env" -OutFile "$NurlHome\collections\jsonplaceholder\environments\$env" -UseBasicParsing
+    }
+
+    # Requests
+    $Requests = @("create-post.nuon", "delete-post.nuon", "get-comments.nuon", "get-post.nuon", "get-posts.nuon", "get-users.nuon", "update-post.nuon")
+    foreach ($req in $Requests) {
+        Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/requests/$req" -OutFile "$NurlHome\collections\jsonplaceholder\requests\$req" -UseBasicParsing
+    }
+}
+
+# Download example chain - only on fresh install
+if (-not (Test-Path "$NurlHome\chains\example-workflow.nuon")) {
+    Write-Host "  Downloading example chain: example-workflow"
+    Invoke-WebRequest -Uri "$RepoUrl/chains/example-workflow.nuon" -OutFile "$NurlHome\chains\example-workflow.nuon" -UseBasicParsing
+}
+
 # Create default configuration (only if not exists)
 Write-Host "[3/4] Creating default configuration..."
 
@@ -123,6 +152,10 @@ if ($IsUpdate) {
     Write-Host "  - variables.nuon  OK"
 } else {
     Write-Host "Nurl installed successfully!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Included examples to get you started:"
+    Write-Host "  - jsonplaceholder collection (7 sample requests)"
+    Write-Host "  - example-workflow chain (request chaining demo)"
 }
 
 Write-Host ""
@@ -131,4 +164,6 @@ Write-Host '  source ~/.nurl/api.nu' -ForegroundColor Blue
 Write-Host ""
 Write-Host "Then try:"
 Write-Host "  api help" -ForegroundColor Blue
-Write-Host "  api get https://jsonplaceholder.typicode.com/posts/1" -ForegroundColor Blue
+Write-Host "  api collection list" -ForegroundColor Blue
+Write-Host "  api send get-posts -c jsonplaceholder" -ForegroundColor Blue
+Write-Host "  api chain run example-workflow -c jsonplaceholder" -ForegroundColor Blue

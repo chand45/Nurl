@@ -60,6 +60,35 @@ for module in "${MODULES[@]}"; do
     curl -sSL "$REPO_URL/nu_modules/$module" -o "$NURL_HOME/nu_modules/$module"
 done
 
+# Download example collection (jsonplaceholder) - only on fresh install
+if [ ! -d "$NURL_HOME/collections/jsonplaceholder" ]; then
+    echo -e "  Downloading example collection: jsonplaceholder"
+    mkdir -p "$NURL_HOME/collections/jsonplaceholder/environments"
+    mkdir -p "$NURL_HOME/collections/jsonplaceholder/requests"
+
+    # Collection metadata
+    curl -sSL "$REPO_URL/collections/jsonplaceholder/collection.nuon" -o "$NURL_HOME/collections/jsonplaceholder/collection.nuon"
+    curl -sSL "$REPO_URL/collections/jsonplaceholder/meta.nuon" -o "$NURL_HOME/collections/jsonplaceholder/meta.nuon"
+
+    # Environments
+    ENVS=("default.nuon" "dev.nuon" "staging.nuon")
+    for env in "${ENVS[@]}"; do
+        curl -sSL "$REPO_URL/collections/jsonplaceholder/environments/$env" -o "$NURL_HOME/collections/jsonplaceholder/environments/$env"
+    done
+
+    # Requests
+    REQUESTS=("create-post.nuon" "delete-post.nuon" "get-comments.nuon" "get-post.nuon" "get-posts.nuon" "get-users.nuon" "update-post.nuon")
+    for req in "${REQUESTS[@]}"; do
+        curl -sSL "$REPO_URL/collections/jsonplaceholder/requests/$req" -o "$NURL_HOME/collections/jsonplaceholder/requests/$req"
+    done
+fi
+
+# Download example chain - only on fresh install
+if [ ! -f "$NURL_HOME/chains/example-workflow.nuon" ]; then
+    echo -e "  Downloading example chain: example-workflow"
+    curl -sSL "$REPO_URL/chains/example-workflow.nuon" -o "$NURL_HOME/chains/example-workflow.nuon"
+fi
+
 # Create default configuration (only if not exists)
 echo -e "[3/4] Creating default configuration..."
 
@@ -133,6 +162,10 @@ if [ "$IS_UPDATE" = true ]; then
     echo "  - variables.nuon  ✓"
 else
     echo -e "${GREEN}✓ Nurl installed successfully!${NC}"
+    echo ""
+    echo "Included examples to get you started:"
+    echo "  - jsonplaceholder collection (7 sample requests)"
+    echo "  - example-workflow chain (request chaining demo)"
 fi
 
 echo ""
@@ -141,4 +174,6 @@ echo -e "  ${BLUE}source ~/.nurl/api.nu${NC}"
 echo ""
 echo "Then try:"
 echo -e "  ${BLUE}api help${NC}"
-echo -e "  ${BLUE}api get https://jsonplaceholder.typicode.com/posts/1${NC}"
+echo -e "  ${BLUE}api collection list${NC}"
+echo -e "  ${BLUE}api send get-posts -c jsonplaceholder${NC}"
+echo -e "  ${BLUE}api chain run example-workflow -c jsonplaceholder${NC}"
