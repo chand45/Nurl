@@ -41,12 +41,12 @@
 
 **Linux / macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/chand45/Nurl/main/install.ps1 | iex
 ```
 
 This installs Nurl to `~/.nurl` and automatically configures your Nushell. Restart your terminal and you're ready to go!
@@ -55,7 +55,7 @@ This installs Nurl to `~/.nurl` and automatically configures your Nushell. Resta
 
 ```bash
 # Clone the repository
-git clone https://github.com/cgaddam_microsoft/Nurl.git
+git clone https://github.com/chand45/Nurl.git
 cd Nurl
 ```
 
@@ -74,12 +74,12 @@ Run the same install command again - it will update the code while preserving yo
 
 **Linux / macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
 ```
 
 Your data will be backed up before removal.

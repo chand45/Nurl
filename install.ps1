@@ -1,11 +1,11 @@
 # Nurl Installation Script for Windows
-# Usage: irm https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/cg/add_installation_scripts/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
 # Configuration
 $NurlHome = "$env:USERPROFILE\.nurl"
-$RepoUrl = "https://raw.githubusercontent.com/cgaddam_microsoft/Nurl/cg/add_installation_scripts"
+$RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/cg/add_installation_scripts"
 $NushellConfigDir = "$env:APPDATA\nushell"
 
 Write-Host "Installing Nurl - Terminal API Client" -ForegroundColor Blue
