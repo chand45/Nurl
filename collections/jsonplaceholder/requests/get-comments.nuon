@@ -1,0 +1,11 @@
+{
+    name: "get-comments"
+    description: "Get comments for a post"
+    method: "GET"
+    url: "{{base_url}}/posts/{{post_id}}/comments"
+    headers: {}
+    body: null
+    auth: null
+    tests: null
+    chain: null
+}

@@ -1,0 +1,11 @@
+{
+    name: "get-posts"
+    description: "Get all posts"
+    method: "GET"
+    url: "{{base_url}}/posts"
+    headers: {}
+    body: null
+    auth: null
+    tests: null
+    chain: null
+}

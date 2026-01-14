@@ -1,0 +1,16 @@
+{
+    name: "get-post"
+    description: "Get a single post by ID"
+    method: "GET"
+    url: "{{base_url}}/posts/{{post_id}}"
+    headers: {}
+    body: null
+    auth: null
+    tests: null
+    chain: {
+        extract: {
+            title: "body.title"
+            userId: "body.userId"
+        }
+    }
+}
