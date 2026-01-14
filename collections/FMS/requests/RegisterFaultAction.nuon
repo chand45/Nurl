@@ -1,0 +1,69 @@
+{
+    name: RegisterFaultAction,
+    collection: FMS,
+    method: PUT,
+    url: "{{base_url}}/api/providers/{{providerId}}/fault-actions/{{actionId}}",
+    headers: {
+
+    },
+    body: {
+        type: json,
+        content: {
+            providerId: "{{providerId}}",
+            actionId: "{{actionId}}",
+            actionName: PowerOnMachinefunctions,
+            displayName: "Power On Pilotfish Machinefunctions",
+            description: "Powers On specified pilotfish machinefunctions within target clusters to test infrastructure resilience",
+            category: infrastructure,
+            impactLevel: High,
+            isReversible: true,
+            reverseActionId: "pilotfish.pfmf.power-off.v1",
+            estimatedDuration: "00:05:00",
+            version: "1.0.0",
+            parameterSchema: {
+                parameters: {
+                    clusters: {
+                        type: array,
+                        required: true,
+                        items: {
+                            type: object
+                        },
+                        description: "List of target clusters with nodeIds"
+                    },
+                    gracefulShutdown: {
+                        type: boolean,
+                        default: true
+                    },
+                    parallelExecution: {
+                        type: boolean,
+                        default: false
+                    }
+                }
+            },
+            scopeRequirements: {
+                supportedResourceTypes: [
+                    pilotfish-node
+                ],
+                minResourceCount: 1,
+                maxResourceCount: 20
+            },
+            safetyConstraints: {
+                maxImpactPercentage: 30.0,
+                maxExecutionDuration: "00:15:00",
+                requiresRollback: true
+            },
+            metadata: {
+                documentationUrl: "https://example/docs/compute/power-down-nodes"
+            }
+        }
+    },
+    auth: {
+        type: bearer,
+        token_ref: dststoken
+    },
+    pre_request: null,
+    tests: null,
+    chain: null,
+    created_at: "2026-01-11T12:26:23Z",
+    updated_at: "2026-01-11T12:57:55Z"
+}
