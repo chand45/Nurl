@@ -8,8 +8,8 @@
     },
     body: null,
     auth: {
-        type: bearer,
-        token_ref: dststoken
+        type: saml,
+        token_ref: samltoken
     },
     pre_request: null,
     tests: null,

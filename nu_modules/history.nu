@@ -202,7 +202,7 @@ def find-history-entry [id: string] {
 export def "api history resend" [
     id: string               # History entry ID
     --environment (-e): string = ""  # Override environment
-    --auth (-a): record = {} # Authentication config (e.g., {type: bearer, token_ref: mytoken})
+    --auth (-a): record = {} # Authentication config (e.g., {type: bearer, token_ref: mytoken} or {type: saml, token_ref: mysaml})
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {

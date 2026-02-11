@@ -1,5 +1,5 @@
 # Authentication Module
-# Handles Bearer, Basic, API Key, and OAuth2 authentication
+# Handles Bearer, Basic, API Key, OAuth2, and SAML authentication
 
 # Truncate a string to max length with ellipsis
 def truncate-value [value: any, max_len: int = 40] {
@@ -25,6 +25,7 @@ def load-secrets [] {
     } else {
         {
             tokens: {}
+            saml_tokens: {}
             oauth: {}
             api_keys: {}
             basic_auth: {}
@@ -54,7 +55,7 @@ export def "api auth bearer set" [
 # Get bearer token by name
 export def "api auth bearer get" [name: string] {
     let secrets = (load-secrets)
-    $secrets.tokens | get -o $name | get -o bearer
+    $secrets.tokens? | default {} | get -o $name | get -o bearer
 }
 
 # Delete bearer token
@@ -66,6 +67,39 @@ export def "api auth bearer delete" [name: string] {
         print $"(ansi green)Bearer token '($name)' deleted(ansi reset)"
     } else {
         print $"(ansi yellow)Token '($name)' not found(ansi reset)"
+    }
+}
+
+# --- SAML Token Authentication ---
+
+# Set a SAML token
+export def "api auth saml set" [
+    name: string   # Token name/identifier
+    token: string  # The SAML token
+] {
+    mut secrets = (load-secrets)
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    $secrets = ($secrets | upsert saml_tokens ($saml_tokens | upsert $name { saml: $token }))
+    save-secrets $secrets
+    print $"(ansi green)SAML token '($name)' saved(ansi reset)"
+}
+
+# Get SAML token by name
+export def "api auth saml get" [name: string] {
+    let secrets = (load-secrets)
+    $secrets.saml_tokens? | default {} | get -o $name | get -o saml
+}
+
+# Delete SAML token
+export def "api auth saml delete" [name: string] {
+    mut secrets = (load-secrets)
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    if $name in $saml_tokens {
+        $secrets = ($secrets | upsert saml_tokens ($saml_tokens | reject $name))
+        save-secrets $secrets
+        print $"(ansi green)SAML token '($name)' deleted(ansi reset)"
+    } else {
+        print $"(ansi yellow)SAML token '($name)' not found(ansi reset)"
     }
 }
 
@@ -334,6 +368,14 @@ export def "api auth get-config" [auth_spec: record] {
             }
             { type: "bearer", token: $token }
         }
+        "saml" => {
+            let token = if $ref != "" {
+                api auth saml get $ref
+            } else {
+                $auth_spec.token? | default ""
+            }
+            { type: "saml", token: $token }
+        }
         "basic" => {
             let creds = if $ref != "" {
                 api auth basic get $ref
@@ -374,6 +416,14 @@ export def "api auth show" [
     if not ($secrets.tokens | is-empty) {
         $result = ($result | append ($secrets.tokens | transpose name config | each {|row|
             { name: $row.name, type: "bearer", status: "configured", value: $row.config.bearer }
+        }))
+    }
+
+    # SAML tokens
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    if not ($saml_tokens | is-empty) {
+        $result = ($result | append ($saml_tokens | transpose name config | each {|row|
+            { name: $row.name, type: "saml", status: "configured", value: $row.config.saml }
         }))
     }
 
@@ -433,6 +483,10 @@ export def "api auth list" [] {
 
     for item in ($secrets.tokens | transpose name value) {
         $auth_list = ($auth_list | append { name: $item.name, type: "bearer" })
+    }
+
+    for item in (($secrets.saml_tokens? | default {}) | transpose name value) {
+        $auth_list = ($auth_list | append { name: $item.name, type: "saml" })
     }
 
     for item in ($secrets.basic_auth | transpose name value) {

@@ -1,8 +1,8 @@
 {
-    name: TerminateFaultAction,
+    name: GetFaultActionExecutionStatus,
     collection: FMS,
-    method: POST,
-    url: "{{base_url}}/api/fault-plans/{{planId}}/actions/{{executionId}}/cancel",
+    method: GET,
+    url: "{{base_url}}/api/fault-plans/{{planId}}/actions/{{executionId}}/status",
     headers: {
 
     },
@@ -14,5 +14,5 @@
     pre_request: null,
     tests: null,
     chain: null,
-    created_at: "2026-01-11T13:13:20Z"
+    created_at: "2026-01-23T14:54:41Z"
 }

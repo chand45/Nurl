@@ -262,9 +262,10 @@ Requests: 3 successful, 0 failed
 │ # │ name            │ type    │ status               │ value           │
 ├───┼─────────────────┼─────────┼──────────────────────┼─────────────────┤
 │ 0 │ mytoken         │ bearer  │ configured           │ eyJhbGciOi...   │
-│ 1 │ mycreds         │ basic   │ configured           │ admin:***       │
-│ 2 │ stripe-key      │ apikey  │ header: X-API-Key    │ sk_test_***     │
-│ 3 │ github-oauth    │ oauth2  │ token expires: 2h    │ gho_xxxx***     │
+│ 1 │ mysaml          │ saml    │ configured           │ PHNhbWw...      │
+│ 2 │ mycreds         │ basic   │ configured           │ admin:***       │
+│ 3 │ stripe-key      │ apikey  │ header: X-API-Key    │ sk_test_***     │
+│ 4 │ github-oauth    │ oauth2  │ token expires: 2h    │ gho_xxxx***     │
 ╰───┴─────────────────┴─────────┴──────────────────────┴─────────────────╯
 ```
 
@@ -277,7 +278,7 @@ Requests: 3 successful, 0 failed
 - **Collections** — Organize requests into shareable, git-friendly collections
 - **Environments** — Switch between dev/staging/prod with one command
 - **Variable Interpolation** — Use `{{variable}}` syntax in URLs, headers, and bodies
-- **Authentication** — Bearer tokens, Basic Auth, API Keys, OAuth2
+- **Authentication** — Bearer tokens, SAML, Basic Auth, API Keys, OAuth2
 - **Request History** — Automatic logging with search and resend
 - **Request Chaining** — Execute sequences with variable extraction between requests
 - **Interactive TUI** — Browse and test APIs without remembering commands
@@ -410,6 +411,10 @@ api send create-user -c my-api --vars { name: "Alice" }
 # Bearer token
 api auth bearer set mytoken "your-jwt-token-here"
 api get "{{base_url}}/protected" -a { type: bearer, token_ref: mytoken }
+
+# SAML token (Authorization: http://schemas.microsoft.com/dsts/saml2-bearer <token>)
+api auth saml set mysaml "your-saml-token-here"
+api get "{{base_url}}/protected" -a { type: saml, token_ref: mysaml }
 
 # Basic auth
 api auth basic set mycreds "username" "password"
@@ -573,7 +578,7 @@ Run `api help` for the full command list, or:
 | **Environments** | `api collection env create/use/show/set/unset/delete/list` |
 | **Requests** | `api request create/list/show/update/delete`, `api send` |
 | **Variables** | `api vars list/set/unset` |
-| **Auth** | `api auth bearer/basic/apikey/oauth2 set/get/delete`, `api auth show` |
+| **Auth** | `api auth bearer/saml/basic/apikey/oauth2 set/get/delete`, `api auth show` |
 | **History** | `api history list/show/search/resend` |
 | **Chains** | `api chain run/exec` |
 | **Other** | `api init`, `api status`, `api help`, `api tui` |

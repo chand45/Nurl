@@ -120,6 +120,9 @@ def build-curl-args [
             "bearer" => {
                 $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"])
             }
+            "saml" => {
+                $args = ($args | append ["-H" $"Authorization: http://schemas.microsoft.com/dsts/saml2-bearer ($auth.token)"])
+            }
             "basic" => {
                 $args = ($args | append ["-u" $"($auth.username):($auth.password)"])
             }
@@ -166,6 +169,9 @@ def build-curl-args-for-display [
         match ($auth.type? | default "none") {
             "bearer" => {
                 $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"])
+            }
+            "saml" => {
+                $args = ($args | append ["-H" $"Authorization: http://schemas.microsoft.com/dsts/saml2-bearer ($auth.token)"])
             }
             "basic" => {
                 $args = ($args | append ["-u" $"($auth.username):($auth.password)"])

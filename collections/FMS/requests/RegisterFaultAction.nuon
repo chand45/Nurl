@@ -1,7 +1,7 @@
 {
     name: RegisterFaultAction,
     collection: FMS,
-    method: PUT,
+    method: POST,
     url: "{{base_url}}/api/providers/{{providerId}}/fault-actions/{{actionId}}",
     headers: {
 
@@ -58,8 +58,8 @@
         }
     },
     auth: {
-        type: bearer,
-        token_ref: dststoken
+        type: saml,
+        token_ref: samltoken
     },
     pre_request: null,
     tests: null,

@@ -62,6 +62,7 @@ export def "api init" [] {
     if not ($secrets_path | path exists) {
         {
             tokens: {}
+            saml_tokens: {}
             oauth: {}
             api_keys: {}
             basic_auth: {}
@@ -166,6 +167,7 @@ export def "api help" [] {
 
 (ansi yellow)Authentication:(ansi reset)
   api auth bearer set <n> <t>   Set bearer token
+  api auth saml set <n> <t>     Set SAML token
   api auth basic set <n> <u> <p> Set basic auth
   api auth apikey set <n> <k>   Set API key
   api auth oauth2 configure ... Configure OAuth2
