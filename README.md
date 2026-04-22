@@ -402,6 +402,9 @@ api send get-users -c my-api
 
 # Send with request-level variable override
 api send create-user -c my-api --vars { name: "Alice" }
+
+# Send with auth override
+api send get-users -c my-api -a { type: bearer, token_ref: mytoken }
 ```
 
 ### Authentication
