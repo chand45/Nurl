@@ -659,6 +659,7 @@ export def "api send" [
     --collection (-c): string = "" # Collection name
     --body (-b): record = {}       # Override request body as record
     --body-file (-f): string = ""  # Override request body from file
+    --auth (-a): record = {}       # Override authentication config
     --raw (-r)                     # Return raw result
     --vars (-v): record = {}       # Extra variables
     --dry-run (-d)                 # Output curl command instead of executing
@@ -732,8 +733,10 @@ export def "api send" [
         ""
     }
 
-    # Build auth from request config
-    let auth = if ($request.auth? | default null) != null {
+    # Build auth from override or request config
+    let auth = if not ($auth | is-empty) {
+        api auth get-config $auth
+    } else if ($request.auth? | default null) != null {
         api auth get-config $request.auth
     } else {
         {}
