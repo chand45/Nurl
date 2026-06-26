@@ -1,0 +1,121 @@
+# coverage.nuon — Nurl `api` command coverage manifest
+#
+# Source of truth for which `api *` commands the validation skill knows about.
+# `scripts/discover-commands.nu` parses every `export def "api ..."` in
+# nu_modules/*.nu and diffs the result against this list to surface:
+#   * uncovered  = a command exists in code but is missing here  (ADD AN ENTRY)
+#   * stale      = an entry here no longer exists in code        (REMOVE/RENAME)
+#
+# Fields
+#   command : exact exported name, e.g. "api get". Must match the code verbatim.
+#   kind    : command  -> user-facing, gets a dedicated test (see references/command-matrix.md)
+#             internal -> helper/primitive (record args or engine-invoked); exercised indirectly
+#             tui      -> interactive terminal view; smoke/parse-tested only (needs a real tty)
+#   group   : logical grouping used by the command matrix
+#   test    : one-line invocation (command) or a short note (internal/tui)
+#
+# HOW TO EXTEND: when discover-commands.nu reports a new command, add a record
+# below with the right kind/group and a concrete jsonplaceholder test, then add a
+# matching row to references/command-matrix.md and run it.
+
+[
+  # ---- setup (mod.nu) -------------------------------------------------------
+  { command: "api init",                  kind: command,  group: setup,           test: "api init  # then `git checkout -- config.nuon` (re-serialization churn)" }
+  { command: "api status",               kind: command,  group: setup,           test: "api status" }
+  { command: "api config get",           kind: command,  group: setup,           test: "api config get" }
+  { command: "api config set",           kind: command,  group: setup,           test: "api config set default_collection jsonplaceholder; api config get" }
+  { command: "api help",                 kind: command,  group: setup,           test: "api help  # prints curated command groups" }
+
+  # ---- global variables (vars.nu) ------------------------------------------
+  { command: "api vars list",            kind: command,  group: variables,       test: "api vars list" }
+  { command: "api vars set",             kind: command,  group: variables,       test: "api vars set tmp_token abc123; api vars list" }
+  { command: "api vars unset",           kind: command,  group: variables,       test: "api vars unset tmp_token" }
+  { command: "api vars test",            kind: command,  group: variables,       test: "api vars set tmp_token abc; api vars test \"t={{tmp_token}}\"; api vars unset tmp_token" }
+  { command: "api vars get-merged",      kind: internal, group: variables,       test: "helper: returns merged global+env vars; exercised by every interpolated request" }
+  { command: "api vars interpolate",     kind: internal, group: variables,       test: "helper: covered via `api vars test` and live `api send`" }
+  { command: "api vars interpolate-record", kind: internal, group: variables,    test: "helper: covered via `api send` (interpolates headers/body records)" }
+  { command: "api vars extract",         kind: internal, group: variables,       test: "helper: covered via `api chain exec` (extract step). Guarded against non-structured input." }
+
+  # ---- collections (mod.nu) ------------------------------------------------
+  { command: "api collection list",      kind: command,  group: collections,     test: "api collection list" }
+  { command: "api collection create",    kind: command,  group: collections,     test: "api collection create tmp-col --description test  # cleanup: api collection delete tmp-col --force" }
+  { command: "api collection show",      kind: command,  group: collections,     test: "api collection show jsonplaceholder" }
+  { command: "api collection copy",      kind: command,  group: collections,     test: "api collection copy jsonplaceholder tmp-copy; api collection delete tmp-copy --force" }
+  { command: "api collection delete",    kind: command,  group: collections,     test: "api collection create tmp-col; api collection delete tmp-col --force" }
+
+  # ---- collection environments (mod.nu) ------------------------------------
+  { command: "api collection env list",  kind: command,  group: collection-env,  test: "api collection env list jsonplaceholder" }
+  { command: "api collection env create",kind: command,  group: collection-env,  test: "api collection env create jsonplaceholder tmpenv; cleanup: env delete" }
+  { command: "api collection env use",   kind: command,  group: collection-env,  test: "api collection env use jsonplaceholder dev; api collection env use jsonplaceholder default" }
+  { command: "api collection env show",  kind: command,  group: collection-env,  test: "api collection env show jsonplaceholder default" }
+  { command: "api collection env set",   kind: command,  group: collection-env,  test: "api collection env create jsonplaceholder tmpenv; api collection env set jsonplaceholder k v -t tmpenv" }
+  { command: "api collection env unset", kind: command,  group: collection-env,  test: "api collection env unset jsonplaceholder k -t tmpenv" }
+  { command: "api collection env delete",kind: command,  group: collection-env,  test: "api collection env delete jsonplaceholder tmpenv --force" }
+
+  # ---- authentication (auth.nu) --------------------------------------------
+  { command: "api auth bearer set",      kind: command,  group: auth,            test: "api auth bearer set tmpcred abc123  # name + token are positional" }
+  { command: "api auth bearer get",      kind: command,  group: auth,            test: "api auth bearer get tmpcred" }
+  { command: "api auth bearer delete",   kind: command,  group: auth,            test: "api auth bearer delete tmpcred" }
+  { command: "api auth basic set",       kind: command,  group: auth,            test: "api auth basic set tmpcred u p  # name/username/password positional" }
+  { command: "api auth basic get",       kind: command,  group: auth,            test: "api auth basic get tmpcred" }
+  { command: "api auth basic delete",    kind: command,  group: auth,            test: "api auth basic delete tmpcred" }
+  { command: "api auth apikey set",      kind: command,  group: auth,            test: "api auth apikey set tmpcred secret --header X-Api-Key  # or --query api_key" }
+  { command: "api auth apikey get",      kind: command,  group: auth,            test: "api auth apikey get tmpcred" }
+  { command: "api auth apikey delete",   kind: command,  group: auth,            test: "api auth apikey delete tmpcred" }
+  { command: "api auth oauth2 configure",kind: command,  group: auth,            test: "api auth oauth2 configure tmpcred --client-id id --client-secret s --token-url https://example.com/token" }
+  { command: "api auth oauth2 token",    kind: command,  group: auth,            test: "live token fetch; needs a real OAuth2 provider. Smoke: shows config error without one." }
+  { command: "api auth oauth2 refresh",  kind: command,  group: auth,            test: "needs a real provider + refresh token. Smoke only." }
+  { command: "api auth oauth2 delete",   kind: command,  group: auth,            test: "api auth oauth2 delete tmpcred" }
+  { command: "api auth show",            kind: command,  group: auth,            test: "api auth bearer set tmpcred abc; api auth show tmpcred; api auth bearer delete tmpcred" }
+  { command: "api auth list",            kind: command,  group: auth,            test: "api auth list" }
+  { command: "api auth get-config",      kind: internal, group: auth,            test: "helper: takes an auth spec record; exercised when a request applies auth" }
+
+  # ---- requests (http.nu) --------------------------------------------------
+  { command: "api get",                  kind: command,  group: requests,        test: "api get https://jsonplaceholder.typicode.com/posts/1 -r  # .response.status == 200" }
+  { command: "api post",                 kind: command,  group: requests,        test: "api post https://jsonplaceholder.typicode.com/posts {title: t, body: b, userId: 1} -r  # 201" }
+  { command: "api put",                  kind: command,  group: requests,        test: "api put https://jsonplaceholder.typicode.com/posts/1 {title: t} -r  # 200" }
+  { command: "api patch",                kind: command,  group: requests,        test: "api patch https://jsonplaceholder.typicode.com/posts/1 {title: t} -r  # 200" }
+  { command: "api delete",               kind: command,  group: requests,        test: "api delete https://jsonplaceholder.typicode.com/posts/1 -r  # 200" }
+  { command: "api request",              kind: command,  group: requests,        test: "api request GET https://jsonplaceholder.typicode.com/posts/1 -r  # generic verb; string bodies pass through (no double-encode)" }
+  { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -c jsonplaceholder -r  # name positional, -c collection; interpolates {{base_url}}" }
+
+  # ---- saved requests (http.nu) --------------------------------------------
+  { command: "api request create",       kind: command,  group: saved-requests,  test: "api request create tmp-req GET '{{base_url}}/posts/1' -c jsonplaceholder  # name/method/url positional, -c collection" }
+  { command: "api request list",         kind: command,  group: saved-requests,  test: "api request list -c jsonplaceholder" }
+  { command: "api request show",         kind: command,  group: saved-requests,  test: "api request show tmp-req -c jsonplaceholder" }
+  { command: "api request update",       kind: command,  group: saved-requests,  test: "api request update tmp-req --method POST -c jsonplaceholder" }
+  { command: "api request delete",       kind: command,  group: saved-requests,  test: "api request delete tmp-req -c jsonplaceholder --force" }
+
+  # ---- history (history.nu) ------------------------------------------------
+  { command: "api history list",         kind: command,  group: history,         test: "api history list" }
+  { command: "api history show",         kind: command,  group: history,         test: "api get .../posts/1; api history show (api history list | last | get id)" }
+  { command: "api history resend",       kind: command,  group: history,         test: "api history resend <id>  # POST bodies re-sent as-is (no double-encode). -e flag is inert (warns)." }
+  { command: "api history search",       kind: command,  group: history,         test: "api history search posts" }
+  { command: "api history clear",        kind: command,  group: history,         test: "DESTRUCTIVE: back up history/ first, or run in a throwaway API_ROOT. api history clear --force" }
+  { command: "api history export",       kind: command,  group: history,         test: "api history export --format json -o ($nu.temp-path | path join nurl-hist.json)" }
+  { command: "api history save",         kind: internal, group: history,         test: "helper: called by execute-request to record each call; exercised by any live request" }
+  { command: "api history get",          kind: internal, group: history,         test: "helper: fetch one entry by id; covered via `api history show`/`resend`" }
+
+  # ---- chaining (chain.nu) -------------------------------------------------
+  { command: "api chain run",            kind: command,  group: chaining,        test: "api chain run (open chains/example-workflow.nuon | get steps)  # takes a steps LIST, not a file" }
+  { command: "api chain exec",           kind: command,  group: chaining,        test: "api chain exec example-workflow  # extract step guarded; jsonplaceholder GET-after-POST 404 is expected" }
+  { command: "api chain create",         kind: command,  group: chaining,        test: "api chain create tmp-chain; api chain delete tmp-chain --force" }
+  { command: "api chain list",           kind: command,  group: chaining,        test: "api chain list" }
+  { command: "api chain show",           kind: command,  group: chaining,        test: "api chain show example-workflow" }
+  { command: "api chain delete",         kind: command,  group: chaining,        test: "api chain create tmp-chain; api chain delete tmp-chain --force" }
+
+  # ---- tui (tui.nu) — interactive; smoke/parse-tested only -----------------
+  { command: "api tui",                  kind: tui,      group: tui,             test: "smoke: launches main menu. Interactive `input` needs a real tty (not pipeable)." }
+  { command: "api tui collections",      kind: tui,      group: tui,             test: "smoke: renders collection browser" }
+  { command: "api tui history",          kind: tui,      group: tui,             test: "smoke: renders history view" }
+  { command: "api tui environments",     kind: tui,      group: tui,             test: "smoke: uses `api collection env *` (not the nonexistent `api env *`)" }
+  { command: "api tui request",          kind: tui,      group: tui,             test: "smoke: quick-request builder; sends bodies as strings (no double-encode)" }
+  { command: "api tui chains",           kind: tui,      group: tui,             test: "smoke: renders chain browser" }
+
+  # ---- display helpers (http.nu / tui.nu) — internal formatters ------------
+  { command: "api headers",              kind: internal, group: display,         test: "helper: pretty-prints a result record's headers; covered via request output" }
+  { command: "api table",                kind: internal, group: display,         test: "helper: tabular view of a result record" }
+  { command: "api explore",              kind: internal, group: display,         test: "helper: interactive explorer over a result record" }
+  { command: "api pretty",               kind: internal, group: display,         test: "helper: pretty JSON view of a result record" }
+  { command: "api summary",              kind: internal, group: display,         test: "helper: one-line summary of a result record" }
+]

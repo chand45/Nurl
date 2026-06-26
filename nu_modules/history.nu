@@ -201,7 +201,7 @@ def find-history-entry [id: string] {
 # Resend a request from history
 export def "api history resend" [
     id: string               # History entry ID
-    --environment (-e): string = ""  # Override environment
+    --environment (-e): string = ""  # (Reserved) Environment override; not applicable here
     --auth (-a): record = {} # Authentication config (e.g., {type: bearer, token_ref: mytoken})
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
@@ -213,9 +213,11 @@ export def "api history resend" [
         return null
     }
 
-    # Switch environment if specified
+    # Note: history entries store the fully-resolved request URL, so there are
+    # no variables left to re-resolve. Environment overrides therefore have no
+    # effect on a resend and are intentionally not applied here.
     if $environment != "" {
-        api env use $environment
+        log warn "Environment override is ignored for history resend (request is already fully resolved)"
     }
 
     # Rebuild body string

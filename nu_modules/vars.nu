@@ -370,6 +370,14 @@ export def "api vars extract" [
             return null
         }
 
+        # Only structured data can be navigated further. If the current value is
+        # a string/number (e.g. an error response whose body wasn't JSON), there
+        # are no sub-fields to extract, so stop gracefully instead of erroring.
+        let cur_type = ($current | describe)
+        if not (($cur_type | str starts-with "record") or ($cur_type | str starts-with "list") or ($cur_type | str starts-with "table")) {
+            return null
+        }
+
         # Handle array index notation like "items.0.name"
         if ($part | str contains "[") {
             let base = ($part | parse -r '^([^\[]+)\[(\d+)\]$')

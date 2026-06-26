@@ -606,7 +606,7 @@ export def "api delete" [
 export def "api request" [
     --method (-m): string = "GET"  # HTTP method
     url: string                    # URL to request
-    --body (-b): record = {}       # Request body as record
+    --body (-b): any = {}          # Request body as a record, or a pre-serialized JSON/string body
     --body-file (-f): string = ""  # Read body from file
     --headers (-H): record = {}    # Additional headers
     --auth (-a): record = {}       # Authentication config
@@ -618,8 +618,16 @@ export def "api request" [
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
 
-    # Resolve body from multiple sources
-    let final_body = (resolve-body -b $body -f $body_file)
+    # Resolve body from multiple sources. A string body is already serialized
+    # (e.g. coming from a chain step or history resend) and must be sent as-is;
+    # re-encoding it through resolve-body would double-encode the JSON.
+    let final_body = if $body_file != "" {
+        (resolve-body -f $body_file)
+    } else if (($body | describe) | str starts-with "string") {
+        $body
+    } else {
+        (resolve-body -b $body)
+    }
     if $final_body == null {
         if $debug { $env.API_DEBUG = false }
         return null
