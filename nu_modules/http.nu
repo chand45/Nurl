@@ -1104,10 +1104,14 @@ export def "api send" [
     }
 
     # Run tests if defined (C7)
+    mut final_result = $result
     if ($request.tests? | default null) != null and ($request.tests | describe | str starts-with "record") {
         let test_results = (run-tests $result $request.tests)
+        # Merge tests_passed into result so --raw callers can inspect it
+        $final_result = ($result | upsert tests_passed $test_results.all_passed)
         if not $test_results.all_passed {
-            print $"(ansi yellow)Warning: ($test_results.failed) test(s) failed(ansi reset)"
+            let fail_msg = ("Warning: " + ($test_results.failed | into string) + " tests failed")
+            print ((ansi yellow) + $fail_msg + (ansi reset))
         }
     }
 
@@ -1126,7 +1130,7 @@ export def "api send" [
     }
 
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw $verbose $include $save
+    apply-output-selection $final_result $output $select $raw $verbose $include $save
 }
 
 # Create a new saved request
@@ -1455,7 +1459,8 @@ export def "api request export" [
 }
 
 # Run assertion tests against a response (C7)
-# tests record format: { status: 200, "response.body.id": { not_null: true }, "response.headers.Content-Type": { contains: "json" } }
+# Key shorthand: status → response.status, body.* → response.body.*, headers.* → response.headers.*
+# Full paths starting with response.* pass through unchanged.
 def run-tests [result: record, tests: record] {
     mut passed = 0
     mut failed = 0
@@ -1464,7 +1469,14 @@ def run-tests [result: record, tests: record] {
         let key = $test_entry.key
         let expected = $test_entry.expected
 
-        let actual = (api vars extract $result $key)
+        # Normalize key the same way --select does (consistent shorthand expansion)
+        let full_key = if ($key == "status") or ($key | str starts-with "body") or ($key | str starts-with "headers") {
+            "response." + $key
+        } else {
+            $key  # already full path (response.*, request.*) or literal
+        }
+
+        let actual = (api vars extract $result $full_key)
 
         let ok = if ($expected | describe) == "int" or ($expected | describe) == "string" {
             $actual == $expected
