@@ -1,0 +1,91 @@
+#!/usr/bin/env nu
+# Nurl Test Runner
+# Run all test suites and print a PASS/FAIL summary.
+#
+# Usage:
+#   & "C:\Users\cgaddam.REDMOND\AppData\Local\Programs\nu\bin\nu.exe" tests/run.nu
+#
+# The runner exits with code 0 on all-pass, 1 if any tests failed.
+# Network tests are automatically skipped if the internet is unavailable.
+
+# ── Bootstrap (static relative paths required by `source`) ────────────────────
+
+# Load Nurl (sets $env.API_ROOT to repo root via FILE_PWD)
+source ../api.nu
+
+# Load shared helpers (defines run-test, make-temp-dir, cleanup, network-ok)
+source helpers.nu
+
+# Load all test suite files (each defines run-suite-xxx)
+source test_reliability.nu
+source test_history.nu
+source test_output.nu
+source test_features.nu
+source test_vars.nu
+source test_chain.nu
+
+# ── Header ────────────────────────────────────────────────────────────────────
+
+print ""
+print $"(ansi blue_bold)╔══════════════════════════════════════╗(ansi reset)"
+print $"(ansi blue_bold)║         Nurl Test Suite              ║(ansi reset)"
+print $"(ansi blue_bold)╚══════════════════════════════════════╝(ansi reset)"
+
+# ── Network check ─────────────────────────────────────────────────────────────
+
+print "\nChecking network connectivity..."
+let net_ok = (network-ok)
+if $net_ok {
+    print $"(ansi green)✓ Network available — all tests will run(ansi reset)"
+} else {
+    print $"(ansi yellow)⚠ Network unavailable — HTTP tests will be skipped(ansi reset)"
+}
+
+# ── Run all suites ────────────────────────────────────────────────────────────
+
+let all_results = (
+    [
+        ...(run-suite-vars)            # Offline — runs first (fastest)
+        ...(run-suite-reliability $net_ok)
+        ...(run-suite-history $net_ok)
+        ...(run-suite-output $net_ok)
+        ...(run-suite-features $net_ok)
+        ...(run-suite-chain $net_ok)
+    ]
+)
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+let passed  = ($all_results | where status == "pass"  | length)
+let failed  = ($all_results | where status == "fail"  | length)
+let skipped = ($all_results | where status == "skip"  | length)
+let total   = ($all_results | length)
+
+print ""
+print $"(ansi blue)══════════════════════════════════════(ansi reset)"
+print $"(ansi blue)Results(ansi reset)"
+print $"(ansi blue)══════════════════════════════════════(ansi reset)"
+print $"  Total:   ($total)"
+print $"  (ansi green)Passed:  ($passed)(ansi reset)"
+if $skipped > 0 {
+    print $"  (ansi yellow)Skipped: ($skipped)(ansi reset)"
+}
+if $failed > 0 {
+    print $"  (ansi red)Failed:  ($failed)(ansi reset)"
+    print ""
+    print $"(ansi red)Failed tests:(ansi reset)"
+    for r in ($all_results | where status == "fail") {
+        print $"  • ($r.name)"
+        print $"    ($r.error)"
+    }
+    print ""
+    exit 1
+} else {
+    print ""
+    if $skipped > 0 {
+        let skip_note = $"($skipped) skipped, no network"
+        print $"(ansi green_bold)✓ All ($passed) tests passed(ansi reset) (ansi yellow)($skip_note)(ansi reset)"
+    } else {
+        print $"(ansi green_bold)✓ All ($total) tests passed(ansi reset)"
+    }
+}
