@@ -140,41 +140,6 @@ def test-a5-status-mapping-offline [] {
     assert equal (http-status-text 999)  "999"
 }
 
-def test-a5-extended-status-codes [] {
-    let tmp = (make-temp-dir "a5-ext")
-    $env.API_ROOT = $tmp
-    # Only assert status_text when the CDN actually returned the exact requested code.
-    # A CDN gateway error (e.g. 504 instead of 422) causes the request to succeed
-    # but with the wrong code — skip the sub-assertion rather than hard-fail.
-    let r422 = (try { api get "https://httpbin.org/status/422" --raw --no-history } catch { null })
-    if $r422 != null and $r422.response.status == 422 {
-        assert equal ($r422.response.status_text) "Unprocessable Entity"
-    }
-    let r429 = (try { api get "https://httpbin.org/status/429" --raw --no-history } catch { null })
-    if $r429 != null and $r429.response.status == 429 {
-        assert (($r429.response.status_text | str length) > 0) "429 status_text should be non-empty"
-    }
-    let r503 = (try { api get "https://httpbin.org/status/503" --raw --no-history } catch { null })
-    if $r503 != null and $r503.response.status == 503 {
-        assert (($r503.response.status_text | str length) > 0) "503 status_text should be non-empty"
-    }
-    cleanup $tmp
-}
-
-def test-a5-numeric-fallback [] {
-    # Verify status_text is always populated (even for unusual codes)
-    # Tests the numeric fallback in the status mapping
-    let tmp = (make-temp-dir "a5-fallback")
-    $env.API_ROOT = $tmp
-    # Use try/catch since httpbin may be unreliable; just verify status_text non-empty
-    let r = (try { api get "https://httpbin.org/status/418" --raw --no-history } catch { null })
-    if $r != null {
-        assert ($r.response.status > 0) "status should be a positive integer"
-        assert (($r.response.status_text | str length) > 0) "status_text should always be non-empty"
-    }
-    cleanup $tmp
-}
-
 # ── A6: history dir path — no doubled slashes ────────────────────────────────
 
 def test-a6-history-dir-no-doubled-slash [] {
@@ -241,8 +206,6 @@ def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
         (run-test "A3: resend body not double-encoded"         { test-a3-resend-body-not-double-encoded })
         (run-test "A4: resend --environment flag does not crash" { test-a4-resend-environment-flag })
         (run-test "A5: common status codes map correctly"      { test-a5-common-status-codes })
-        (run-test "A5: extended status codes (422/429/503)"    { test-a5-extended-status-codes })
-        (run-test "A5: unknown status code numeric fallback"   { test-a5-numeric-fallback })
         (run-test "A6: history dir path has no doubled slashes" { test-a6-history-dir-no-doubled-slash })
         (run-test "A7: --no-history skips writing history"     { test-a7-no-history-skips-write })
         (run-test "A7: normal request writes to history"       { test-a7-normal-request-writes-history })
