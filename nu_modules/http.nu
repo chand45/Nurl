@@ -371,6 +371,44 @@ def format-status-line [response: record, method: string, url: string] {
     $"(ansi $status_color)● ($status) ($status_text)(ansi reset)  (ansi dark_gray)($time_ms)ms  ($size_str)  ($method) ($url)(ansi reset)"
 }
 
+# Map an HTTP status code to its standard reason phrase.
+# Returns the numeric code as a string for unmapped codes (numeric fallback).
+export def http-status-text [code: int] {
+    match $code {
+        100 => "Continue"
+        101 => "Switching Protocols"
+        200 => "OK"
+        201 => "Created"
+        202 => "Accepted"
+        204 => "No Content"
+        206 => "Partial Content"
+        301 => "Moved Permanently"
+        302 => "Found"
+        303 => "See Other"
+        304 => "Not Modified"
+        307 => "Temporary Redirect"
+        308 => "Permanent Redirect"
+        400 => "Bad Request"
+        401 => "Unauthorized"
+        403 => "Forbidden"
+        404 => "Not Found"
+        405 => "Method Not Allowed"
+        408 => "Request Timeout"
+        409 => "Conflict"
+        410 => "Gone"
+        415 => "Unsupported Media Type"
+        418 => "I'm a Teapot"
+        422 => "Unprocessable Entity"
+        429 => "Too Many Requests"
+        500 => "Internal Server Error"
+        501 => "Not Implemented"
+        502 => "Bad Gateway"
+        503 => "Service Unavailable"
+        504 => "Gateway Timeout"
+        _ => ($code | into string)
+    }
+}
+
 def parse-curl-response [output: string] {
     # Split response into headers and body
     let parts = ($output | split row "---RESPONSE_META---")
@@ -430,38 +468,7 @@ def parse-curl-response [output: string] {
     }
 
     # Determine status text
-    let status_text = match $status_code {
-        100 => "Continue"
-        101 => "Switching Protocols"
-        200 => "OK"
-        201 => "Created"
-        202 => "Accepted"
-        204 => "No Content"
-        206 => "Partial Content"
-        301 => "Moved Permanently"
-        302 => "Found"
-        303 => "See Other"
-        304 => "Not Modified"
-        307 => "Temporary Redirect"
-        308 => "Permanent Redirect"
-        400 => "Bad Request"
-        401 => "Unauthorized"
-        403 => "Forbidden"
-        404 => "Not Found"
-        405 => "Method Not Allowed"
-        408 => "Request Timeout"
-        409 => "Conflict"
-        410 => "Gone"
-        415 => "Unsupported Media Type"
-        422 => "Unprocessable Entity"
-        429 => "Too Many Requests"
-        500 => "Internal Server Error"
-        501 => "Not Implemented"
-        502 => "Bad Gateway"
-        503 => "Service Unavailable"
-        504 => "Gateway Timeout"
-        _ => ($status_code | into string)
-    }
+    let status_text = http-status-text $status_code
 
     {
         status: $status_code
@@ -547,17 +554,7 @@ def execute-request [
 
         let bin_response = {
             status: $status_code
-            status_text: (match $status_code {
-                200 => "OK"
-                201 => "Created"
-                204 => "No Content"
-                400 => "Bad Request"
-                401 => "Unauthorized"
-                403 => "Forbidden"
-                404 => "Not Found"
-                500 => "Internal Server Error"
-                _ => ($status_code | into string)
-            })
+            status_text: (http-status-text $status_code)
             headers: {}
             body: $"[binary saved to: ($binary_save)]"
             time_ms: (($time_total * 1000) | math round)

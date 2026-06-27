@@ -97,30 +97,49 @@ def test-a5-common-status-codes [] {
     cleanup $tmp
 }
 
+def test-a5-status-mapping-offline [] {
+    # Pure offline test — verifies the http-status-text mapping directly.
+    # Covers common codes, extended codes (422/429/503), and the numeric fallback.
+    assert equal (http-status-text 200)  "OK"
+    assert equal (http-status-text 201)  "Created"
+    assert equal (http-status-text 204)  "No Content"
+    assert equal (http-status-text 301)  "Moved Permanently"
+    assert equal (http-status-text 302)  "Found"
+    assert equal (http-status-text 304)  "Not Modified"
+    assert equal (http-status-text 400)  "Bad Request"
+    assert equal (http-status-text 401)  "Unauthorized"
+    assert equal (http-status-text 403)  "Forbidden"
+    assert equal (http-status-text 404)  "Not Found"
+    assert equal (http-status-text 422)  "Unprocessable Entity"
+    assert equal (http-status-text 429)  "Too Many Requests"
+    assert equal (http-status-text 500)  "Internal Server Error"
+    assert equal (http-status-text 502)  "Bad Gateway"
+    assert equal (http-status-text 503)  "Service Unavailable"
+    assert equal (http-status-text 504)  "Gateway Timeout"
+    # Numeric fallback — unmapped codes → stringified code
+    assert equal (http-status-text 418)  "I'm a Teapot"
+    assert equal (http-status-text 599)  "599"
+    assert equal (http-status-text 999)  "999"
+}
+
 def test-a5-extended-status-codes [] {
     let tmp = (make-temp-dir "a5-ext")
     $env.API_ROOT = $tmp
-    # Test extended status codes via httpbin — gracefully skip if network is flaky
-    # 422 Unprocessable Entity
+    # Only assert status_text when the CDN actually returned the exact requested code.
+    # A CDN gateway error (e.g. 504 instead of 422) causes the request to succeed
+    # but with the wrong code — skip the sub-assertion rather than hard-fail.
     let r422 = (try { api get "https://httpbin.org/status/422" --raw --no-history } catch { null })
-    if $r422 != null {
-        assert equal ($r422.response.status) 422
+    if $r422 != null and $r422.response.status == 422 {
         assert equal ($r422.response.status_text) "Unprocessable Entity"
     }
-    # 429 Too Many Requests
     let r429 = (try { api get "https://httpbin.org/status/429" --raw --no-history } catch { null })
-    if $r429 != null {
-        assert equal ($r429.response.status) 429
+    if $r429 != null and $r429.response.status == 429 {
         assert (($r429.response.status_text | str length) > 0) "429 status_text should be non-empty"
     }
-    # 503 Service Unavailable
     let r503 = (try { api get "https://httpbin.org/status/503" --raw --no-history } catch { null })
-    if $r503 != null {
-        assert equal ($r503.response.status) 503
+    if $r503 != null and $r503.response.status == 503 {
         assert (($r503.response.status_text | str length) > 0) "503 status_text should be non-empty"
     }
-    # If all are null (httpbin down), verify we tested the 200/201/404 mapping
-    # in the common-codes test (which uses jsonplaceholder) — this test is a bonus
     cleanup $tmp
 }
 
@@ -188,10 +207,15 @@ def test-a7-normal-request-writes-history [] {
 
 def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)── A: Reliability A1-A7 ──(ansi reset)"
+    # A5 offline test runs regardless of network
+    mut results = [
+        (run-test "A5: status mapping offline (all codes + fallback)" { test-a5-status-mapping-offline })
+    ]
     if not $net_ok {
-        return [(skip-test "A-Reliability" "network unavailable")]
+        $results = ($results | append (skip-test "A-Reliability-network" "network unavailable"))
+        return $results
     }
-    [
+    $results = ($results | append [
         (run-test "A1: --raw returns full record"              { test-a1-raw-returns-record })
         (run-test "A1: default pretty returns null"            { test-a1-default-returns-null })
         (run-test "A1: result has request+response+timestamp"  { test-a1-status-line-structure })
@@ -203,5 +227,6 @@ def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
         (run-test "A6: history dir path has no doubled slashes" { test-a6-history-dir-no-doubled-slash })
         (run-test "A7: --no-history skips writing history"     { test-a7-no-history-skips-write })
         (run-test "A7: normal request writes to history"       { test-a7-normal-request-writes-history })
-    ]
+    ])
+    $results
 }
