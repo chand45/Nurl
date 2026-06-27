@@ -187,12 +187,55 @@ export def "api tui history" [] {
     }
 }
 
-# Environments manager
+# Environments manager — now collection-scoped (A2)
 export def "api tui environments" [] {
     print $"(ansi blue)═══ Environments ═══(ansi reset)"
     print ""
 
-    api env list
+    # First: pick a collection
+    let root = ($env.API_ROOT? | default (pwd))
+    let collections_dir = ($root | path join "collections")
+
+    if not ($collections_dir | path exists) {
+        print "(ansi yellow)No collections found. Create one with: api collection create <name>(ansi reset)"
+        return
+    }
+
+    let collections = try { ls $collections_dir | where type == dir | get name | each {|d| $d | path basename } } catch { [] }
+
+    if ($collections | is-empty) {
+        print "(ansi yellow)No collections found(ansi reset)"
+        return
+    }
+
+    print "Select a collection:"
+    print ""
+    mut idx = 0
+    for coll in $collections {
+        $idx = $idx + 1
+        print $"  [($idx)] ($coll)"
+    }
+    print "  [b] Back"
+    print ""
+
+    let coll_choice = (input "Collection: " | str trim)
+
+    if $coll_choice == "b" or $coll_choice == "" { return }
+
+    let coll_idx = try { ($coll_choice | into int) - 1 } catch { -1 }
+
+    if $coll_idx < 0 or $coll_idx >= ($collections | length) {
+        print "(ansi red)Invalid selection(ansi reset)"
+        return
+    }
+
+    let collection = ($collections | get $coll_idx)
+
+    print ""
+    print $"(ansi blue)═══ Environments for '($collection)' ═══(ansi reset)"
+    print ""
+
+    api collection env list $collection
 
     print ""
     print "  [u <name>] Use environment"
@@ -203,21 +246,19 @@ export def "api tui environments" [] {
 
     let choice = (input "Command: " | str trim)
 
-    if $choice == "b" or $choice == "" {
-        return
-    }
+    if $choice == "b" or $choice == "" { return }
 
     if ($choice | str starts-with "u ") {
         let name = ($choice | str replace "u " "")
-        api env use $name
+        api collection env use $collection $name
     } else if ($choice | str starts-with "s ") {
         let name = ($choice | str replace "s " "")
-        api env show $name
+        api collection env show $collection $name
         print ""
         input "Press Enter to continue..."
     } else if ($choice | str starts-with "c ") {
         let name = ($choice | str replace "c " "")
-        api env create $name
+        api collection env create $collection $name
     }
 }
 

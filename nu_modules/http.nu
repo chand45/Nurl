@@ -34,6 +34,23 @@ def save-to-history [request: record, response: record] {
     }
 
     $entry | to nuon | save ($date_dir | path join $"($id).nuon")
+
+    # Update history index (B1) — inline to avoid cross-module dependency
+    let index_path = ($history_dir | path join "index.nuon")
+    let existing_index = if ($index_path | path exists) {
+        try { open $index_path } catch { [] }
+    } else { [] }
+    let new_summary = {
+        id: $id
+        timestamp: $entry.timestamp
+        method: ($request.method? | default "")
+        url: ($request.url? | default "")
+        status: ($response.status? | default 0)
+        time_ms: ($response.time_ms? | default 0)
+        date_dir: ($date_dir | path basename)
+    }
+    ($existing_index | append $new_summary) | to nuon | save -f $index_path
+
     $id
 }
 
@@ -105,9 +122,15 @@ def build-curl-args [
         "-s"                    # Silent mode
         "-S"                    # Show errors
         "-w" "\n---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
-        "-X" $method
         "--max-time" (get-timeout | into string)
     ]
+
+    # HEAD: use --head so curl stops after receiving headers (avoids timeout waiting for body)
+    if $method == "HEAD" {
+        $args = ($args | append ["--head"])
+    } else {
+        $args = ($args | append ["-X" $method])
+    }
 
     # Add headers
     for header in ($headers | transpose key value) {
@@ -138,8 +161,10 @@ def build-curl-args [
         $args = ($args | append ["-d" $body])
     }
 
-    # Include response headers in output
-    $args = ($args | append ["-i"])
+    # Include response headers in output (HEAD already outputs headers via --head)
+    if $method != "HEAD" {
+        $args = ($args | append ["-i"])
+    }
 
     $args
 }
@@ -223,7 +248,123 @@ def curl-args-to-string [
     $parts | str join " "
 }
 
-# Parse curl response output
+# URL-encode a single form value (application/x-www-form-urlencoded)
+def url-encode-form-value [s: string] {
+    $s
+    | str replace --all "%" "%25"
+    | str replace --all "+" "%2B"
+    | str replace --all "&" "%26"
+    | str replace --all "=" "%3D"
+    | str replace --all "#" "%23"
+    | str replace --all " " "+"
+}
+
+# Encode a record as application/x-www-form-urlencoded
+def encode-form-data [data: record] {
+    $data | transpose key value | each {|kv|
+        let k = (url-encode-form-value $kv.key)
+        let v = (url-encode-form-value ($kv.value | into string))
+        $"($k)=($v)"
+    } | str join "&"
+}
+
+# Build curl arguments for binary file download (no -i, adds -o path)
+def build-curl-args-binary [
+    method: string
+    url: string
+    headers: record
+    output_path: string
+    body?: string
+    auth?: record
+] {
+    mut args = [
+        "-s"
+        "-S"
+        "-w" "\n---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
+        "-X" $method
+        "--max-time" (get-timeout | into string)
+        "-o" $output_path
+    ]
+
+    for header in ($headers | transpose key value) {
+        $args = ($args | append ["-H" $"($header.key): ($header.value)"])
+    }
+
+    if $auth != null {
+        match ($auth.type? | default "none") {
+            "bearer" => { $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"]) }
+            "basic" => { $args = ($args | append ["-u" $"($auth.username):($auth.password)"]) }
+            "apikey_header" => { $args = ($args | append ["-H" $"($auth.header_name): ($auth.key)"]) }
+            _ => {}
+        }
+    }
+
+    if $body != null and $body != "" {
+        $args = ($args | append ["-d" $body])
+    }
+
+    $args
+}
+
+# Print response body with content-type-aware formatting (C9)
+def print-body [body: any, output_mode: string = "pretty"] {
+    if $body == null { return }
+
+    let body_type = ($body | describe)
+
+    if $output_mode == "raw" {
+        try { print ($body | into string) } catch { print ($body | to json) }
+        return
+    }
+
+    # Pretty / body mode
+    if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
+        print ($body | to json)
+    } else {
+        let body_str = try { $body | into string } catch { "" }
+        let peek = ($body_str | str downcase | str substring 0..20)
+        if ($peek | str starts-with "<!doctype") or ($peek | str starts-with "<html") {
+            let len = ($body_str | str length)
+            print $"(ansi dark_gray)[HTML response — ($len) bytes](ansi reset)"
+            if $len > 500 {
+                print ($body_str | str substring 0..500)
+                print $"(ansi dark_gray)... [truncated](ansi reset)"
+            } else {
+                print $body_str
+            }
+        } else if ($body_str | str starts-with "<?xml") {
+            print $"(ansi dark_gray)[XML response](ansi reset)"
+            print $body_str
+        } else {
+            print $body_str
+        }
+    }
+}
+
+# Build and return a coloured status line string for display
+def format-status-line [response: record, method: string, url: string] {
+    let status = ($response.status? | default 0)
+    let status_text = ($response.status_text? | default "")
+    let time_ms = ($response.time_ms? | default 0)
+    let size_bytes = ($response.size_bytes? | default 0)
+
+    let status_color = if $status >= 200 and $status < 300 {
+        "green"
+    } else if $status >= 400 {
+        "red"
+    } else {
+        "yellow"
+    }
+
+    let size_str = if $size_bytes >= 1024 {
+        $"($size_bytes / 1024 | math round)KB"
+    } else {
+        $"($size_bytes)B"
+    }
+
+    $"(ansi $status_color)● ($status) ($status_text)(ansi reset)  (ansi dark_gray)($time_ms)ms  ($size_str)  ($method) ($url)(ansi reset)"
+}
+
 def parse-curl-response [output: string] {
     # Split response into headers and body
     let parts = ($output | split row "---RESPONSE_META---")
@@ -242,15 +383,20 @@ def parse-curl-response [output: string] {
         $meta_lines | get 2 | into int
     } else { 0 }
 
-    # Split headers from body (separated by empty line)
-    let header_body_split = ($response_part | split row "\r\n\r\n")
+    # Split headers from body — try \r\n\r\n first (HTTP/1.1), fall back to \n\n (HTTP/2)
+    let header_body_split = if ($response_part | str contains "\r\n\r\n") {
+        $response_part | split row "\r\n\r\n"
+    } else {
+        $response_part | split row "\n\n"
+    }
     let headers_raw = if ($header_body_split | length) > 0 {
         $header_body_split | first
     } else { "" }
 
     # Get body (join remaining parts in case body contains empty lines)
+    let sep = if ($response_part | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
     let body_raw = if ($header_body_split | length) > 1 {
-        $header_body_split | skip 1 | str join "\r\n\r\n"
+        $header_body_split | skip 1 | str join $sep
     } else { "" }
 
     # Parse headers
@@ -277,15 +423,36 @@ def parse-curl-response [output: string] {
 
     # Determine status text
     let status_text = match $status_code {
+        100 => "Continue"
+        101 => "Switching Protocols"
         200 => "OK"
         201 => "Created"
+        202 => "Accepted"
         204 => "No Content"
+        206 => "Partial Content"
+        301 => "Moved Permanently"
+        302 => "Found"
+        303 => "See Other"
+        304 => "Not Modified"
+        307 => "Temporary Redirect"
+        308 => "Permanent Redirect"
         400 => "Bad Request"
         401 => "Unauthorized"
         403 => "Forbidden"
         404 => "Not Found"
+        405 => "Method Not Allowed"
+        408 => "Request Timeout"
+        409 => "Conflict"
+        410 => "Gone"
+        415 => "Unsupported Media Type"
+        422 => "Unprocessable Entity"
+        429 => "Too Many Requests"
         500 => "Internal Server Error"
-        _ => "Unknown"
+        501 => "Not Implemented"
+        502 => "Bad Gateway"
+        503 => "Service Unavailable"
+        504 => "Gateway Timeout"
+        _ => ($status_code | into string)
     }
 
     {
@@ -310,6 +477,10 @@ def execute-request [
     --dry-run (-d)     # Output curl command instead of executing
     --collection (-c): string = ""   # Collection context for variable resolution
     --extra-vars (-v): record = {}   # Extra variables for interpolation
+    --follow-redirects (-L)          # Follow HTTP redirects (curl -L)
+    --retries: int = 0               # Number of retries on 5xx or connection failure
+    --retry-delay: int = 0           # Seconds to wait between retries
+    --binary-save (-B): string = ""  # Save binary response to file (bypasses body parse)
 ] {
     # Merge default headers with provided headers
     let all_headers = (get-default-headers | merge $headers)
@@ -340,10 +511,7 @@ def execute-request [
         $request_url = $"($request_url)($separator)($auth.param_name)=($auth.key)"
     }
 
-    # Build curl arguments
-    let curl_args = (build-curl-args $method $request_url $final_headers $final_body $auth)
-
-    # Handle dry-run mode - output curl command instead of executing
+    # Handle dry-run mode
     if $dry_run {
         let display_args = (build-curl-args-for-display $method $request_url $final_headers $final_body $auth)
         let curl_command = (curl-args-to-string $display_args $request_url)
@@ -351,313 +519,521 @@ def execute-request [
         return null
     }
 
-    # Execute curl
+    # Binary save mode: curl writes directly to file, no body in stdout
+    if $binary_save != "" {
+        let bin_args = (build-curl-args-binary $method $request_url $final_headers $binary_save $final_body $auth)
+        let final_bin_args = if $follow_redirects { $bin_args | append "-L" } else { $bin_args }
+        let start_time = (date now)
+        let output = (curl ...$final_bin_args $request_url | complete)
+
+        if $output.exit_code != 0 {
+            log error $"Request failed: ($output.stderr)"
+            return null
+        }
+
+        let meta_parts = ($output.stdout | split row "---RESPONSE_META---")
+        let meta_lines = if ($meta_parts | length) > 1 { ($meta_parts | get 1 | str trim | lines) } else { [] }
+        let status_code = if ($meta_lines | length) > 0 { try { $meta_lines | first | into int } catch { 0 } } else { 0 }
+        let time_total = if ($meta_lines | length) > 1 { try { $meta_lines | get 1 | into float } catch { 0.0 } } else { 0.0 }
+        let size = if ($meta_lines | length) > 2 { try { $meta_lines | get 2 | into int } catch { 0 } } else { 0 }
+
+        let bin_response = {
+            status: $status_code
+            status_text: (match $status_code {
+                200 => "OK"
+                201 => "Created"
+                204 => "No Content"
+                400 => "Bad Request"
+                401 => "Unauthorized"
+                403 => "Forbidden"
+                404 => "Not Found"
+                500 => "Internal Server Error"
+                _ => ($status_code | into string)
+            })
+            headers: {}
+            body: $"[binary saved to: ($binary_save)]"
+            time_ms: (($time_total * 1000) | math round)
+            size_bytes: $size
+        }
+
+        let request_record = { method: $method, url: $final_url, headers: $final_headers, body: null }
+        if not $no_history { save-to-history $request_record $bin_response }
+
+        print $"(ansi green)Downloaded: ($binary_save) (($size)B)(ansi reset)"
+        return {
+            request: $request_record
+            response: $bin_response
+            timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
+        }
+    }
+
+    # Build curl arguments
+    let base_args = (build-curl-args $method $request_url $final_headers $final_body $auth)
+    let curl_args = if $follow_redirects { $base_args | append "-L" } else { $base_args }
+
+    # Execute with retry loop (C8) — return-in-loop avoids null-typed mut variable
     let start_time = (date now)
-    let output = (curl ...$curl_args $request_url | complete)
+    let max_attempts = ($retries + 1)
+    mut attempt = 0
 
-    if $output.exit_code != 0 {
-        log error $"Request failed: ($output.stderr)"
-        return null
+    while $attempt < $max_attempts {
+        $attempt = $attempt + 1
+        let output = (curl ...$curl_args $request_url | complete)
+
+        if $output.exit_code != 0 {
+            if $attempt < $max_attempts {
+                if $retry_delay > 0 { sleep ($retry_delay | into duration --unit sec) }
+                continue
+            }
+            log error $"Request failed: ($output.stderr)"
+            return null
+        }
+
+        let parsed = (parse-curl-response $output.stdout)
+
+        # Retry on 5xx if attempts remain
+        if $parsed.status >= 500 and $attempt < $max_attempts {
+            if $retry_delay > 0 { sleep ($retry_delay | into duration --unit sec) }
+            continue
+        }
+
+        # Success: build and return result
+        let request_record = {
+            method: $method
+            url: $final_url
+            headers: $final_headers
+            body: (if $final_body != "" { try { $final_body | from json } catch { $final_body } } else { null })
+        }
+
+        if not $no_history {
+            save-to-history $request_record $parsed
+        }
+
+        return {
+            request: $request_record
+            response: $parsed
+            timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
+        }
     }
 
-    # Parse response
-    let response = (parse-curl-response $output.stdout)
+    log error "All request attempts failed"
+    null
+}
 
-    # Build request record for history
-    let request_record = {
-        method: $method
-        url: $final_url
-        headers: $final_headers
-        body: (if $final_body != "" { try { $final_body | from json } catch { $final_body } } else { null })
+# Format and display response (A1: always prints; C1: --output modes; C2: --select; C3: --verbose/--include)
+def display-response [
+    result: record
+    --output (-o): string = "pretty"  # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""         # Select a field using dot-path (e.g. response.body.title)
+    --verbose (-v)                     # Show request + response headers (curl-like > / <)
+    --include (-I)                     # Include response headers above body
+    --save (-S): string = ""           # Save response body to file
+] {
+    let response = $result.response
+    let method = ($result.request?.method? | default "")
+    let url = ($result.request?.url? | default "")
+
+    # --output json: full result record as JSON
+    if $output == "json" {
+        print ($result | to json)
+        return
     }
 
-    # Save to history
-    if not $no_history {
-        save-to-history $request_record $response
+    # --output status: just the status code number
+    if $output == "status" {
+        print ($response.status? | default 0)
+        return
     }
 
-    # Return formatted response
-    {
-        request: $request_record
-        response: $response
-        timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
+    # --output none: silence everything
+    if $output == "none" {
+        return
+    }
+
+    # --select: extract a specific field and print it
+    if $select != "" {
+        let extracted = (api vars extract $result $select)
+        if $extracted != null {
+            let desc = ($extracted | describe)
+            if ($desc | str starts-with "record") or ($desc | str starts-with "list") or ($desc | str starts-with "table") {
+                print ($extracted | to json)
+            } else {
+                print ($extracted | into string)
+            }
+        } else {
+            print $"(ansi yellow)(no value at path: ($select))(ansi reset)"
+        }
+        return
+    }
+
+    # Print status line (except in pure body/raw mode)
+    if $output != "body" and $output != "raw" {
+        print (format-status-line $response $method $url)
+    }
+
+    # Verbose: print request info in curl-like > style
+    if $verbose {
+        print ""
+        print $"(ansi dark_gray)> ($method) ($url)(ansi reset)"
+        for hdr in ($result.request?.headers? | default {} | transpose key value) {
+            print $"(ansi dark_gray)> ($hdr.key): ($hdr.value)(ansi reset)"
+        }
+    }
+
+    # Response headers (verbose, --include, or --output headers)
+    if $verbose or $include or $output == "headers" {
+        print ""
+        for hdr in ($response.headers? | default {} | transpose key value) {
+            print $"(ansi cyan)< ($hdr.key): ($hdr.value)(ansi reset)"
+        }
+    }
+
+    # Body (skipped in --output headers mode)
+    if $output != "headers" {
+        let body = ($response.body? | default null)
+        if $body != null and $body != "" {
+            print ""
+            print-body $body $output
+        }
+    }
+
+    # --save: write body to file
+    if $save != "" {
+        let body = ($response.body? | default null)
+        if $body != null {
+            let body_str = if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") or ($body | describe | str starts-with "table") {
+                $body | to json
+            } else {
+                try { $body | into string } catch { $body | to json }
+            }
+            $body_str | save -f $save
+            print $"(ansi green)Saved to: ($save)(ansi reset)"
+        }
     }
 }
 
-# Format and display response
-def display-response [result: record] {
-    let response = $result.response
-
-    # Log status line (only shown with --debug)
-    log status $response.status $response.status_text $response.time_ms $response.size_bytes
-
-    # Print response body (only shown with --debug)
-    if $response.body != null {
-        let body_type = ($response.body | describe)
-        if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
-            log debug ($response.body | to json)
-        } else {
-            log debug (try { $response.body | into string } catch { $response.body | to json })
-        }
+# Compute return value based on --output mode and --select path (C1, C2)
+# --raw always returns the full record; otherwise shape the return value
+def apply-output-selection [result: record, output: string, select_path: string, raw: bool] {
+    if $raw { return $result }
+    if $select_path != "" {
+        return (api vars extract $result $select_path)
+    }
+    match $output {
+        "status"  => ($result.response?.status? | default 0)
+        "body"    => ($result.response?.body? | default null)
+        "headers" => ($result.response?.headers? | default {})
+        "json"    => ($result | to json)
+        _         => $result
     }
 }
 
 # GET request
 export def "api get" [
-    url: string                    # URL to request
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    url: string                          # URL to request
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path, e.g. response.body.id)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
-
-# POST request
 export def "api post" [
-    url: string                    # URL to request
-    --body (-b): record = {}       # Request body as record
-    --body-file (-f): string = ""  # Read body from file
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    url: string                          # URL to request
+    --body (-b): record = {}             # Request body as record
+    --body-file (-f): string = ""        # Read body from file
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --form (-F): record = {}             # Form-encoded body (application/x-www-form-urlencoded)
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
 
-    # Resolve body from multiple sources
-    let final_body = (resolve-body -b $body -f $body_file)
-    if $final_body == null {
-        if $debug { $env.API_DEBUG = false }
-        return null
+    # Form encoding takes precedence over --body/--body-file
+    let final_body = if not ($form | is-empty) {
+        encode-form-data $form
+    } else {
+        let b = (resolve-body -b $body -f $body_file)
+        if $b == null {
+            if $debug { $env.API_DEBUG = false }
+            return null
+        }
+        $b
     }
 
-    let result = (execute-request "POST" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    # Override Content-Type header for form encoding
+    let req_headers = if not ($form | is-empty) {
+        $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+    } else { $headers }
+
+    let result = (execute-request "POST" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # PUT request
 export def "api put" [
-    url: string                    # URL to request
-    --body (-b): record = {}       # Request body as record
-    --body-file (-f): string = ""  # Read body from file
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    url: string                          # URL to request
+    --body (-b): record = {}             # Request body as record
+    --body-file (-f): string = ""        # Read body from file
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --form (-F): record = {}             # Form-encoded body (application/x-www-form-urlencoded)
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
 
-    # Resolve body from multiple sources
-    let final_body = (resolve-body -b $body -f $body_file)
-    if $final_body == null {
-        if $debug { $env.API_DEBUG = false }
-        return null
+    let final_body = if not ($form | is-empty) {
+        encode-form-data $form
+    } else {
+        let b = (resolve-body -b $body -f $body_file)
+        if $b == null {
+            if $debug { $env.API_DEBUG = false }
+            return null
+        }
+        $b
     }
 
-    let result = (execute-request "PUT" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    let req_headers = if not ($form | is-empty) {
+        $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+    } else { $headers }
+
+    let result = (execute-request "PUT" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # PATCH request
 export def "api patch" [
-    url: string                    # URL to request
-    --body (-b): record = {}       # Request body as record
-    --body-file (-f): string = ""  # Read body from file
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    url: string                          # URL to request
+    --body (-b): record = {}             # Request body as record
+    --body-file (-f): string = ""        # Read body from file
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --form (-F): record = {}             # Form-encoded body (application/x-www-form-urlencoded)
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
 
-    # Resolve body from multiple sources
-    let final_body = (resolve-body -b $body -f $body_file)
-    if $final_body == null {
-        if $debug { $env.API_DEBUG = false }
-        return null
+    let final_body = if not ($form | is-empty) {
+        encode-form-data $form
+    } else {
+        let b = (resolve-body -b $body -f $body_file)
+        if $b == null {
+            if $debug { $env.API_DEBUG = false }
+            return null
+        }
+        $b
     }
 
-    let result = (execute-request "PATCH" $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    let req_headers = if not ($form | is-empty) {
+        $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+    } else { $headers }
+
+    let result = (execute-request "PATCH" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # DELETE request
 export def "api delete" [
-    url: string                    # URL to request
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    url: string                          # URL to request
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # Generic request with any method
 export def "api request" [
-    --method (-m): string = "GET"  # HTTP method
-    url: string                    # URL to request
-    --body (-b): record = {}       # Request body as record
-    --body-file (-f): string = ""  # Read body from file
-    --headers (-H): record = {}    # Additional headers
-    --auth (-a): record = {}       # Authentication config
-    --raw (-r)                     # Return raw result without display
-    --no-history                   # Don't save to history
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    --method (-m): string = "GET"        # HTTP method
+    url: string                          # URL to request
+    --body (-b): record = {}             # Request body as record
+    --body-file (-f): string = ""        # Read body from file
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --form (-F): record = {}             # Form-encoded body (application/x-www-form-urlencoded)
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
 
-    # Resolve body from multiple sources
-    let final_body = (resolve-body -b $body -f $body_file)
-    if $final_body == null {
-        if $debug { $env.API_DEBUG = false }
-        return null
+    let final_body = if not ($form | is-empty) {
+        encode-form-data $form
+    } else {
+        let b = (resolve-body -b $body -f $body_file)
+        if $b == null {
+            if $debug { $env.API_DEBUG = false }
+            return null
+        }
+        $b
     }
 
-    let result = (execute-request $method $url -H $headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run)
+    let req_headers = if not ($form | is-empty) {
+        $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+    } else { $headers }
+
+    let result = (execute-request $method $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
-
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # Send a saved request by name
 export def "api send" [
-    name: string                   # Request name (path in collection)
-    --collection (-c): string = "" # Collection name
-    --body (-b): record = {}       # Override request body as record
-    --body-file (-f): string = ""  # Override request body from file
-    --auth (-a): record = {}       # Override authentication config
-    --raw (-r)                     # Return raw result
-    --vars (-v): record = {}       # Extra variables
-    --dry-run (-d)                 # Output curl command instead of executing
-    --debug                        # Show verbose output
+    name: string                         # Request name (path in collection)
+    --collection (-c): string = ""       # Collection name
+    --body (-b): record = {}             # Override request body as record
+    --body-file (-f): string = ""        # Override request body from file
+    --auth (-a): record = {}             # Override authentication config
+    --raw (-r)                           # Return raw result
+    --vars (-v): record = {}             # Extra variables
+    --dry-run (-d)                       # Output curl command instead of executing
+    --debug                              # Show verbose debug output
+    --no-history                         # Don't save to history (A7)
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose                            # Show request + response headers (no shorthand: -v taken by --vars)
+    --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
+    --save (-S): string = ""             # Save response body to file
+    --binary-save (-B): string = ""      # Save binary response directly to file
+    --retries: int = 0                   # Retry count on 5xx/connection error
+    --retry-delay: int = 0              # Seconds between retries
 ] {
     if $debug { $env.API_DEBUG = true }
     let root = ($env.API_ROOT? | default (pwd))
@@ -737,22 +1113,19 @@ export def "api send" [
     }
 
     # Execute request with collection context for variable resolution
-    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars)
+    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars --no-history=$no_history --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
         return null
     }
 
-    if ($result.dry_run? | default false) {
-        if $debug { $env.API_DEBUG = false }
-        return $result
-    }
-
-    # Run tests if defined
-    if ($request.tests? | default "") != "" {
-        # Tests would be executed here
-        log debug "Tests: not implemented yet"
+    # Run tests if defined (C7)
+    if ($request.tests? | default null) != null and ($request.tests | describe | str starts-with "record") {
+        let test_results = (run-tests $result $request.tests)
+        if not $test_results.all_passed {
+            print $"(ansi yellow)Warning: ($test_results.failed) test(s) failed(ansi reset)"
+        }
     }
 
     # Extract chain variables if defined
@@ -769,14 +1142,11 @@ export def "api send" [
         }
     }
 
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result
-        if $debug { $env.API_DEBUG = false }
-        $result
+    if not $raw {
+        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
     }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw
 }
 
 # Create a new saved request
@@ -1038,4 +1408,120 @@ export def "api table" [result: record] {
     } else {
         $body
     }
+}
+
+# HEAD request — returns status + headers, no body (C10)
+export def "api head" [
+    url: string                          # URL to request
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --debug                              # Show verbose debug output
+] {
+    if $debug { $env.API_DEBUG = true }
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "HEAD" $url -H $headers -a $resolved_auth --no-history=$no_history)
+
+    if $result == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    if $raw {
+        if $debug { $env.API_DEBUG = false }
+        $result
+    } else {
+        display-response $result --output="headers"
+        if $debug { $env.API_DEBUG = false }
+        $result
+    }
+}
+
+# OPTIONS request (C10)
+export def "api options" [
+    url: string                          # URL to request
+    --headers (-H): record = {}          # Additional headers
+    --auth (-a): record = {}             # Authentication config
+    --raw (-r)                           # Return raw result without display
+    --no-history                         # Don't save to history
+    --debug                              # Show verbose debug output
+] {
+    if $debug { $env.API_DEBUG = true }
+    let resolved_auth = (api auth get-config $auth)
+    let result = (execute-request "OPTIONS" $url -H $headers -a $resolved_auth --no-history=$no_history)
+
+    if $result == null {
+        if $debug { $env.API_DEBUG = false }
+        return null
+    }
+
+    if $raw {
+        if $debug { $env.API_DEBUG = false }
+        $result
+    } else {
+        display-response $result --output="headers"
+        if $debug { $env.API_DEBUG = false }
+        $result
+    }
+}
+
+# Export a saved request as a curl command (C11)
+export def "api request export" [
+    name: string                         # Request name
+    --collection (-c): string = "default"  # Collection name
+] {
+    api send $name -c $collection --dry-run
+}
+
+# Run assertion tests against a response (C7)
+# tests record format: { status: 200, "response.body.id": { not_null: true }, "response.headers.Content-Type": { contains: "json" } }
+def run-tests [result: record, tests: record] {
+    mut passed = 0
+    mut failed = 0
+
+    for test_entry in ($tests | transpose key expected) {
+        let key = $test_entry.key
+        let expected = $test_entry.expected
+
+        let actual = (api vars extract $result $key)
+
+        let ok = if ($expected | describe) == "int" or ($expected | describe) == "string" {
+            $actual == $expected
+        } else if ($expected | describe | str starts-with "record") {
+            mut sub_ok = true
+            if ($expected.not_null? | default false) {
+                if $actual == null { $sub_ok = false }
+            }
+            if ($expected.equals? | default null) != null {
+                if $actual != $expected.equals { $sub_ok = false }
+            }
+            if ($expected.contains? | default null) != null {
+                let actual_str = try { $actual | into string } catch { "" }
+                if not ($actual_str | str contains $expected.contains) { $sub_ok = false }
+            }
+            if ($expected.gt? | default null) != null {
+                if $actual <= $expected.gt { $sub_ok = false }
+            }
+            if ($expected.lt? | default null) != null {
+                if $actual >= $expected.lt { $sub_ok = false }
+            }
+            $sub_ok
+        } else {
+            $actual == $expected
+        }
+
+        if $ok {
+            print $"(ansi green)✓(ansi reset) ($key)"
+            $passed = $passed + 1
+        } else {
+            let actual_str = try { $actual | into string } catch { "null" }
+            let expected_str = try { $expected | into string } catch { ($expected | to json) }
+            print $"(ansi red)✗(ansi reset) ($key): expected ($expected_str | str substring 0..60), got ($actual_str | str substring 0..60)"
+            $failed = $failed + 1
+        }
+    }
+
+    print $"(ansi dark_gray)Tests: ($passed) passed, ($failed) failed(ansi reset)"
+    { passed: $passed, failed: $failed, all_passed: ($failed == 0) }
 }

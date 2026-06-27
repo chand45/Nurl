@@ -278,10 +278,16 @@ Requests: 3 successful, 0 failed
 - **Environments** — Switch between dev/staging/prod with one command
 - **Variable Interpolation** — Use `{{variable}}` syntax in URLs, headers, and bodies
 - **Authentication** — Bearer tokens, Basic Auth, API Keys, OAuth2
-- **Request History** — Automatic logging with search and resend
+- **Request History** — Automatic logging with fast indexed search and resend
 - **Request Chaining** — Execute sequences with variable extraction between requests
 - **Interactive TUI** — Browse and test APIs without remembering commands
 - **Beautiful Output** — Nushell's native tables make responses easy to read
+- **Output Control** — `--output status/body/json/headers`, `--select dot.path` for scripting
+- **Form Encoding** — `--form` for `application/x-www-form-urlencoded` POST bodies
+- **Redirect Handling** — `--follow-redirects` to follow HTTP 3xx responses
+- **Retry Logic** — `--retries` and `--retry-delay` for resilient requests
+- **HEAD & OPTIONS** — `api head` and `api options` commands
+- **File Saving** — `--save` for text, `--binary-save` for binary downloads
 
 ---
 
@@ -294,20 +300,82 @@ Requests: 3 successful, 0 failed
 api get "https://api.example.com/users"
 
 # POST with JSON body
-api post "https://api.example.com/users" -b '{"name": "John", "email": "john@example.com"}'
+api post "https://api.example.com/users" --body { name: "John", email: "john@example.com" }
 
 # PUT request
-api put "https://api.example.com/users/1" -b '{"name": "Jane"}'
+api put "https://api.example.com/users/1" --body { name: "Jane" }
+
+# PATCH request
+api patch "https://api.example.com/users/1" --body { email: "jane@example.com" }
 
 # DELETE request
 api delete "https://api.example.com/users/1"
+
+# HEAD request — status + headers only, no body (C10)
+api head "https://api.example.com/users/1"
+
+# OPTIONS request (C10)
+api options "https://api.example.com/users"
 
 # With custom headers
 api get "https://api.example.com/users" -H { "X-Custom-Header": "value" }
 
 # Using variables (from global or collection environment)
 api get "{{base_url}}/{{api_version}}/users"
+
+# Form-encoded POST (C4)
+api post "https://api.example.com/login" --form { username: "alice", password: "secret" }
+
+# Follow redirects automatically (C6)
+api get "https://api.example.com/old-url" --follow-redirects
+
+# Retry on failure — 3 times, 2s delay between retries (C8)
+api get "https://api.example.com/flaky" --retries 3 --retry-delay 2
+
+# Don't save this request to history (A7)
+api get "https://api.example.com/users" --no-history
 ```
+
+### Output Control
+
+Control exactly what Nurl displays and returns (C1, C2, C3):
+
+```nushell
+# Print the response body only
+api get "https://api.example.com/users" --output body
+
+# Print just the HTTP status code (also returned as integer)
+let code = (api get "https://api.example.com/users" --output status)
+# → 200
+
+# Print response as raw JSON  
+api get "https://api.example.com/users" --output json
+
+# Show response headers
+api get "https://api.example.com/users" --output headers
+
+# Show nothing (silent / piping mode)
+api get "https://api.example.com/users" --output none
+
+# Extract a specific field from the response (dot-path; also changes return value)
+let id = (api post "https://api.example.com/users" --body {name: "Alice"} --select response.body.id)
+# → 42
+
+# Show request + response headers (curl-like > / < style) (C3)
+api get "https://api.example.com/users" --verbose
+
+# Include response headers above the body (C3)
+api get "https://api.example.com/users" --include
+
+# Save response body to a file (C5)
+api get "https://api.example.com/report.pdf" --save output.pdf
+
+# Download binary file directly (C5)
+api get "https://api.example.com/asset.zip" --binary-save asset.zip
+
+# Return raw result record without any display (for scripting)
+let result = (api get "https://api.example.com/users" --raw)
+$result.response.body
 
 ### Variables
 
@@ -432,20 +500,29 @@ api auth show
 
 ### History
 
-Every request is automatically logged.
+Every request is automatically logged. The history index enables instant search without scanning individual files.
 
 ```nushell
-# List recent requests
+# List recent requests (uses fast O(1) index lookup)
 api history list
+api history list -l 20      # limit to 20 most recent
 
-# Search history
+# Search history by URL or method (uses index; falls back to file scan for body search)
 api history search "users"
+api history search "POST"
 
 # View full request/response details
 api history show 20260111-143208-xK9mPq
 
-# Resend a previous request
+# Resend a previous request (body, headers, and auth preserved exactly)
 api history resend 20260111-143208-xK9mPq
+
+# Rebuild the history index (repairs or migrates existing history files)
+api history rebuild-index
+
+# Clear old history
+api history clear
+api history clear --days 7    # keep last 7 days
 ```
 
 ### Request Chaining
@@ -532,6 +609,8 @@ When installed via the install script, Nurl lives in `~/.nurl`:
 │       └── requests/          # Saved request definitions
 ├── chains/                # Chain definitions
 └── history/               # Request/response history (by date)
+    ├── index.nuon         # Fast index for O(1) list/search (B1)
+    └── YYYY-MM-DD/        # Daily directories with .nuon files
 ```
 
 </details>
@@ -571,13 +650,15 @@ Run `api help` for the full command list, or:
 
 | Category | Commands |
 |----------|----------|
-| **HTTP** | `api get`, `api post`, `api put`, `api patch`, `api delete` |
+| **HTTP** | `api get`, `api post`, `api put`, `api patch`, `api delete`, `api head`, `api options`, `api request` |
+| **Output control** | `--output pretty\|body\|raw\|json\|headers\|status\|none`, `--select <dot.path>`, `--verbose`, `--include`, `--save <file>`, `--binary-save <file>` |
+| **Request options** | `--form <record>`, `--follow-redirects`, `--retries <n>`, `--retry-delay <s>`, `--no-history`, `--dry-run` |
 | **Collections** | `api collection create/list/show/delete/copy` |
 | **Environments** | `api collection env create/use/show/set/unset/delete/list` |
-| **Requests** | `api request create/list/show/update/delete`, `api send` |
+| **Requests** | `api request create/list/show/update/delete/export`, `api send` |
 | **Variables** | `api vars list/set/unset` |
 | **Auth** | `api auth bearer/basic/apikey/oauth2 set/get/delete`, `api auth show` |
-| **History** | `api history list/show/search/resend` |
+| **History** | `api history list/show/search/resend/clear/rebuild-index` |
 | **Chains** | `api chain run/exec` |
 | **Other** | `api init`, `api status`, `api help`, `api tui` |
 

@@ -4,7 +4,93 @@
 # Get history directory
 def get-history-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
-    $root | path join "history" | str replace -a '\\' '/'
+    $root | path join "history"
+}
+
+# Get history index file path (B1)
+def get-history-index-path [] {
+    (get-history-dir) | path join "index.nuon"
+}
+
+# Load history index — list of summary entries (B1)
+def load-history-index [] {
+    let path = (get-history-index-path)
+    if ($path | path exists) {
+        try { open $path } catch { [] }
+    } else {
+        []
+    }
+}
+
+# Append one summary entry to the history index (B1)
+def append-to-history-index [summary: record] {
+    let path = (get-history-index-path)
+    let existing = (load-history-index)
+    ($existing | append $summary) | to nuon | save -f $path
+}
+
+# Rebuild the full history index by scanning all date dirs + files (B1)
+export def "api history rebuild-index" [] {
+    let dir = (get-history-dir)
+    if not ($dir | path exists) { return [] }
+
+    let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
+    let entries = $subdirs | each {|subdir|
+        let date_dir = ($subdir | path basename)
+        (try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] })
+        | each {|file|
+            try {
+                let e = (open $file)
+                {
+                    id: ($e.id? | default "")
+                    timestamp: ($e.timestamp? | default "")
+                    method: ($e.request?.method? | default "")
+                    url: ($e.request?.url? | default "")
+                    status: ($e.response?.status? | default 0)
+                    time_ms: ($e.response?.time_ms? | default 0)
+                    date_dir: $date_dir
+                }
+            } catch { null }
+        }
+        | where {|e| $e != null }
+    } | flatten | sort-by timestamp -r
+
+    let path = (get-history-index-path)
+    $entries | to nuon | save -f $path
+    print $"(ansi green)Index rebuilt: ($entries | length) entries(ansi reset)"
+    $entries
+}
+
+# Ensure history index exists; auto-rebuild if missing (B1)
+def ensure-history-index [] {
+    let path = (get-history-index-path)
+    if not ($path | path exists) {
+        let dir = (get-history-dir)
+        if ($dir | path exists) {
+            # Silently rebuild
+            let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
+            let entries = $subdirs | each {|subdir|
+                let date_dir = ($subdir | path basename)
+                (try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] })
+                | each {|file|
+                    try {
+                        let e = (open $file)
+                        {
+                            id: ($e.id? | default "")
+                            timestamp: ($e.timestamp? | default "")
+                            method: ($e.request?.method? | default "")
+                            url: ($e.request?.url? | default "")
+                            status: ($e.response?.status? | default 0)
+                            time_ms: ($e.response?.time_ms? | default 0)
+                            date_dir: $date_dir
+                        }
+                    } catch { null }
+                }
+                | where {|e| $e != null }
+            } | flatten | sort-by timestamp -r
+            $entries | to nuon | save -f $path
+        }
+    }
 }
 
 # Ensure history directory exists
@@ -60,13 +146,24 @@ export def "api history save" [
 
     $entry | to nuon | save $file_path
 
+    # Update history index (B1)
+    append-to-history-index {
+        id: $id
+        timestamp: $entry.timestamp
+        method: ($request.method? | default "")
+        url: ($request.url? | default "")
+        status: ($response.status? | default 0)
+        time_ms: ($response.time_ms? | default 0)
+        date_dir: ($date_dir | path basename)
+    }
+
     $id
 }
 
-# List history entries
+# List history entries — uses index for O(1) list/search (B1)
 export def "api history list" [
     --limit (-l): int = 20       # Number of entries to show
-    --filter (-f): string = ""   # Filter by method, status, or URL
+    --filter (-f): string = ""   # Filter by method (method:GET), status (status:200), or URL substring
     --date (-d): string = ""     # Filter by date (YYYY-MM-DD)
 ] {
     let dir = (get-history-dir)
@@ -76,81 +173,51 @@ export def "api history list" [
         return []
     }
 
-    # Get all history files using ls instead of glob for Windows compatibility
-    let files = if $date != "" {
-        let date_dir = ($dir | path join $date)
-        if ($date_dir | path exists) {
-            try { ls ($date_dir) | where name =~ '\.nuon$' | get name | sort -r } catch { [] }
-        } else {
-            []
-        }
-    } else {
-        # Get all nuon files from all date subdirectories
-        let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-        $subdirs | each {|subdir|
-            try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] }
-        } | flatten | sort -r
-    }
+    # Ensure index exists (auto-build from files if needed)
+    ensure-history-index
 
-    if ($files | is-empty) {
+    # Load from index — already sorted newest first
+    let all_entries = (load-history-index)
+
+    if ($all_entries | is-empty) {
         print "(ansi yellow)No history found(ansi reset)"
         return []
     }
 
-    mut entries = []
+    # Apply filters using index fields only (no file I/O needed)
+    let filtered = $all_entries | where {|entry|
+        let date_ok = if $date != "" {
+            ($entry.date_dir? | default "") == $date
+        } else { true }
 
-    for file in $files {
-        if ($entries | length) >= $limit {
-            break
-        }
-
-        let entry = try {
-            open $file
-        } catch {
-            continue
-        }
-
-        # Apply filters
-        let matches = if $filter == "" {
+        let str_ok = if $filter == "" {
             true
         } else if ($filter | str starts-with "status:") {
-            let status = ($filter | str replace "status:" "" | into int)
-            ($entry.response.status? | default 0) == $status
+            let want = ($filter | str replace "status:" "" | into int)
+            ($entry.status? | default 0) == $want
         } else if ($filter | str starts-with "method:") {
-            let method = ($filter | str replace "method:" "" | str upcase)
-            ($entry.request.method? | default "") == $method
+            let want = ($filter | str replace "method:" "" | str upcase)
+            ($entry.method? | default "") == $want
         } else {
-            # General text search in URL
-            ($entry.request.url? | default "") | str contains $filter
+            ($entry.url? | default "") | str contains $filter
         }
 
-        if $matches {
-            $entries = ($entries | append $entry)
-        }
+        $date_ok and $str_ok
     }
 
-    if ($entries | is-empty) {
+    if ($filtered | is-empty) {
         print "(ansi yellow)No matching history entries(ansi reset)"
         return []
     }
 
-    # Format for display
-    $entries | each {|entry|
-        let status_color = if ($entry.response.status? | default 0) >= 200 and ($entry.response.status? | default 0) < 300 {
-            "green"
-        } else if ($entry.response.status? | default 0) >= 400 {
-            "red"
-        } else {
-            "yellow"
-        }
-
+    $filtered | first $limit | each {|entry|
         {
-            id: $entry.id
-            timestamp: ($entry.timestamp | str substring 11..19)
-            method: ($entry.request.method? | default "???")
-            status: ($entry.response.status? | default 0)
-            url: ($entry.request.url? | default "" | str substring 0..50)
-            time_ms: ($entry.response.time_ms? | default 0)
+            id: ($entry.id? | default "")
+            timestamp: (($entry.timestamp? | default "") | str substring 11..19)
+            method: ($entry.method? | default "???")
+            status: ($entry.status? | default 0)
+            url: ($entry.url? | default "" | str substring 0..50)
+            time_ms: ($entry.time_ms? | default 0)
         }
     }
 }
@@ -214,30 +281,30 @@ export def "api history resend" [
     }
 
     # Switch environment if specified
-    if $environment != "" {
-        api env use $environment
-    }
+    # Note: global env concept not supported; flag is kept for backward compat but is a no-op
+    # (was: api env use $environment — command does not exist)
 
-    # Rebuild body string
-    let body = if ($entry.request.body? | default null) != null {
+    # Rebuild body record from stored body (avoid double-encoding)
+    let body_record = if ($entry.request.body? | default null) != null {
         if ($entry.request.body | describe | str starts-with "record") or ($entry.request.body | describe | str starts-with "list") {
-            $entry.request.body | to json
+            $entry.request.body
         } else {
-            $entry.request.body | into string
+            # body stored as string — decode it
+            try { $entry.request.body | into string | from json } catch { {} }
         }
     } else {
-        ""
+        {}
     }
 
     if not $dry_run {
         print $"(ansi dark_gray)Resending: ($entry.request.method) ($entry.request.url)(ansi reset)"
     }
 
-    # Execute request
-    api request -m $entry.request.method $entry.request.url -b $body -H $entry.request.headers -a $auth --raw=$raw --dry-run=$dry_run
+    # Execute request — pass body as record (api request handles to-json internally)
+    api request -m $entry.request.method $entry.request.url -b $body_record -H $entry.request.headers -a $auth --raw=$raw --dry-run=$dry_run
 }
 
-# Search history
+# Search history — uses index for URL/method; falls back to files for body search
 export def "api history search" [
     query: string            # Search query
     --limit (-l): int = 20   # Max results
@@ -249,6 +316,34 @@ export def "api history search" [
         return []
     }
 
+    ensure-history-index
+
+    let all_entries = (load-history-index)
+    if ($all_entries | is-empty) {
+        print $"(ansi yellow)No results for '($query)'(ansi reset)"
+        return []
+    }
+
+    # Search URL and method from index (fast path)
+    let index_matches = $all_entries | where {|entry|
+        let url_match = ($entry.url? | default "") | str contains -i $query
+        let method_match = ($entry.method? | default "") | str contains -i $query
+        $url_match or $method_match
+    } | first $limit
+
+    if not ($index_matches | is-empty) {
+        return ($index_matches | each {|entry|
+            {
+                id: ($entry.id? | default "")
+                timestamp: (($entry.timestamp? | default "") | str substring 0..19)
+                method: ($entry.method? | default "???")
+                status: ($entry.status? | default 0)
+                url: ($entry.url? | default "" | str substring 0..50)
+            }
+        })
+    }
+
+    # Fall back to body search (open files, slow path)
     let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
     let files = $subdirs | each {|subdir|
         try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] }
@@ -257,28 +352,15 @@ export def "api history search" [
     mut results = []
 
     for file in $files {
-        if ($results | length) >= $limit {
-            break
-        }
+        if ($results | length) >= $limit { break }
 
-        let entry = try {
-            open $file
-        } catch {
-            continue
-        }
-
-        # Search in URL, method, status, and response body
-        let url_match = ($entry.request.url? | default "") | str contains -i $query
-        let method_match = ($entry.request.method? | default "") | str contains -i $query
+        let entry = try { open $file } catch { continue }
 
         let body_text = if ($entry.response.body? | default null) != null {
             try { $entry.response.body | to json } catch { "" }
-        } else {
-            ""
-        }
-        let body_match = $body_text | str contains -i $query
+        } else { "" }
 
-        if $url_match or $method_match or $body_match {
+        if ($body_text | str contains -i $query) {
             $results = ($results | append {
                 id: $entry.id
                 timestamp: ($entry.timestamp | str substring 0..19)
