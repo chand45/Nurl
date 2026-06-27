@@ -409,7 +409,7 @@ export def http-status-text [code: int] {
     }
 }
 
-def parse-curl-response [output: string] {
+export def parse-curl-response [output: string] {
     # Split response into headers and body
     let parts = ($output | split row "---RESPONSE_META---")
     let response_part = ($parts | first | str trim)

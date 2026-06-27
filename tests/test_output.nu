@@ -131,24 +131,28 @@ def test-c2-select-full-path [] {
 
 # ── C3: --verbose and --include ───────────────────────────────────────────────
 
-def test-c3-verbose-does-not-break-raw [] {
-    # --verbose is a display hint; with --raw it should still return the record
-    let tmp = (make-temp-dir "c3-verbose")
-    $env.API_ROOT = $tmp
-    let r = (api get "https://jsonplaceholder.typicode.com/posts/1" --raw --verbose --no-history)
-    assert ($r != null)
-    assert ($r | describe | str starts-with "record")
-    assert equal $r.response.status 200
-    cleanup $tmp
+def test-c3-verbose-shows-request-headers [] {
+    # Subprocess test: verify --verbose prints request line (> GET) and response headers (< Header)
+    require-network
+    let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
+    let nu_exe = $nu.current-exe
+    let out = (^$nu_exe -c $"source '($api_path)'; api get 'https://jsonplaceholder.typicode.com/posts/1' --no-history --verbose" | complete)
+    let stdout = ($out.stdout | ansi strip)
+    assert ($stdout | str contains "> GET") "--verbose should print request line starting with '> GET'"
+    assert ($stdout | str contains "< ") "--verbose should print response headers starting with '< '"
 }
 
-def test-c3-include-does-not-break-raw [] {
-    let tmp = (make-temp-dir "c3-include")
-    $env.API_ROOT = $tmp
-    let r = (api get "https://jsonplaceholder.typicode.com/posts/1" --raw --include --no-history)
-    assert ($r != null)
-    assert equal $r.response.status 200
-    cleanup $tmp
+def test-c3-include-shows-response-headers [] {
+    # Subprocess test: verify --include prints response headers above the body
+    require-network
+    let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
+    let nu_exe = $nu.current-exe
+    let out = (^$nu_exe -c $"source '($api_path)'; api get 'https://jsonplaceholder.typicode.com/posts/1' --no-history --include" | complete)
+    let stdout = ($out.stdout | ansi strip)
+    # Response headers should appear (Content-Type is always present)
+    assert ($stdout | str contains "< Content-Type") "--include should show Content-Type response header"
+    # JSON body should also appear
+    assert ($stdout | str contains "userId") "--include should still show JSON body"
 }
 
 # ── Suite runner ──────────────────────────────────────────────────────────────
@@ -172,7 +176,7 @@ def run-suite-output [net_ok: bool]: nothing -> list<record> {
         (run-test "C2: --select headers.Content-Type works"     { test-c2-select-headers })
         (run-test "C2: missing --select path does not crash"    { test-c2-select-missing-path-no-crash })
         (run-test "C2: full response.body.* path also works"    { test-c2-select-full-path })
-        (run-test "C3: --verbose does not break --raw"          { test-c3-verbose-does-not-break-raw })
-        (run-test "C3: --include does not break --raw"          { test-c3-include-does-not-break-raw })
+        (run-test "C3: --verbose prints request + response headers" { test-c3-verbose-shows-request-headers })
+        (run-test "C3: --include prints response headers above body"  { test-c3-include-shows-response-headers })
     ]
 }

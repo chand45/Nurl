@@ -25,6 +25,24 @@ def test-a1-default-returns-null [] {
     cleanup $tmp
 }
 
+def test-a1-pretty-stdout-single-render [] {
+    # Subprocess test: verify default pretty mode prints ONCE (status + body)
+    # and does NOT emit the raw {request,response,timestamp} record table (A1 bug).
+    require-network
+    let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
+    let nu_exe = $nu.current-exe
+    let out = (^$nu_exe -c $"source '($api_path)'; api get 'https://jsonplaceholder.typicode.com/posts/1' --no-history" | complete)
+    let stdout = ($out.stdout | ansi strip)
+    # Status line should appear
+    assert ($stdout | str contains "200") "stdout should contain 200 status"
+    # JSON body should appear
+    assert ($stdout | str contains "userId") "stdout should contain JSON body field"
+    # Must NOT contain record-table markers (the original double-output bug)
+    assert (not ($stdout | str contains "╭")) "stdout must not contain table border — double-output bug"
+    assert (not ($stdout | str contains "| timestamp |")) "stdout must not contain record table"
+}
+
+
 def test-a1-status-line-structure [] {
     # Verify the returned record has the expected shape
     let tmp = (make-temp-dir "a1-shape")
@@ -219,6 +237,7 @@ def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
         (run-test "A1: --raw returns full record"              { test-a1-raw-returns-record })
         (run-test "A1: default pretty returns null"            { test-a1-default-returns-null })
         (run-test "A1: result has request+response+timestamp"  { test-a1-status-line-structure })
+        (run-test "A1: pretty stdout shows status+body, no record table" { test-a1-pretty-stdout-single-render })
         (run-test "A3: resend body not double-encoded"         { test-a3-resend-body-not-double-encoded })
         (run-test "A4: resend --environment flag does not crash" { test-a4-resend-environment-flag })
         (run-test "A5: common status codes map correctly"      { test-a5-common-status-codes })

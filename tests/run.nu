@@ -13,6 +13,10 @@
 # Load Nurl (sets $env.API_ROOT to repo root via FILE_PWD)
 source ../api.nu
 
+# Save repo root so subprocess tests can locate api.nu
+# api.nu sets API_ROOT = its own directory (repo root) at source time
+$env.NURL_REPO_ROOT = $env.API_ROOT
+
 # Load shared helpers (defines run-test, make-temp-dir, cleanup, network-ok)
 source helpers.nu
 
