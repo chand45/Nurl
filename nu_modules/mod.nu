@@ -182,8 +182,17 @@ export def "api help" [] {
   api send <name> -c <coll>     Send saved request [collection env]
 
 (ansi yellow)Common Request Flags:(ansi reset)
-  --output (-o) <mode>          Output mode: pretty|body|raw|json|headers|status|none
-  --select (-s) <path>          Select field: e.g. response.body.title
+  --output (-o) <mode>          Output mode, default: pretty
+                                  pretty    print colored status+body, return null  [interactive]
+                                  status    return HTTP status as int, no print     [scripting]
+                                  body      return parsed body value, no print      [scripting]
+                                  headers   return response headers record, no print [scripting]
+                                  json      return full result as JSON string, no print [scripting]
+                                  none      return null, print nothing              [silent]
+  --select (-s) <path>          Return a field value, no print: body.id, headers.Content-Type, status
+                                  Shorthand body.* and headers.* expand automatically
+  --raw (-r)                    Return full result record, no print. Use for scripting.
+                                  Example: let r = api get url --raw; $r.response.body
   --verbose (-v)                Show request + response headers, curl-style
   --include (-I)                Include response headers above body
   --follow-redirects (-L)       Follow HTTP redirects
@@ -191,7 +200,6 @@ export def "api help" [] {
   --binary-save (-B) <file>     Save binary response directly to file
   --retries <n>                 Retry count on 5xx/connection failure
   --retry-delay <s>             Seconds between retries
-  --raw (-r)                    Return record, print nothing
   --no-history                  Don't save to history
 
 (ansi yellow)POST/PUT/PATCH/REQUEST Extra Flag:(ansi reset)

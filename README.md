@@ -338,44 +338,62 @@ api get "https://api.example.com/users" --no-history
 
 ### Output Control
 
-Control exactly what Nurl displays and returns (C1, C2, C3):
+Nurl has two output modes with a clear separation between **interactive** and **scripting** use (C1, C2, C3):
 
+**Interactive mode (default `pretty`)** — prints a human-friendly status line + formatted body. Returns `null` so the REPL does not render a second time. Best for everyday use:
 ```nushell
-# Print the response body only
-api get "https://api.example.com/users" --output body
+api get "https://api.example.com/users"
+# → ● 200 OK  243ms  1.2KB  GET …
+# → { "id": 1, … }
+```
 
-# Print just the HTTP status code (also returned as integer)
+**Scripting/data modes** — return the value directly (no printing). Nushell renders the return value once when used naked; `let x = (...)` captures the typed value:
+```nushell
+# Capture the full result record (request + response + timestamp)
+let r = (api get "https://api.example.com/users" --raw)
+$r.response.body        # access body
+$r.response.status      # access status
+$r | describe           # → record<request: …, response: …, timestamp: string>
+
+# Capture just the status code as an integer
 let code = (api get "https://api.example.com/users" --output status)
+$code | describe        # → int
 # → 200
 
-# Print response as raw JSON  
-api get "https://api.example.com/users" --output json
+# Capture the parsed body value
+let body = (api get "https://api.example.com/users" --output body)
 
-# Show response headers
-api get "https://api.example.com/users" --output headers
+# Capture the full result as a JSON string
+let json = (api get "https://api.example.com/users" --output json)
 
-# Show nothing (silent / piping mode)
+# Capture response headers as a record
+let hdrs = (api get "https://api.example.com/users" --output headers)
+
+# Silent — prints nothing, returns nothing
 api get "https://api.example.com/users" --output none
 
-# Extract a specific field from the response (dot-path; also changes return value)
-let id = (api post "https://api.example.com/users" --body {name: "Alice"} --select response.body.id)
-# → 42
+# Extract a specific field via dot-path (shorthand: body.field, headers.Name, status)
+let id = (api post "https://api.example.com/users" --body {name: "Alice"} --select body.id)
+# → 42  (captured as int, not string)
 
-# Show request + response headers (curl-like > / < style) (C3)
+# Full dot-path also works
+let ct = (api get "https://api.example.com/" --select headers.Content-Type)
+```
+
+**Verbose / inspect flags** (always combine with pretty mode):
+```nushell
+# Show request + response headers (curl-like > / < style)
 api get "https://api.example.com/users" --verbose
 
-# Include response headers above the body (C3)
+# Include response headers above the body
 api get "https://api.example.com/users" --include
 
-# Save response body to a file (C5)
-api get "https://api.example.com/report.pdf" --save output.pdf
+# Save response body to a file
+api get "https://api.example.com/report" --save output.json
 
-# Download binary file directly (C5)
+# Download binary file directly
 api get "https://api.example.com/asset.zip" --binary-save asset.zip
-
-# Return raw result record without any display (for scripting)
-let result = (api get "https://api.example.com/users" --raw)
-$result.response.body
+```
 
 ### Variables
 

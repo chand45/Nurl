@@ -628,64 +628,20 @@ def execute-request [
     null
 }
 
-# Format and display response (A1: always prints; C1: --output modes; C2: --select; C3: --verbose/--include)
+# Pretty-mode display only (A1, C3). Called only when output == "pretty".
+# All other modes are handled by apply-output-selection which returns the value directly.
 def display-response [
     result: record
-    --output (-o): string = "pretty"  # Output mode: pretty|body|raw|json|headers|status|none
-    --select (-s): string = ""         # Select a field using dot-path (e.g. response.body.title)
-    --verbose (-v)                     # Show request + response headers (curl-like > / <)
-    --include (-I)                     # Include response headers above body
-    --save (-S): string = ""           # Save response body to file
+    --verbose (-v)           # Show request + response headers (curl-like > / <)
+    --include (-I)           # Include response headers above body
+    --save (-S): string = "" # Save response body to file
 ] {
     let response = $result.response
     let method = ($result.request?.method? | default "")
     let url = ($result.request?.url? | default "")
 
-    # --output json: full result record as JSON
-    if $output == "json" {
-        print ($result | to json)
-        return
-    }
-
-    # --output status: just the status code number
-    if $output == "status" {
-        print ($response.status? | default 0)
-        return
-    }
-
-    # --output none: silence everything
-    if $output == "none" {
-        return
-    }
-
-    # --select: extract a specific field and print it
-    # Normalize shorthand paths: body.* → response.body.*, headers.* → response.headers.*, status → response.status
-    if $select != "" {
-        let full_path = if ($select == "status") or ($select == "status_text") or ($select | str starts-with "body") or ($select | str starts-with "headers") {
-            "response." + $select
-        } else {
-            $select
-        }
-        let extracted = (api vars extract $result $full_path)
-        if $extracted != null {
-            let desc = ($extracted | describe)
-            if ($desc | str starts-with "record") or ($desc | str starts-with "list") or ($desc | str starts-with "table") {
-                print ($extracted | to json)
-            } else {
-                print ($extracted | into string)
-            }
-        } else {
-            # Build warning without parentheses in interpolated string to avoid parse errors
-            let warn_msg = ("no value at path: " + $select)
-            print ((ansi yellow) + $warn_msg + (ansi reset))
-        }
-        return
-    }
-
-    # Print status line (except in pure body/raw mode)
-    if $output != "body" and $output != "raw" {
-        print (format-status-line $response $method $url)
-    }
+    # Status line
+    print (format-status-line $response $method $url)
 
     # Verbose: print request info in curl-like > style
     if $verbose {
@@ -696,26 +652,23 @@ def display-response [
         }
     }
 
-    # Response headers (verbose, --include, or --output headers)
-    if $verbose or $include or $output == "headers" {
+    # Response headers (verbose or --include)
+    if $verbose or $include {
         print ""
         for hdr in ($response.headers? | default {} | transpose key value) {
             print $"(ansi cyan)< ($hdr.key): ($hdr.value)(ansi reset)"
         }
     }
 
-    # Body (skipped in --output headers mode)
-    if $output != "headers" {
-        let body = ($response.body? | default null)
-        if $body != null and $body != "" {
-            print ""
-            print-body $body $output
-        }
+    # Body
+    let body = ($response.body? | default null)
+    if $body != null and $body != "" {
+        print ""
+        print-body $body "pretty"
     }
 
     # --save: write body to file
     if $save != "" {
-        let body = ($response.body? | default null)
         if $body != null {
             let body_str = if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") or ($body | describe | str starts-with "table") {
                 $body | to json
@@ -728,13 +681,51 @@ def display-response [
     }
 }
 
-# Compute return value based on --output mode and --select path (C1, C2)
-# --raw always returns the full record; display modes return null to suppress REPL double-render
-def apply-output-selection [result: record, output: string, select_path: string, raw: bool] {
+# Route output by mode (C1, C2).
+# DATA modes (--raw, --output status/body/headers/json/none, --select): return the value directly.
+#   Nushell renders the returned value once when naked; `let x = (api get ...)` captures correctly.
+# INTERACTIVE mode (pretty/default): prints custom display, returns null to prevent REPL double-render.
+def apply-output-selection [
+    result: record
+    output: string
+    select_path: string
+    raw: bool
+    verbose: bool
+    include: bool
+    save: string
+] {
     if $raw {
-        $result  # scripting mode: return full record, no display was done
-    } else {
-        null     # display mode: human output was already printed; return null to avoid REPL re-render
+        return $result
+    }
+
+    # --select: normalize shorthand paths, extract and return the value
+    if $select_path != "" {
+        let full_path = if ($select_path == "status") or ($select_path | str starts-with "body") or ($select_path | str starts-with "headers") {
+            "response." + $select_path
+        } else {
+            $select_path
+        }
+        let extracted = (api vars extract $result $full_path)
+        if $extracted != null {
+            return $extracted
+        } else {
+            let warn_msg = ("no value at path: " + $select_path)
+            print ((ansi yellow) + $warn_msg + (ansi reset))
+            return null
+        }
+    }
+
+    match $output {
+        "status"  => { $result.response.status? | default 0 }
+        "body"    => { $result.response.body? | default null }
+        "headers" => { $result.response.headers? | default {} }
+        "json"    => { $result | to json }
+        "none"    => { null }
+        _         => {
+            # pretty / interactive: print custom display, return null (no REPL double-render)
+            display-response $result --verbose=$verbose --include=$include --save=$save
+            null
+        }
     }
 }
 
@@ -766,11 +757,8 @@ export def "api get" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 export def "api post" [
     url: string                          # URL to request
@@ -820,11 +808,8 @@ export def "api post" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # PUT request
@@ -874,11 +859,8 @@ export def "api put" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # PATCH request
@@ -928,11 +910,8 @@ export def "api patch" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # DELETE request
@@ -961,11 +940,8 @@ export def "api delete" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include ""
 }
 
 # Generic request with any method
@@ -1016,11 +992,8 @@ export def "api request" [
         return null
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # Send a saved request by name
@@ -1152,11 +1125,8 @@ export def "api send" [
         }
     }
 
-    if not $raw {
-        display-response $result --output=$output --select=$select --verbose=$verbose --include=$include --save=$save
-    }
     if $debug { $env.API_DEBUG = false }
-    apply-output-selection $result $output $select $raw
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # Create a new saved request
@@ -1442,9 +1412,9 @@ export def "api head" [
         if $debug { $env.API_DEBUG = false }
         $result
     } else {
-        display-response $result --output="headers"
+        display-response $result --include  # HEAD has no body; --include shows response headers
         if $debug { $env.API_DEBUG = false }
-        $result
+        null
     }
 }
 
@@ -1470,9 +1440,9 @@ export def "api options" [
         if $debug { $env.API_DEBUG = false }
         $result
     } else {
-        display-response $result --output="headers"
+        display-response $result --include  # OPTIONS shows Allow header; --include shows all response headers
         if $debug { $env.API_DEBUG = false }
-        $result
+        null
     }
 }
 
