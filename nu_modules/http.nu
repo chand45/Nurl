@@ -49,7 +49,7 @@ def save-to-history [request: record, response: record] {
         time_ms: ($response.time_ms? | default 0)
         date_dir: ($date_dir | path basename)
     }
-    ($existing_index | append $new_summary) | to nuon | save -f $index_path
+    ($existing_index | append $new_summary | sort-by timestamp -r) | to nuon | save -f $index_path
 
     $id
 }
@@ -81,11 +81,11 @@ def get-timeout [] {
     }
 }
 
-# Resolve body from multiple input sources (inline record, file)
+# Resolve body from multiple input sources (inline record/string, file)
 # Priority: body-file > inline body
 # Returns: JSON string ready for request
 def resolve-body [
-    --body (-b): record = {}       # Inline body as record
+    --body (-b): any = {}          # Inline body as record, list, or pre-serialized JSON string
     --body-file (-f): string = ""  # Path to file containing body
 ] {
     # Body file takes priority
@@ -103,10 +103,16 @@ def resolve-body [
         } catch {
             $file_content
         }
-    } else if not ($body | is-empty) {
-        $body | to json
     } else {
-        ""
+        let body_type = ($body | describe)
+        if $body_type == "string" {
+            # Pre-serialized JSON string — pass through as-is
+            $body
+        } else if not ($body | is-empty) {
+            $body | to json
+        } else {
+            ""
+        }
     }
 }
 
@@ -383,20 +389,22 @@ def parse-curl-response [output: string] {
         $meta_lines | get 2 | into int
     } else { 0 }
 
-    # Split headers from body — try \r\n\r\n first (HTTP/1.1), fall back to \n\n (HTTP/2)
-    let header_body_split = if ($response_part | str contains "\r\n\r\n") {
-        $response_part | split row "\r\n\r\n"
-    } else {
-        $response_part | split row "\n\n"
-    }
-    let headers_raw = if ($header_body_split | length) > 0 {
-        $header_body_split | first
-    } else { "" }
-
-    # Get body (join remaining parts in case body contains empty lines)
+    # Handle multiple response blocks — curl -L -i produces one block per redirect hop.
+    # We need the LAST HTTP header block and everything after it as the final body.
     let sep = if ($response_part | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
-    let body_raw = if ($header_body_split | length) > 1 {
-        $header_body_split | skip 1 | str join $sep
+    let all_blocks = ($response_part | split row $sep)
+
+    # Find the index of the last block that starts with an HTTP status line
+    let http_block_indices = ($all_blocks
+        | enumerate
+        | where {|b| $b.item | str trim | str starts-with "HTTP/"}
+        | get index)
+
+    let last_http_idx = if ($http_block_indices | is-empty) { 0 } else { $http_block_indices | last }
+
+    let headers_raw = ($all_blocks | get $last_http_idx)
+    let body_raw = if ($last_http_idx + 1) < ($all_blocks | length) {
+        $all_blocks | skip ($last_http_idx + 1) | str join $sep
     } else { "" }
 
     # Parse headers
@@ -651,8 +659,14 @@ def display-response [
     }
 
     # --select: extract a specific field and print it
+    # Normalize shorthand paths: body.* → response.body.*, headers.* → response.headers.*, status → response.status
     if $select != "" {
-        let extracted = (api vars extract $result $select)
+        let full_path = if ($select == "status") or ($select == "status_text") or ($select | str starts-with "body") or ($select | str starts-with "headers") {
+            "response." + $select
+        } else {
+            $select
+        }
+        let extracted = (api vars extract $result $full_path)
         if $extracted != null {
             let desc = ($extracted | describe)
             if ($desc | str starts-with "record") or ($desc | str starts-with "list") or ($desc | str starts-with "table") {
@@ -661,7 +675,9 @@ def display-response [
                 print ($extracted | into string)
             }
         } else {
-            print $"(ansi yellow)(no value at path: ($select))(ansi reset)"
+            # Build warning without parentheses in interpolated string to avoid parse errors
+            let warn_msg = ("no value at path: " + $select)
+            print ((ansi yellow) + $warn_msg + (ansi reset))
         }
         return
     }
@@ -713,18 +729,12 @@ def display-response [
 }
 
 # Compute return value based on --output mode and --select path (C1, C2)
-# --raw always returns the full record; otherwise shape the return value
+# --raw always returns the full record; display modes return null to suppress REPL double-render
 def apply-output-selection [result: record, output: string, select_path: string, raw: bool] {
-    if $raw { return $result }
-    if $select_path != "" {
-        return (api vars extract $result $select_path)
-    }
-    match $output {
-        "status"  => ($result.response?.status? | default 0)
-        "body"    => ($result.response?.body? | default null)
-        "headers" => ($result.response?.headers? | default {})
-        "json"    => ($result | to json)
-        _         => $result
+    if $raw {
+        $result  # scripting mode: return full record, no display was done
+    } else {
+        null     # display mode: human output was already printed; return null to avoid REPL re-render
     }
 }
 
@@ -764,7 +774,7 @@ export def "api get" [
 }
 export def "api post" [
     url: string                          # URL to request
-    --body (-b): record = {}             # Request body as record
+    --body (-b): any = {}                # Request body as record or JSON string
     --body-file (-f): string = ""        # Read body from file
     --headers (-H): record = {}          # Additional headers
     --auth (-a): record = {}             # Authentication config
@@ -820,7 +830,7 @@ export def "api post" [
 # PUT request
 export def "api put" [
     url: string                          # URL to request
-    --body (-b): record = {}             # Request body as record
+    --body (-b): any = {}                # Request body as record or JSON string
     --body-file (-f): string = ""        # Read body from file
     --headers (-H): record = {}          # Additional headers
     --auth (-a): record = {}             # Authentication config
@@ -874,7 +884,7 @@ export def "api put" [
 # PATCH request
 export def "api patch" [
     url: string                          # URL to request
-    --body (-b): record = {}             # Request body as record
+    --body (-b): any = {}                # Request body as record or JSON string
     --body-file (-f): string = ""        # Read body from file
     --headers (-H): record = {}          # Additional headers
     --auth (-a): record = {}             # Authentication config
@@ -962,7 +972,7 @@ export def "api delete" [
 export def "api request" [
     --method (-m): string = "GET"        # HTTP method
     url: string                          # URL to request
-    --body (-b): record = {}             # Request body as record
+    --body (-b): any = {}                # Request body as record or JSON string
     --body-file (-f): string = ""        # Read body from file
     --headers (-H): record = {}          # Additional headers
     --auth (-a): record = {}             # Authentication config
@@ -1017,7 +1027,7 @@ export def "api request" [
 export def "api send" [
     name: string                         # Request name (path in collection)
     --collection (-c): string = ""       # Collection name
-    --body (-b): record = {}             # Override request body as record
+    --body (-b): any = {}                # Override request body as record or JSON string
     --body-file (-f): string = ""        # Override request body from file
     --auth (-a): record = {}             # Override authentication config
     --raw (-r)                           # Return raw result

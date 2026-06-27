@@ -22,11 +22,11 @@ def load-history-index [] {
     }
 }
 
-# Append one summary entry to the history index (B1)
+# Append one summary entry to the history index (B1) — keeps index sorted newest-first
 def append-to-history-index [summary: record] {
     let path = (get-history-index-path)
     let existing = (load-history-index)
-    ($existing | append $summary) | to nuon | save -f $path
+    ($existing | append $summary | sort-by timestamp -r) | to nuon | save -f $path
 }
 
 # Rebuild the full history index by scanning all date dirs + files (B1)
@@ -176,8 +176,8 @@ export def "api history list" [
     # Ensure index exists (auto-build from files if needed)
     ensure-history-index
 
-    # Load from index — already sorted newest first
-    let all_entries = (load-history-index)
+    # Load from index and ensure newest-first order (sort guards against legacy unsorted indexes)
+    let all_entries = (load-history-index | sort-by timestamp -r)
 
     if ($all_entries | is-empty) {
         print "(ansi yellow)No history found(ansi reset)"
@@ -318,7 +318,7 @@ export def "api history search" [
 
     ensure-history-index
 
-    let all_entries = (load-history-index)
+    let all_entries = (load-history-index | sort-by timestamp -r)
     if ($all_entries | is-empty) {
         print $"(ansi yellow)No results for '($query)'(ansi reset)"
         return []
