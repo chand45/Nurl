@@ -170,9 +170,8 @@ def test-c7-no-tests-field-no-crash [] {
 # total curl invocations and that eventual success returns the final 200.
 
 def test-c8-retries-on-transient-failure [] {
-    # Preflight: skip if node.js is not available
-    let node_check = (^node --version | complete)
-    if $node_check.exit_code != 0 {
+    # Preflight: skip if node.js is not available (use `which` — non-throwing)
+    if (which node | is-empty) {
         error make {msg: "SKIP: node unavailable"}
     }
 
@@ -254,8 +253,7 @@ def test-c9-html-rendering-stdout [] {
     # Hermetic test: spin up a local Node server that returns text/html,
     # capture pretty-mode stdout, assert [HTML response ...] marker appears.
     # No external network dependency.
-    let node_check = (^node --version | complete)
-    if $node_check.exit_code != 0 {
+    if (which node | is-empty) {
         error make {msg: "SKIP: node unavailable"}
     }
 
