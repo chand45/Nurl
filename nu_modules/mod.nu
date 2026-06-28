@@ -96,7 +96,8 @@ export def "api status" [] {
     let history_path = ($root | path join "history")
     let history_count = if ($history_path | path exists) {
         let subdirs = try { ls $history_path | where type == dir | get name } catch { [] }
-        $subdirs | each {|d| try { ls $d | where name =~ '\.nuon$' | length } catch { 0 } } | math sum
+        let sub_counts = ($subdirs | each {|d| try { ls $d | where name =~ '\.nuon$' | length } catch { 0 } })
+        if ($sub_counts | is-empty) { 0 } else { $sub_counts | math sum }
     } else { 0 }
 
     {

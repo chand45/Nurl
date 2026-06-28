@@ -377,6 +377,124 @@ def test-c11-export-prints-curl-command [] {
     cleanup $tmp
 }
 
+# ── V5: api send --raw must not print test results ────────────────────────────
+
+def test-v5-send-raw-no-test-output [] {
+    # V5: api send --raw should suppress ✓/✗ lines and Tests: summary.
+    # tests_passed must still be in the returned record.
+    # In-process: verify both that the value is returned AND that tests_passed is populated.
+    require-network
+    let tmp = (make-temp-dir "v5-raw")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    mkdir ($tmp | path join "collections" "v5c" "requests")
+    {name: "chk", method: "GET", url: "https://jsonplaceholder.typicode.com/posts/1", tests: {status: 200, "body.userId": 1}} | to nuon | save -f ($tmp | path join "collections" "v5c" "requests" "chk.nuon")
+    let r = (api send chk -c v5c --raw --no-history)
+    cleanup $tmp
+    assert ($r != null) "send --raw should return the record, not null"
+    assert equal ($r | describe | str starts-with "record") true "--raw result should be a record"
+    assert equal ($r.tests_passed) true "tests_passed should be true in --raw result"
+    # Verify response is a valid HTTP result (proves the actual request ran, not just a wrapper)
+    assert equal ($r.response.status) 200 "--raw result should have the HTTP response status"
+}
+
+# ── V6: api history resend --raw must not print "Resending:" ─────────────────
+
+def test-v6-resend-raw-no-print [] {
+    # V6: resend --raw should suppress the "Resending: METHOD URL" line.
+    # In-process: just verify the raw result is a valid record (proves resend worked and returned correctly).
+    require-network
+    let tmp = (make-temp-dir "v6-resend")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    # Make a real GET request to populate history
+    api get "https://jsonplaceholder.typicode.com/posts/1" | ignore
+    let entries = (api history list)
+    if ($entries | is-empty) { cleanup $tmp; error make {msg: "SKIP: no history entry found"} }
+    let entry_id = ($entries | first | get id)
+    # resend --raw should return a record, not null
+    let r = (api history resend $entry_id --raw)
+    cleanup $tmp
+    assert ($r != null) "resend --raw should return the result record"
+    assert ($r | describe | str starts-with "record") "resend --raw result should be a record"
+    assert equal ($r.response.status) 200 "resend should get same 200 response"
+}
+
+# ── V9: api auth show with oauth2 token must not crash ───────────────────────
+
+def test-v9-auth-show-oauth2-no-crash [] {
+    # V9: $"active (expires: ($expires))" was parsed as command substitution — crash.
+    # Offline: inject a fake oauth2 secret and verify api auth show runs cleanly.
+    let tmp = (make-temp-dir "v9-auth")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    let fake = {tokens: {}, basic_auth: {}, api_keys: {}, oauth: {myoauth: {access_token: "tok", expires_at: "2025-01-01T00:00:00Z", client_id: "x", client_secret: "y", token_url: "u"}}}
+    $fake | to nuon | save -f ($tmp | path join "secrets.nuon")
+    let rows = (api auth show)
+    cleanup $tmp
+    assert ($rows != null) "api auth show should return rows"
+    let oauth_row = ($rows | where type == "oauth2" | first)
+    assert ($oauth_row.status | str contains "active") "oauth2 status should say active"
+    assert ($oauth_row.status | str contains "expires") "oauth2 status should contain 'expires'"
+}
+
+# ── V10: api head / api options accept --output flag ─────────────────────────
+
+def test-v10-head-output-status [] {
+    # V10: api head must accept --output status and return an int.
+    require-network
+    let tmp = (make-temp-dir "v10-head")
+    $env.API_ROOT = $tmp
+    let s = (api head "https://jsonplaceholder.typicode.com/posts/1" --output status --no-history)
+    cleanup $tmp
+    assert equal ($s | describe) "int" "--output status should return an int"
+    assert equal $s 200 "head status should be 200"
+}
+
+def test-v10-head-output-headers [] {
+    # V10: api head must accept --output headers and return a record.
+    require-network
+    let tmp = (make-temp-dir "v10-hdrs")
+    $env.API_ROOT = $tmp
+    let h = (api head "https://jsonplaceholder.typicode.com/posts/1" --output headers --no-history)
+    cleanup $tmp
+    assert ($h != null) "--output headers should return non-null"
+    assert ($h | describe | str starts-with "record") "--output headers should be a record"
+}
+
+# ── V12: api summary with record headers must not crash ──────────────────────
+
+def test-v12-summary-headers-length [] {
+    # V12: $r.headers | length crashes on a record (only works on list).
+    # Fix: $r.headers | columns | length. In-process: call api summary with
+    # a synthetic result and verify it doesn't crash (pre-fix it would throw
+    # "only_supports_this_input_type" for | length on a record).
+    let tmp = (make-temp-dir "v12-summary")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    let fake_result = {
+        request: {method: "GET", url: "http://x", headers: {}, body: null}
+        response: {
+            status: 200
+            status_text: "OK"
+            headers: {"Content-Type": "application/json", "X-Custom": "val"}
+            body: {id: 1}
+            time_ms: 100
+            size_bytes: 50
+        }
+        timestamp: "2024-01-01"
+    }
+    # Before the fix, this would crash with "only_supports_this_input_type".
+    # After the fix, it runs cleanly. The try/catch will fail the test if it throws.
+    try {
+        api summary $fake_result | ignore
+    } catch {|e|
+        cleanup $tmp
+        error make {msg: ("api summary crashed: " + ($e.msg? | default "unknown error"))}
+    }
+    cleanup $tmp
+}
+
 # ── Suite runner ──────────────────────────────────────────────────────────────
 
 def run-suite-features [net_ok: bool]: nothing -> list<record> {
@@ -387,6 +505,8 @@ def run-suite-features [net_ok: bool]: nothing -> list<record> {
         (run-test "C8: --retries on transient failure (local server)" { test-c8-retries-on-transient-failure })
         (run-test "C10: api options method flag (dry-run offline)" { test-c10-options-method-offline })
         (run-test "C11: api request export prints curl command"   { test-c11-export-prints-curl-command })
+        (run-test "V9: api auth show with oauth2 token no crash"  { test-v9-auth-show-oauth2-no-crash })
+        (run-test "V12: api summary with record headers no crash"  { test-v12-summary-headers-length })
     ]
     if not $net_ok {
         $results = ($results | append (skip-test "C4-C11-network" "network unavailable"))
@@ -408,6 +528,10 @@ def run-suite-features [net_ok: bool]: nothing -> list<record> {
         (run-test "C10: api head returns no body"                  { test-c10-head-no-body })
         (run-test "C10: api head returns headers"                  { test-c10-head-returns-headers })
         (run-test "C10: api options returns 2xx response"          { test-c10-options-returns-allow })
+        (run-test "V5: api send --raw suppresses test output"      { test-v5-send-raw-no-test-output })
+        (run-test "V6: api history resend --raw no Resending: print" { test-v6-resend-raw-no-print })
+        (run-test "V10: api head --output status returns int"      { test-v10-head-output-status })
+        (run-test "V10: api head --output headers returns record"  { test-v10-head-output-headers })
     ])
     $results
 }

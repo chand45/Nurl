@@ -186,6 +186,20 @@ def test-a7-normal-request-writes-history [] {
     cleanup $tmp
 }
 
+# ── V1: api status on empty workspace ────────────────────────────────────────
+
+def test-v1-status-empty-workspace [] {
+    # Offline: api status must NOT crash when history dir is empty.
+    # Was: math sum over empty list → nu::shell::unsupported_input crash.
+    let tmp = (make-temp-dir "v1-status")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    # history/ exists but has no sub-dirs — should return history_entries: 0
+    let s = (api status)
+    assert equal $s.history_entries 0 "empty workspace should have 0 history entries"
+    cleanup $tmp
+}
+
 # ── Suite runner ──────────────────────────────────────────────────────────────
 
 def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
@@ -209,6 +223,7 @@ def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
         (run-test "A6: history dir path has no doubled slashes" { test-a6-history-dir-no-doubled-slash })
         (run-test "A7: --no-history skips writing history"     { test-a7-no-history-skips-write })
         (run-test "A7: normal request writes to history"       { test-a7-normal-request-writes-history })
+        (run-test "V1: api status on empty workspace does not crash" { test-v1-status-empty-workspace })
     ])
     $results
 }

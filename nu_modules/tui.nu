@@ -357,7 +357,7 @@ export def "api summary" [result: record] {
 
     print $"Status: ($r.status) ($r.status_text)"
     print $"Time: ($r.time_ms)ms | Size: ($r.size_bytes) bytes"
-    print $"Headers: ($r.headers | length)"
+    print $"Headers: ($r.headers | columns | length)"
 
     if ($r.body? | default null) != null {
         let body_type = ($r.body | describe)

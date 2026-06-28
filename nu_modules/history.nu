@@ -296,7 +296,7 @@ export def "api history resend" [
         {}
     }
 
-    if not $dry_run {
+    if not $dry_run and not $raw {
         print $"(ansi dark_gray)Resending: ($entry.request.method) ($entry.request.url)(ansi reset)"
     }
 

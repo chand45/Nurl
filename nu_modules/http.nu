@@ -312,7 +312,7 @@ def build-curl-args-binary [
     $args
 }
 
-# Print response body with content-type-aware formatting (C9)
+# Print response body with content-type-aware formatting and truncation (C9)
 def print-body [body: any, output_mode: string = "pretty"] {
     if $body == null { return }
 
@@ -325,24 +325,52 @@ def print-body [body: any, output_mode: string = "pretty"] {
 
     # Pretty / body mode
     if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
-        print ($body | to json)
+        let json_str = ($body | to json)
+        let json_lines = ($json_str | lines)
+        let line_count = ($json_lines | length)
+        if $line_count > 40 {
+            print ($json_lines | first 40 | str join "\n")
+            let remaining = $line_count - 40
+            print $"(ansi dark_gray)... [truncated — ($remaining) more lines; use --raw or --output body for full payload](ansi reset)"
+        } else {
+            print $json_str
+        }
     } else {
         let body_str = try { $body | into string } catch { "" }
-        let peek = ($body_str | str downcase | str substring 0..20)
+        let peek = ($body_str | str trim | str downcase | str substring 0..20)
         if ($peek | str starts-with "<!doctype") or ($peek | str starts-with "<html") {
             let len = ($body_str | str length)
             print $"(ansi dark_gray)[HTML response — ($len) bytes](ansi reset)"
-            if $len > 500 {
-                print ($body_str | str substring 0..500)
-                print $"(ansi dark_gray)... [truncated](ansi reset)"
+            let html_lines = ($body_str | lines)
+            let line_count = ($html_lines | length)
+            if $line_count > 15 {
+                print ($html_lines | first 15 | str join "\n")
+                let remaining = $line_count - 15
+                print $"(ansi dark_gray)... [truncated — ($remaining) more lines](ansi reset)"
             } else {
                 print $body_str
             }
-        } else if ($body_str | str starts-with "<?xml") {
-            print $"(ansi dark_gray)[XML response](ansi reset)"
-            print $body_str
+        } else if ($peek | str starts-with "<?xml") {
+            let len = ($body_str | str length)
+            print $"(ansi dark_gray)[XML response — ($len) bytes](ansi reset)"
+            let xml_lines = ($body_str | lines)
+            let line_count = ($xml_lines | length)
+            if $line_count > 15 {
+                print ($xml_lines | first 15 | str join "\n")
+                let remaining = $line_count - 15
+                print $"(ansi dark_gray)... [truncated — ($remaining) more lines](ansi reset)"
+            } else {
+                print $body_str
+            }
         } else {
-            print $body_str
+            # Plain text — truncate if very large
+            let len = ($body_str | str length)
+            if $len > 2048 {
+                print ($body_str | str substring 0..2048)
+                print $"(ansi dark_gray)... [truncated — ($len) bytes total; use --raw or --output body for full content](ansi reset)"
+            } else {
+                print $body_str
+            }
         }
     }
 }
@@ -1103,10 +1131,12 @@ export def "api send" [
     # Run tests if defined (C7)
     mut final_result = $result
     if ($request.tests? | default null) != null and ($request.tests | describe | str starts-with "record") {
-        let test_results = (run-tests $result $request.tests)
+        # Suppress test output in raw/data modes — only print in pretty/interactive mode
+        let tests_quiet = ($raw or ($output != "pretty"))
+        let test_results = (run-tests $result $request.tests --quiet=$tests_quiet)
         # Merge tests_passed into result so --raw callers can inspect it
         $final_result = ($result | upsert tests_passed $test_results.all_passed)
-        if not $test_results.all_passed {
+        if not $tests_quiet and not $test_results.all_passed {
             let fail_msg = ("Warning: " + ($test_results.failed | into string) + " tests failed")
             print ((ansi yellow) + $fail_msg + (ansi reset))
         }
@@ -1399,6 +1429,11 @@ export def "api head" [
     --raw (-r)                           # Return raw result without display
     --no-history                         # Don't save to history
     --debug                              # Show verbose debug output
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --save (-S): string = ""             # Save response body to file
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
@@ -1409,12 +1444,12 @@ export def "api head" [
         return null
     }
 
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
+    if $debug { $env.API_DEBUG = false }
+    # HEAD has no body; --include shows response headers by default in pretty mode
+    if $raw or $output != "pretty" or $select != "" {
+        apply-output-selection $result $output $select $raw $verbose $include $save
     } else {
-        display-response $result --include  # HEAD has no body; --include shows response headers
-        if $debug { $env.API_DEBUG = false }
+        display-response $result --include --verbose=$verbose --save=$save
         null
     }
 }
@@ -1427,6 +1462,11 @@ export def "api options" [
     --raw (-r)                           # Return raw result without display
     --no-history                         # Don't save to history
     --debug                              # Show verbose debug output
+    --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
+    --select (-s): string = ""           # Select a field (dot-path)
+    --verbose (-v)                       # Show request + response headers
+    --include (-I)                       # Include response headers above body
+    --save (-S): string = ""             # Save response body to file
 ] {
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
@@ -1437,14 +1477,8 @@ export def "api options" [
         return null
     }
 
-    if $raw {
-        if $debug { $env.API_DEBUG = false }
-        $result
-    } else {
-        display-response $result --include  # OPTIONS shows Allow header; --include shows all response headers
-        if $debug { $env.API_DEBUG = false }
-        null
-    }
+    if $debug { $env.API_DEBUG = false }
+    apply-output-selection $result $output $select $raw $verbose $include $save
 }
 
 # Export a saved request as a curl command (C11)
@@ -1458,7 +1492,7 @@ export def "api request export" [
 # Run assertion tests against a response (C7)
 # Key shorthand: status → response.status, body.* → response.body.*, headers.* → response.headers.*
 # Full paths starting with response.* pass through unchanged.
-def run-tests [result: record, tests: record] {
+def run-tests [result: record, tests: record, --quiet] {
     mut passed = 0
     mut failed = 0
 
@@ -1501,16 +1535,18 @@ def run-tests [result: record, tests: record] {
         }
 
         if $ok {
-            print $"(ansi green)✓(ansi reset) ($key)"
+            if not $quiet { print $"(ansi green)✓(ansi reset) ($key)" }
             $passed = $passed + 1
         } else {
             let actual_str = try { $actual | into string } catch { "null" }
             let expected_str = try { $expected | into string } catch { ($expected | to json) }
-            print $"(ansi red)✗(ansi reset) ($key): expected ($expected_str | str substring 0..60), got ($actual_str | str substring 0..60)"
+            if not $quiet {
+                print $"(ansi red)✗(ansi reset) ($key): expected ($expected_str | str substring 0..60), got ($actual_str | str substring 0..60)"
+            }
             $failed = $failed + 1
         }
     }
 
-    print $"(ansi dark_gray)Tests: ($passed) passed, ($failed) failed(ansi reset)"
+    if not $quiet { print $"(ansi dark_gray)Tests: ($passed) passed, ($failed) failed(ansi reset)" }
     { passed: $passed, failed: $failed, all_passed: ($failed == 0) }
 }
