@@ -96,7 +96,8 @@ export def "api status" [] {
     let history_path = ($root | path join "history")
     let history_count = if ($history_path | path exists) {
         let subdirs = try { ls $history_path | where type == dir | get name } catch { [] }
-        $subdirs | each {|d| try { ls $d | where name =~ '\.nuon$' | length } catch { 0 } } | math sum
+        let sub_counts = ($subdirs | each {|d| try { ls $d | where name =~ '\.nuon$' | length } catch { 0 } })
+        if ($sub_counts | is-empty) { 0 } else { $sub_counts | math sum }
     } else { 0 }
 
     {
@@ -172,12 +173,38 @@ export def "api help" [] {
   api auth show                 Show auth status
 
 (ansi yellow)Requests:(ansi reset)
-  api get <url>                 GET request [global vars]
+  api get <url>                 GET request
   api post <url> -b <body>      POST request
   api put <url> -b <body>       PUT request
   api patch <url> -b <body>     PATCH request
   api delete <url>              DELETE request
+  api head <url>                HEAD request — returns headers only
+  api options <url>             OPTIONS request
   api send <name> -c <coll>     Send saved request [collection env]
+
+(ansi yellow)Common Request Flags:(ansi reset)
+  --output (-o) <mode>          Output mode, default: pretty
+                                  pretty    print colored status+body, return null  [interactive]
+                                  status    return HTTP status as int, no print     [scripting]
+                                  body      return parsed body value, no print      [scripting]
+                                  headers   return response headers record, no print [scripting]
+                                  json      return full result as JSON string, no print [scripting]
+                                  none      return null, print nothing              [silent]
+  --select (-s) <path>          Return a field value, no print: body.id, headers.Content-Type, status
+                                  Shorthand body.* and headers.* expand automatically
+  --raw (-r)                    Return full result record, no print. Use for scripting.
+                                  Example: let r = api get url --raw; $r.response.body
+  --verbose (-v)                Show request + response headers, curl-style
+  --include (-I)                Include response headers above body
+  --follow-redirects (-L)       Follow HTTP redirects
+  --save (-S) <file>            Save response body to file
+  --binary-save (-B) <file>     Save binary response directly to file
+  --retries <n>                 Retry count on 5xx/connection failure
+  --retry-delay <s>             Seconds between retries
+  --no-history                  Don't save to history
+
+(ansi yellow)POST/PUT/PATCH/REQUEST Extra Flag:(ansi reset)
+  --form (-F) <record>          Form-encoded body — application/x-www-form-urlencoded
 
 (ansi yellow)Saved Requests:(ansi reset)
   api request create <n> <m> <u> Create request [name method url]
@@ -185,12 +212,14 @@ export def "api help" [] {
   api request show <name>       Show request details
   api request update <name>     Update request fields
   api request delete <name>     Delete saved request
+  api request export <name>     Print curl command for saved request
 
 (ansi yellow)History:(ansi reset)
-  api history list              List recent requests
+  api history list              List recent requests — indexed for speed
   api history show <id>         Show request details
   api history resend <id>       Resend a request
   api history search <query>    Search history
+  api history rebuild-index     Rebuild history index from files
 
 (ansi yellow)Collections:(ansi reset)
   api collection list           List collections

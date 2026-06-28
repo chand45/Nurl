@@ -187,25 +187,29 @@ export def "api tui history" [] {
     }
 }
 
-# Environments manager
+# Environments manager — now collection-scoped (A2)
 export def "api tui environments" [] {
     print $"(ansi blue)═══ Environments ═══(ansi reset)"
     print ""
 
-    # Environments are scoped per collection, so first pick a collection.
+    # First: pick a collection
     let root = ($env.API_ROOT? | default (pwd))
     let collections_dir = ($root | path join "collections")
-    let collections = if ($collections_dir | path exists) {
-        try { ls $collections_dir | where type == dir | get name | each {|d| $d | path basename } } catch { [] }
-    } else { [] }
 
-    if ($collections | is-empty) {
-        print "(ansi yellow)No collections found(ansi reset)"
-        print "Create one with: api collection create <name>"
+    if not ($collections_dir | path exists) {
+        print "(ansi yellow)No collections found. Create one with: api collection create <name>(ansi reset)"
         return
     }
 
-    print "Collections:"
+    let collections = try { ls $collections_dir | where type == dir | get name | each {|d| $d | path basename } } catch { [] }
+
+    if ($collections | is-empty) {
+        print "(ansi yellow)No collections found(ansi reset)"
+        return
+    }
+
+    print "Select a collection:"
+    print ""
     mut idx = 0
     for coll in $collections {
         $idx = $idx + 1
@@ -214,18 +218,23 @@ export def "api tui environments" [] {
     print "  [b] Back"
     print ""
 
-    let coll_choice = (input "Select collection: " | str trim)
-    if $coll_choice == "b" or $coll_choice == "" {
+    let coll_choice = (input "Collection: " | str trim)
+
+    if $coll_choice == "b" or $coll_choice == "" { return }
+
+    let coll_idx = try { ($coll_choice | into int) - 1 } catch { -1 }
+
+    if $coll_idx < 0 or $coll_idx >= ($collections | length) {
+        print "(ansi red)Invalid selection(ansi reset)"
         return
     }
 
-    let coll_idx = try { ($coll_choice | into int) - 1 } catch { -1 }
-    if $coll_idx < 0 or $coll_idx >= ($collections | length) {
-        return
-    }
     let collection = ($collections | get $coll_idx)
 
     print ""
+    print $"(ansi blue)═══ Environments for '($collection)' ═══(ansi reset)"
+    print ""
+
     api collection env list $collection
 
     print ""
@@ -237,9 +246,7 @@ export def "api tui environments" [] {
 
     let choice = (input "Command: " | str trim)
 
-    if $choice == "b" or $choice == "" {
-        return
-    }
+    if $choice == "b" or $choice == "" { return }
 
     if ($choice | str starts-with "u ") {
         let name = ($choice | str replace "u " "")
@@ -350,7 +357,7 @@ export def "api summary" [result: record] {
 
     print $"Status: ($r.status) ($r.status_text)"
     print $"Time: ($r.time_ms)ms | Size: ($r.size_bytes) bytes"
-    print $"Headers: ($r.headers | length)"
+    print $"Headers: ($r.headers | columns | length)"
 
     if ($r.body? | default null) != null {
         let body_type = ($r.body | describe)

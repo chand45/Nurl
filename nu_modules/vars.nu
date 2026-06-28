@@ -370,11 +370,9 @@ export def "api vars extract" [
             return null
         }
 
-        # Only structured data can be navigated further. If the current value is
-        # a string/number (e.g. an error response whose body wasn't JSON), there
-        # are no sub-fields to extract, so stop gracefully instead of erroring.
-        let cur_type = ($current | describe)
-        if not (($cur_type | str starts-with "record") or ($cur_type | str starts-with "list") or ($cur_type | str starts-with "table")) {
+        # Guard: only structured types support `get`; a scalar means the path is invalid
+        let current_type = ($current | describe)
+        if not (($current_type | str starts-with "record") or ($current_type | str starts-with "list") or ($current_type | str starts-with "table")) {
             return null
         }
 

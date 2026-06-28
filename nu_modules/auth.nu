@@ -244,7 +244,7 @@ export def "api auth oauth2 token" [
     $new_secrets = ($new_secrets | upsert oauth ($new_secrets.oauth | upsert $name $oauth_config))
     save-secrets $new_secrets
 
-    print $"(ansi green)OAuth2 token obtained, expires: ($expires_at)(ansi reset)"
+    print -e $"(ansi green)OAuth2 token obtained, expires: ($expires_at)(ansi reset)"
     $response.access_token
 }
 
@@ -335,16 +335,20 @@ export def "api auth get-config" [auth_spec: record] {
             { type: "bearer", token: $token }
         }
         "basic" => {
-            let creds = if $ref != "" {
-                api auth basic get $ref
+            # Accept creds_ref (documented) or generic ref as fallback
+            let basic_ref = ($auth_spec.creds_ref? | default ($auth_spec.ref? | default ""))
+            let creds = if $basic_ref != "" {
+                api auth basic get $basic_ref
             } else {
                 { username: ($auth_spec.username? | default ""), password: ($auth_spec.password? | default "") }
             }
             { type: "basic", username: $creds.username, password: $creds.password }
         }
         "api_key" | "apikey" => {
-            let key_config = if $ref != "" {
-                api auth apikey get $ref
+            # Accept key_ref (documented) or generic ref as fallback
+            let apikey_ref = ($auth_spec.key_ref? | default ($auth_spec.ref? | default $ref))
+            let key_config = if $apikey_ref != "" {
+                api auth apikey get $apikey_ref
             } else {
                 { key: ($auth_spec.key? | default ""), type: "header", header_name: ($auth_spec.header? | default "X-API-Key") }
             }
@@ -401,7 +405,7 @@ export def "api auth show" [
         $result = ($result | append ($secrets.oauth | transpose name config | each {|row|
             let status = if ($row.config.access_token? | default null) != null {
                 let expires = ($row.config.expires_at? | default "")
-                if $expires != "" { $"active (expires: ($expires))" } else { "active" }
+                if $expires != "" { "active (expires: " + $expires + ")" } else { "active" }
             } else {
                 "not authenticated"
             }
