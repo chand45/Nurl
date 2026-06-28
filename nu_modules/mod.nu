@@ -222,7 +222,7 @@ export def "api help" [] {
   -S, --save <file>             Save response body to file
   -B, --binary-save <file>      Save binary response directly to file \(no decode\)
   --retries <n>                 Retry count on 5xx/connection failure \(default: 0\)
-  --retry-delay <s>             Seconds between retries \(default: 1\)
+  --retry-delay <s>             Seconds between retries \(default: 0\)
   --no-history                  Skip saving this request to history
   -d, --dry-run                 Print the curl command without executing it
   --debug                       Show full curl verbose output for debugging
@@ -247,7 +247,7 @@ export def "api help" [] {
   Keys:   status,  body.<dotpath>,  headers.<Name>
   Values: a bare literal \(exact match\), or a matcher record:
     {equals: VALUE}   exact match
-    {contains: STR}   substring / list membership check
+    {contains: STR}   substring match on stringified value
     {gt: N}           greater than
     {lt: N}           less than
     {not_null: true}  field must be present and non-null
