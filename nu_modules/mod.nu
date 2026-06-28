@@ -143,13 +143,14 @@ export def "api config set" [key: string, value: any] {
 # Show help
 export def "api help" [] {
     print $"
-(ansi blue_bold)API Client - curl + nushell Postman replacement(ansi reset)
+(ansi blue_bold)API Client — curl + nushell Postman replacement(ansi reset)
 
 (ansi yellow)Setup:(ansi reset)
   api init                      Initialize workspace
   api status                    Show current status
   api config get                Show configuration
   api config set <key> <value>  Set configuration
+  api help                      Show this help
 
 (ansi yellow)Global Variables:(ansi reset)
   api vars list                 List global variables and built-ins
@@ -157,87 +158,154 @@ export def "api help" [] {
   api vars unset <key>          Remove a global variable
 
 (ansi yellow)Collection Environments:(ansi reset)
-  api collection env list <c>        List environments for collection
-  api collection env create <c> <n>  Create environment in collection
-  api collection env use <c> <n>     Switch active environment
-  api collection env show <c> [n]    Show environment variables
-  api collection env set <c> <k> <v> Set variable in active/specified env
-  api collection env unset <c> <k>   Remove variable from active/specified env
-  api collection env delete <c> <n>  Delete environment from collection
+  api collection env list <c>          List environments for collection
+  api collection env create <c> <n>    Create environment in collection
+  api collection env use <c> <n>       Switch active environment
+  api collection env show <c> [n]      Show environment variables
+  api collection env set <c> <k> <v>   Set variable in active/specified env
+  api collection env unset <c> <k>     Remove variable from active/specified env
+  api collection env delete <c> <n>    Delete environment from collection
 
-(ansi yellow)Authentication:(ansi reset)
-  api auth bearer set <n> <t>   Set bearer token
-  api auth basic set <n> <u> <p> Set basic auth
-  api auth apikey set <n> <k>   Set API key
-  api auth oauth2 configure ... Configure OAuth2
-  api auth show                 Show auth status
+(ansi yellow)Authentication — stored credentials:(ansi reset)
+  api auth bearer set <n> <t>          Store bearer token
+  api auth bearer get <n>              Retrieve bearer token
+  api auth bearer delete <n>           Delete bearer token
+  api auth basic set <n> <u> <p>       Store basic auth credentials
+  api auth basic get <n>               Retrieve basic auth credentials
+  api auth basic delete <n>            Delete basic auth credentials
+  api auth apikey set <n> <k>          Store API key \(default header: X-API-Key\)
+  api auth apikey get <n>              Retrieve API key config
+  api auth apikey delete <n>           Delete API key
+  api auth oauth2 configure <n> ...    Configure OAuth2 provider
+  api auth oauth2 token <n>            Fetch/refresh OAuth2 access token
+  api auth oauth2 refresh <n>          Force-refresh OAuth2 token
+  api auth oauth2 delete <n>           Delete OAuth2 config
+  api auth list                        List all stored credential names
+  api auth show                        Show auth status summary
+
+(ansi yellow)Authentication — inline on any request via -a / --auth <record>:(ansi reset)
+  Bearer token \(stored\):    -a {type: bearer, token_ref: mytoken}
+  Bearer token \(inline\):    -a {type: bearer, token: "abc123"}
+  Basic auth \(stored\):      -a {type: basic, creds_ref: mycreds}
+  Basic auth \(inline\):      -a {type: basic, username: "u", password: "p"}
+  API key \(stored\):         -a {type: apikey, key_ref: mykey}
+  API key \(inline header\):  -a {type: apikey, key: "k", header: "X-API-Key"}
+  OAuth2 \(stored\):          -a {type: oauth2, ref: myoauth}
 
 (ansi yellow)Requests:(ansi reset)
-  api get <url>                 GET request
-  api post <url> -b <body>      POST request
-  api put <url> -b <body>       PUT request
-  api patch <url> -b <body>     PATCH request
-  api delete <url>              DELETE request
-  api head <url>                HEAD request — returns headers only
-  api options <url>             OPTIONS request
-  api send <name> -c <coll>     Send saved request [collection env]
+  api get <url>                    GET request
+  api post <url> -b <body>         POST request
+  api put <url> -b <body>          PUT request
+  api patch <url> -b <body>        PATCH request
+  api delete <url>                 DELETE request
+  api head <url>                   HEAD request — returns headers only, no body
+  api options <url>                OPTIONS request
+  api request <method> <url>       Generic request \(any HTTP method\)
+  api send <name> -c <coll>        Send saved request; runs response assertions if defined
 
 (ansi yellow)Common Request Flags:(ansi reset)
-  --output (-o) <mode>          Output mode, default: pretty
+  -H, --headers <record>        Extra request headers, e.g. {"X-Custom": "value"}
+  -a, --auth <record>           Inline auth spec \(see Authentication section above\)
+  -o, --output <mode>           Output mode \(default: pretty\)
                                   pretty    print colored status+body, return null  [interactive]
-                                  status    return HTTP status as int, no print     [scripting]
+                                  status    return HTTP status int, no print        [scripting]
                                   body      return parsed body value, no print      [scripting]
                                   headers   return response headers record, no print [scripting]
                                   json      return full result as JSON string, no print [scripting]
-                                  none      return null, print nothing              [silent]
-  --select (-s) <path>          Return a field value, no print: body.id, headers.Content-Type, status
+                                  none      return null, print nothing               [silent]
+  -s, --select <path>           Return one field value, no print — e.g. body.id, status
                                   Shorthand body.* and headers.* expand automatically
-  --raw (-r)                    Return full result record, no print. Use for scripting.
-                                  Example: let r = api get url --raw; $r.response.body
-  --verbose (-v)                Show request + response headers, curl-style
-  --include (-I)                Include response headers above body
-  --follow-redirects (-L)       Follow HTTP redirects
-  --save (-S) <file>            Save response body to file
-  --binary-save (-B) <file>     Save binary response directly to file
-  --retries <n>                 Retry count on 5xx/connection failure
-  --retry-delay <s>             Seconds between retries
-  --no-history                  Don't save to history
+  -r, --raw                     Return full result record, print nothing — best for scripting
+  -v, --verbose                 Show request + response headers \(curl-style output\)
+  -I, --include                 Include response headers above body in output
+  -L, --follow-redirects        Follow HTTP redirects automatically
+  -S, --save <file>             Save response body to file
+  -B, --binary-save <file>      Save binary response directly to file \(no decode\)
+  --retries <n>                 Retry count on 5xx/connection failure \(default: 0\)
+  --retry-delay <s>             Seconds between retries \(default: 0\)
+  --no-history                  Skip saving this request to history
+  -d, --dry-run                 Print the curl command without executing it
+  --debug                       Show full curl verbose output for debugging
 
-(ansi yellow)POST/PUT/PATCH/REQUEST Extra Flag:(ansi reset)
-  --form (-F) <record>          Form-encoded body — application/x-www-form-urlencoded
+(ansi yellow)Body Flags \(POST / PUT / PATCH / request\):(ansi reset)
+  -b, --body <record|string>    Request body — records are JSON-serialized automatically
+  -f, --body-file <file>        Read request body from a file
+  -F, --form <record>           Form-encoded body — sets Content-Type to application/x-www-form-urlencoded
+
+(ansi dark_gray)Note: on `api send`, -v is short for --vars \(variable substitution\). Use --verbose \(long form\) there.(ansi reset)
 
 (ansi yellow)Saved Requests:(ansi reset)
-  api request create <n> <m> <u> Create request [name method url]
-  api request list              List saved requests
-  api request show <name>       Show request details
-  api request update <name>     Update request fields
-  api request delete <name>     Delete saved request
-  api request export <name>     Print curl command for saved request
+  api request create <n> <m> <u>    Create saved request \(name method url\)
+  api request list                   List saved requests across collections
+  api request show <name>            Show request details
+  api request update <name>          Update request fields
+  api request delete <name>          Delete saved request
+  api request export <name>          Print curl equivalent for saved request
+
+(ansi yellow)Response Assertions \(in saved requests\):(ansi reset)
+  A saved request may carry a `tests` record evaluated when run via `api send`.
+  Keys:   status,  body.<dotpath>,  headers.<Name>
+  Values: a bare literal \(exact match\), or a matcher record:
+    {equals: VALUE}   exact match
+    {contains: STR}   substring match on stringified value
+    {gt: N}           greater than
+    {lt: N}           less than
+    {not_null: true}  field must be present and non-null
+  `api send` prints per-assertion pass/fail and sets tests_passed on the result.
+  In --raw or other scripting output modes, assertion output is suppressed.
 
 (ansi yellow)History:(ansi reset)
   api history list              List recent requests — indexed for speed
-  api history show <id>         Show request details
-  api history resend <id>       Resend a request
-  api history search <query>    Search history
-  api history rebuild-index     Rebuild history index from files
+  api history show <id>         Show full request/response details
+  api history resend <id>       Resend a past request
+  api history search <query>    Full-text search across history
+  api history rebuild-index     Rebuild the history index from raw files
+  api history clear             Delete all history entries
+  api history export <file>     Export history entries to a file
 
 (ansi yellow)Collections:(ansi reset)
-  api collection list           List collections
-  api collection create <name>  Create collection
-  api collection show <name>    Show collection details
+  api collection list              List collections
+  api collection create <name>     Create collection
+  api collection show <name>       Show collection details
+  api collection delete <name>     Delete collection and all its requests
+  api collection copy <src> <dst>  Copy collection to a new name
 
 (ansi yellow)Chaining:(ansi reset)
-  api chain run <file>          Run request chain
-  api chain exec <file>         Execute chain from file
+  api chain create <name>       Create a new request chain
+  api chain list                List all saved chains
+  api chain show <name>         Show chain details and steps
+  api chain delete <name>       Delete a chain
+  api chain run <file>          Run a chain from a NUON definition file
+  api chain exec <file>         Execute chain steps with context propagation
+
+(ansi yellow)Response Helpers \(pass a --raw result record\):(ansi reset)
+  api summary <result>          Compact one-line summary of a --raw result
+  api explore <result>          Browse a --raw response interactively
+  api pretty <result>           Pretty-print a stored --raw result
 
 (ansi yellow)TUI:(ansi reset)
-  api tui                       Launch terminal UI
+  api tui                       Launch the terminal UI
+
+(ansi yellow)Scripting:(ansi reset)
+  --raw / --output / --select modes RETURN typed values and print nothing — pipe cleanly.
+  Default `pretty` mode prints to terminal and returns null \(interactive use\).
+
+  api get URL -o body             # returns parsed body, prints nothing
+  api get URL -s body.id          # returns one field value
+  api get URL -o status           # returns HTTP status int
+  api send create-user -c users -v {name: alice}
+  let r = api get URL --raw
+  \$r.response.status             # inspect status int
+  \$r.response.body               # inspect full body
+  \$r.response.headers            # inspect response headers record
 
 (ansi dark_gray)Variable Resolution Order [narrowest wins]:(ansi reset)
-  1. Request --vars flag
+  1. Request --vars flag \(api send only\)
   2. Collection active environment
   3. Global variables
   4. Built-in vars
+
+Run `api <command> --help` for full flags on any command.
 "
 }
 
