@@ -495,6 +495,83 @@ def test-v12-summary-headers-length [] {
     cleanup $tmp
 }
 
+# ── V2: HTML/XML truncation handles few-line but huge-line bodies ─────────────
+
+def test-v2-html-single-line-truncation [] {
+    # Hermetic: serves a single-line HTML body > 3000 bytes (no newlines).
+    # The old line-count-only check would NOT truncate (1 line < 15).
+    # The new byte-check must trigger truncation.
+    if (which node | is-empty) {
+        error make {msg: "SKIP: node unavailable"}
+    }
+
+    let tmp = (make-temp-dir "v2-giant-html")
+    $env.API_ROOT = $tmp
+    let port_file = ($tmp | path join "port.txt")
+    let server_script = ($tmp | path join "giant_html_server.js")
+
+    # One giant single-line HTML body with no newlines, ~3030 chars
+    let js = 'const http=require("http"),fs=require("fs");
+const pf=process.argv[2];
+const body="<html><body><p>" + "A".repeat(3000) + "</p></body></html>";
+const srv=http.createServer((req,res)=>{
+  res.writeHead(200,{"Content-Type":"text/html"});
+  res.end(body);
+  setTimeout(()=>process.exit(0),300);
+});
+srv.listen(0,"127.0.0.1",()=>{fs.writeFileSync(pf,srv.address().port.toString());});'
+    $js | save -f $server_script
+
+    job spawn { ^node ($server_script | into string) ($port_file | into string) }
+
+    mut port = 0
+    mut tries = 0
+    while ($port == 0 and $tries < 50) {
+        sleep 0.1sec
+        $tries = $tries + 1
+        if ($port_file | path exists) {
+            $port = (open --raw $port_file | str trim | into int)
+        }
+    }
+    assert ($port > 0) "Giant HTML server did not start in time"
+
+    let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
+    let nu_exe = $nu.current-exe
+    let url = $"http://127.0.0.1:($port)/"
+    let out = (^$nu_exe -c $"source '($api_path)'; api get '($url)' --no-history" | complete)
+    let stdout = ($out.stdout | ansi strip)
+
+    assert ($stdout | str contains "[HTML response") "Should show [HTML response ...] marker"
+    assert ($stdout | str contains "truncated") "Should show truncation notice for single giant HTML line"
+    # The tail of the body (end tag) should NOT be present — body was cut off before it
+    assert not ($stdout | str contains "</p></body></html>") "Should not dump full HTML body tail"
+
+    cleanup $tmp
+}
+
+# ── V13: --select into scalar body returns null, not crash ────────────────────
+
+def test-v13-select-scalar-no-crash [] {
+    # V13: api vars extract used `get -o` on a string value, crashing.
+    # Guard must yield null instead of throwing for any scalar input.
+    let tmp = (make-temp-dir "v13-scalar")
+    $env.API_ROOT = $tmp
+
+    # String scalar: descending "nope" path should return null, not error
+    let r1 = (api vars extract "plain string body" "nope")
+    assert ($r1 == null) "extract from string scalar should return null"
+
+    # Int scalar
+    let r2 = (api vars extract 42 "key")
+    assert ($r2 == null) "extract from int scalar should return null"
+
+    # Valid structured path still works (regression guard)
+    let r3 = (api vars extract {id: 7, name: "test"} "id")
+    assert equal $r3 7 "extract from record should still work"
+
+    cleanup $tmp
+}
+
 # ── Suite runner ──────────────────────────────────────────────────────────────
 
 def run-suite-features [net_ok: bool]: nothing -> list<record> {
@@ -507,6 +584,8 @@ def run-suite-features [net_ok: bool]: nothing -> list<record> {
         (run-test "C11: api request export prints curl command"   { test-c11-export-prints-curl-command })
         (run-test "V9: api auth show with oauth2 token no crash"  { test-v9-auth-show-oauth2-no-crash })
         (run-test "V12: api summary with record headers no crash"  { test-v12-summary-headers-length })
+        (run-test "V2: HTML single-line giant body truncates"      { test-v2-html-single-line-truncation })
+        (run-test "V13: --select into scalar body returns null"    { test-v13-select-scalar-no-crash })
     ]
     if not $net_ok {
         $results = ($results | append (skip-test "C4-C11-network" "network unavailable"))

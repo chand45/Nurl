@@ -370,6 +370,12 @@ export def "api vars extract" [
             return null
         }
 
+        # Guard: only structured types support `get`; a scalar means the path is invalid
+        let current_type = ($current | describe)
+        if not (($current_type | str starts-with "record") or ($current_type | str starts-with "list") or ($current_type | str starts-with "table")) {
+            return null
+        }
+
         # Handle array index notation like "items.0.name"
         if ($part | str contains "[") {
             let base = ($part | parse -r '^([^\[]+)\[(\d+)\]$')

@@ -343,10 +343,13 @@ def print-body [body: any, output_mode: string = "pretty"] {
             print $"(ansi dark_gray)[HTML response — ($len) bytes](ansi reset)"
             let html_lines = ($body_str | lines)
             let line_count = ($html_lines | length)
-            if $line_count > 15 {
-                print ($html_lines | first 15 | str join "\n")
-                let remaining = $line_count - 15
-                print $"(ansi dark_gray)... [truncated — ($remaining) more lines](ansi reset)"
+            # Truncate if too many lines OR body is too large (catches few-line but huge-line bodies)
+            if $line_count > 15 or $len > 2000 {
+                let preview_lines = ($html_lines | first 15 | each {|l| $l | str substring 0..500})
+                let preview = ($preview_lines | str join "\n")
+                let shown = if ($preview | str length) > 2000 { ($preview | str substring 0..2000) } else { $preview }
+                print $shown
+                print $"(ansi dark_gray)... [truncated — showing first 2000 of ($len) bytes; use --raw or --output body for full payload](ansi reset)"
             } else {
                 print $body_str
             }
@@ -355,10 +358,13 @@ def print-body [body: any, output_mode: string = "pretty"] {
             print $"(ansi dark_gray)[XML response — ($len) bytes](ansi reset)"
             let xml_lines = ($body_str | lines)
             let line_count = ($xml_lines | length)
-            if $line_count > 15 {
-                print ($xml_lines | first 15 | str join "\n")
-                let remaining = $line_count - 15
-                print $"(ansi dark_gray)... [truncated — ($remaining) more lines](ansi reset)"
+            # Truncate if too many lines OR body is too large (catches few-line but huge-line bodies)
+            if $line_count > 15 or $len > 2000 {
+                let preview_lines = ($xml_lines | first 15 | each {|l| $l | str substring 0..500})
+                let preview = ($preview_lines | str join "\n")
+                let shown = if ($preview | str length) > 2000 { ($preview | str substring 0..2000) } else { $preview }
+                print $shown
+                print $"(ansi dark_gray)... [truncated — showing first 2000 of ($len) bytes; use --raw or --output body for full payload](ansi reset)"
             } else {
                 print $body_str
             }
