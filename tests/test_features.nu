@@ -545,6 +545,15 @@ srv.listen(0,"127.0.0.1",()=>{fs.writeFileSync(pf,srv.address().port.toString())
     assert ($stdout | str contains "truncated") "Should show truncation notice for single giant HTML line"
     # The tail of the body (end tag) should NOT be present — body was cut off before it
     assert not ($stdout | str contains "</p></body></html>") "Should not dump full HTML body tail"
+    # V14 guard: shown byte count in marker must be <= total byte count (no impossible "2000 of 522" values)
+    # Parse the marker line: "showing first N of M bytes"
+    let marker_line = ($stdout | lines | where {|l| $l | str contains "showing first"} | first)
+    let parsed = ($marker_line | parse --regex 'showing first (\d+) of (\d+) bytes')
+    if not ($parsed | is-empty) {
+        let shown_n = ($parsed | first | get capture0 | into int)
+        let total_n = ($parsed | first | get capture1 | into int)
+        assert ($shown_n <= $total_n) "shown byte count must not exceed total byte count"
+    }
 
     cleanup $tmp
 }
