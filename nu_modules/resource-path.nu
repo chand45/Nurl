@@ -94,7 +94,7 @@ export def resolve-under-base [
     if $suffix != "" {
         let last_index = (($segments | length) - 1)
         let leaf = ($segments | get $last_index)
-        if $always_suffix or not ($leaf | str ends-with $suffix) {
+        if $always_suffix or (not ($leaf | str ends-with $suffix)) {
             $segments = ($segments | update $last_index $"($leaf)($suffix)")
         }
     }

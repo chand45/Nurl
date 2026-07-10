@@ -92,6 +92,47 @@ def create-directory-link [link_path: string, target_path: string] {
     }
 }
 
+def process-is-running [pid: int] {
+    let result = (^node -e '
+try {
+  process.kill(Number(process.argv[1]), 0);
+} catch (error) {
+  process.exit(error.code === "ESRCH" ? 1 : 2);
+}' ($pid | into string) | complete)
+    $result.exit_code == 0
+}
+
+def stop-counting-server [server: record] {
+    if not (process-is-running $server.pid) {
+        return
+    }
+
+    "stop" | save -f $server.stop_file
+    mut tries = 0
+    while (process-is-running $server.pid) and $tries < 50 {
+        sleep 0.1sec
+        $tries = $tries + 1
+    }
+
+    if (process-is-running $server.pid) {
+        let terminated = (^node -e '
+try {
+  process.kill(Number(process.argv[1]), "SIGTERM");
+} catch (error) {
+  if (error.code !== "ESRCH") throw error;
+}' ($server.pid | into string) | complete)
+        assert equal $terminated.exit_code 0 $"failed to terminate local request counter PID ($server.pid)"
+
+        $tries = 0
+        while (process-is-running $server.pid) and $tries < 50 {
+            sleep 0.1sec
+            $tries = $tries + 1
+        }
+    }
+
+    assert (not (process-is-running $server.pid)) $"local request counter PID ($server.pid) did not stop"
+}
+
 def start-counting-server [tmp: string] {
     if (which node | is-empty) {
         error make {msg: "SKIP: node unavailable for local no-network proof"}
@@ -99,49 +140,114 @@ def start-counting-server [tmp: string] {
 
     let counter_file = ($tmp | path join "network-count.txt")
     let port_file = ($tmp | path join "network-port.txt")
+    let pid_file = ($tmp | path join "network-pid.txt")
     let stop_file = ($tmp | path join "network-stop.txt")
     let server_script = ($tmp | path join "network-server.js")
+    let launcher_script = ($tmp | path join "network-launcher.js")
     "0" | save -f $counter_file
 
     let js = 'const http=require("http"),fs=require("fs");
-const cf=process.argv[2],pf=process.argv[3],sf=process.argv[4];
+const cf=process.argv[2],pf=process.argv[3],pidf=process.argv[4],sf=process.argv[5];
+let stopping=false;
 const srv=http.createServer((req,res)=>{
   let c=parseInt(fs.readFileSync(cf,"utf8").trim()||"0")+1;
   fs.writeFileSync(cf,c.toString());
   res.writeHead(200,{"Content-Type":"application/json"});
   res.end("{\"marker\":\"NETWORK-HIT-SENTINEL\",\"count\":"+c+"}");
 });
-srv.listen(0,"127.0.0.1",()=>fs.writeFileSync(pf,srv.address().port.toString()));
-const watcher=setInterval(()=>{if(fs.existsSync(sf)){clearInterval(watcher);srv.close(()=>process.exit(0));}},50);
-setTimeout(()=>process.exit(0),30000);'
+const shutdown=()=>{
+  if(stopping)return;
+  stopping=true;
+  clearInterval(watcher);
+  srv.close(()=>process.exit(0));
+  setTimeout(()=>process.exit(1),1000).unref();
+};
+const watcher=setInterval(()=>{if(fs.existsSync(sf))shutdown();},50);
+process.on("SIGTERM",shutdown);
+srv.listen(0,"127.0.0.1",()=>{
+  fs.writeFileSync(pf,srv.address().port.toString());
+  fs.writeFileSync(pidf,process.pid.toString());
+});
+setTimeout(shutdown,30000).unref();'
+    let launcher = 'const {spawn}=require("child_process");
+const child=spawn(process.execPath,process.argv.slice(2),{
+  detached:true,
+  stdio:"ignore",
+  windowsHide:true
+});
+child.unref();
+process.stdout.write(String(child.pid));'
     $js | save -f $server_script
-    job spawn { ^node $server_script $counter_file $port_file $stop_file }
+    $launcher | save -f $launcher_script
+
+    let launched = (^node $launcher_script $server_script $counter_file $port_file $pid_file $stop_file | complete)
+    assert equal $launched.exit_code 0 "local request counter launcher failed"
+    let pid = ($launched.stdout | str trim | into int)
+    let server = {
+        pid: $pid
+        port: 0
+        counter_file: $counter_file
+        stop_file: $stop_file
+    }
 
     mut port = 0
+    mut ready_pid = 0
     mut tries = 0
-    while ($port == 0 and $tries < 50) {
+    while (($port == 0 or $ready_pid == 0) and $tries < 50) {
         sleep 0.1sec
         $tries = $tries + 1
         if ($port_file | path exists) {
             $port = (open $port_file --raw | str trim | into int)
         }
+        if ($pid_file | path exists) {
+            $ready_pid = (open $pid_file --raw | str trim | into int)
+        }
     }
-    assert ($port > 0) "local request counter did not start"
 
-    {
-        port: $port
-        counter_file: $counter_file
-        stop_file: $stop_file
+    if $port == 0 or $ready_pid != $pid {
+        stop-counting-server $server
+        error make {msg: "local request counter did not become ready"}
     }
+
+    $server | update port $port
 }
 
 def network-count [server: record] {
     open $server.counter_file --raw | str trim | into int
 }
 
-def stop-counting-server [server: record] {
-    "stop" | save -f $server.stop_file
-    sleep 0.1sec
+def with-counting-server [tmp: string, action: closure] {
+    let started = try {
+        {server: (start-counting-server $tmp), error: null}
+    } catch {|error|
+        {server: null, error: $error}
+    }
+
+    if $started.error != null {
+        cleanup $tmp
+        error make {msg: $started.error.msg}
+    }
+
+    let action_error = try {
+        do $action $started.server
+        null
+    } catch {|error|
+        $error
+    }
+    let stop_error = try {
+        stop-counting-server $started.server
+        null
+    } catch {|error|
+        $error
+    }
+    cleanup $tmp
+
+    if $action_error != null {
+        error make {msg: $action_error.msg}
+    }
+    if $stop_error != null {
+        error make {msg: $stop_error.msg}
+    }
 }
 
 def test-resource-helper-boundaries [] {
@@ -184,6 +290,30 @@ def test-resource-helper-boundaries [] {
     expect-resource-error {
         resolve-under-base $base "missing/.../outside.nuon" "request" --nested --scope "<collection>/requests"
     } "Invalid request name"
+    cleanup $tmp
+}
+
+def test-counting-server-failure-cleanup [] {
+    let tmp = (make-temp-dir "resource-server-cleanup")
+    let server_tmp = ($tmp | path join "server")
+    let pid_file = ($tmp | path join "failed-server-pid.txt")
+    mkdir $server_tmp
+
+    let caught = try {
+        with-counting-server $server_tmp {|server|
+            $server.pid | into string | save -f $pid_file
+            error make {msg: "EXPECTED_SERVER_FAILURE"}
+        }
+        null
+    } catch {|error|
+        $error
+    }
+
+    assert ($caught != null)
+    assert ($caught.msg | str contains "EXPECTED_SERVER_FAILURE")
+    let pid = (open $pid_file --raw | str trim | into int)
+    assert (not (process-is-running $pid)) "failed test left the local request counter running"
+    assert (not ($server_tmp | path exists)) "failed test did not clean its server workspace"
     cleanup $tmp
 }
 
@@ -461,92 +591,90 @@ def test-no-network-and-valid_lifecycle [] {
     let tmp = (make-temp-dir "resource-local-network")
     let root = ($tmp | path join "workspace with spaces")
     mkdir $root
-    let server = (start-counting-server $tmp)
-    let base_url = $"http://127.0.0.1:($server.port)"
+    with-counting-server $tmp {|server|
+        let base_url = $"http://127.0.0.1:($server.port)"
 
-    $env.API_ROOT = $root
-    api init | ignore
-    api collection create "team api.v1 世界" | ignore
-    api collection env create "team api.v1 世界" dev --activate | ignore
-    api collection env set "team api.v1 世界" base_url $base_url | ignore
-    api collection env set "team api.v1 世界" route ping | ignore
-    api request create "auth/ping 世界" GET "{{base_url}}/{{route}}" --collection "team api.v1 世界" | ignore
+        $env.API_ROOT = $root
+        api init | ignore
+        api collection create "team api.v1 世界" | ignore
+        api collection env create "team api.v1 世界" dev --activate | ignore
+        api collection env set "team api.v1 世界" base_url $base_url | ignore
+        api collection env set "team api.v1 世界" route ping | ignore
+        api request create "auth/ping 世界" GET "{{base_url}}/{{route}}" --collection "team api.v1 世界" | ignore
 
-    let outside_request = ($tmp | path join "outside-request.nuon")
-    {
-        name: "outside-request"
-        collection: "demo"
-        method: "GET"
-        url: $"($base_url)/should-never-run"
-        headers: {}
-        body: null
-        auth: null
-    } | to nuon | save -f $outside_request
-    let outside_before = (open $outside_request --raw)
-    let workspace_before = (workspace-snapshot $root)
-    let tmp_before = (workspace-snapshot $tmp)
-    let malicious_name = "../../../../outside-request"
-    let flag_cases = [
-        ""
-        "--raw"
-        "--output pretty"
-        "--output body"
-        "--output json"
-        "--output headers"
-        "--output status"
-        "--output none"
-        "--select body.marker"
-        "--dry-run"
-    ]
+        let outside_request = ($tmp | path join "outside-request.nuon")
+        {
+            name: "outside-request"
+            collection: "demo"
+            method: "GET"
+            url: $"($base_url)/should-never-run"
+            headers: {}
+            body: null
+            auth: null
+        } | to nuon | save -f $outside_request
+        let outside_before = (open $outside_request --raw)
+        let workspace_before = (workspace-snapshot $root)
+        let tmp_before = (workspace-snapshot $tmp)
+        let malicious_name = "../../../../outside-request"
+        let flag_cases = [
+            ""
+            "--raw"
+            "--output pretty"
+            "--output body"
+            "--output json"
+            "--output headers"
+            "--output status"
+            "--output none"
+            "--select body.marker"
+            "--dry-run"
+        ]
 
-    for flags in $flag_cases {
-        let command = $"api send ($malicious_name | to nuon) --collection 'team api.v1 世界' ($flags)"
-        assert-invalid-process $root $command "Invalid request name" | ignore
-        assert equal (network-count $server) 0 $"invalid send reached the local server: ($flags)"
-        assert equal (workspace-snapshot $root) $workspace_before $"invalid send changed workspace: ($flags)"
-        assert equal (open $outside_request --raw) $outside_before $"invalid send changed outside request: ($flags)"
-        assert equal (workspace-snapshot $tmp) $tmp_before $"invalid send changed files outside the workspace: ($flags)"
+        for flags in $flag_cases {
+            let command = $"api send ($malicious_name | to nuon) --collection 'team api.v1 世界' ($flags)"
+            assert-invalid-process $root $command "Invalid request name" | ignore
+            assert equal (network-count $server) 0 $"invalid send reached the local server: ($flags)"
+            assert equal (workspace-snapshot $root) $workspace_before $"invalid send changed workspace: ($flags)"
+            assert equal (open $outside_request --raw) $outside_before $"invalid send changed outside request: ($flags)"
+            assert equal (workspace-snapshot $tmp) $tmp_before $"invalid send changed files outside the workspace: ($flags)"
+        }
+
+        let dry_run = (run-module-script $root "api send 'auth/ping 世界' --collection 'team api.v1 世界' --vars {route: dry-run} --dry-run")
+        assert equal $dry_run.exit_code 0
+        assert ($dry_run.stdout | str contains $"($base_url)/dry-run")
+        assert equal (network-count $server) 0 "valid dry-run must not reach the local server"
+
+        let sent = (api send "auth/ping 世界" --collection "team api.v1 世界" --vars {route: direct} --raw --no-history)
+        assert equal $sent.response.status 200
+        assert equal $sent.response.body.marker "NETWORK-HIT-SENTINEL"
+        assert equal (network-count $server) 1
+
+        api chain create workflow | ignore
+        {
+            name: "workflow"
+            steps: [{request: "auth/ping 世界"}]
+        } | to nuon | save -f ($root | path join "chains" "workflow.nuon")
+        let chain_result = (api chain exec workflow --quiet)
+        assert $chain_result.success
+        assert equal ($chain_result.results | first | get status) 200
+        assert equal (network-count $server) 2
+
+        let save_path = ($tmp | path join "explicit saved response.json")
+        api send "auth/ping 世界" --collection "team api.v1 世界" --save $save_path --no-history | ignore
+        assert ($save_path | path exists)
+        assert (open $save_path --raw | str contains "NETWORK-HIT-SENTINEL")
+        assert equal (network-count $server) 3
+
+        let binary_path = ($tmp | path join "explicit binary response.bin")
+        let binary_result = (api send "auth/ping 世界" --collection "team api.v1 世界" --binary-save $binary_path --raw --no-history)
+        assert equal $binary_result.response.status 200
+        assert (open $binary_path --raw | str contains "NETWORK-HIT-SENTINEL")
+        assert equal (network-count $server) 4
+
+        let history_export = ($tmp | path join "explicit history export.json")
+        api history export --output $history_export | ignore
+        assert ($history_export | path exists)
+        assert ((open $history_export --raw | from json | length) >= 1)
     }
-
-    let dry_run = (run-module-script $root "api send 'auth/ping 世界' --collection 'team api.v1 世界' --vars {route: dry-run} --dry-run")
-    assert equal $dry_run.exit_code 0
-    assert ($dry_run.stdout | str contains $"($base_url)/dry-run")
-    assert equal (network-count $server) 0 "valid dry-run must not reach the local server"
-
-    let sent = (api send "auth/ping 世界" --collection "team api.v1 世界" --vars {route: direct} --raw --no-history)
-    assert equal $sent.response.status 200
-    assert equal $sent.response.body.marker "NETWORK-HIT-SENTINEL"
-    assert equal (network-count $server) 1
-
-    api chain create workflow | ignore
-    {
-        name: "workflow"
-        steps: [{request: "auth/ping 世界"}]
-    } | to nuon | save -f ($root | path join "chains" "workflow.nuon")
-    let chain_result = (api chain exec workflow --quiet)
-    assert $chain_result.success
-    assert equal ($chain_result.results | first | get status) 200
-    assert equal (network-count $server) 2
-
-    let save_path = ($tmp | path join "explicit saved response.json")
-    api send "auth/ping 世界" --collection "team api.v1 世界" --save $save_path --no-history | ignore
-    assert ($save_path | path exists)
-    assert (open $save_path --raw | str contains "NETWORK-HIT-SENTINEL")
-    assert equal (network-count $server) 3
-
-    let binary_path = ($tmp | path join "explicit binary response.bin")
-    let binary_result = (api send "auth/ping 世界" --collection "team api.v1 世界" --binary-save $binary_path --raw --no-history)
-    assert equal $binary_result.response.status 200
-    assert (open $binary_path --raw | str contains "NETWORK-HIT-SENTINEL")
-    assert equal (network-count $server) 4
-
-    let history_export = ($tmp | path join "explicit history export.json")
-    api history export --output $history_export | ignore
-    assert ($history_export | path exists)
-    assert ((open $history_export --raw | from json | length) >= 1)
-
-    stop-counting-server $server
-    cleanup $tmp
 }
 
 def test-chain-surface-and-explicit-path [] {
@@ -600,6 +728,128 @@ def test-chain-surface-and-explicit-path [] {
     api chain delete release --force | ignore
     api chain delete release.nuon --force | ignore
     cleanup $tmp
+}
+
+def test-chain-exec-named-containment [] {
+    let tmp = (make-temp-dir "resource-chain-exec-containment")
+    let linked_root = ($tmp | path join "linked workspace")
+    let outside_chains = ($tmp | path join "outside chains")
+    let shadow_root = ($tmp | path join "shadow workspace")
+    let shadow_cwd = ($tmp | path join "shadow cwd")
+    mkdir $linked_root
+    mkdir $outside_chains
+    mkdir $shadow_root
+    mkdir $shadow_cwd
+
+    with-counting-server $tmp {|server|
+        let base_url = $"http://127.0.0.1:($server.port)"
+        $env.API_ROOT = $linked_root
+        api init | ignore
+
+        let linked_chains = ($linked_root | path join "chains")
+        if ($linked_chains | path exists) {
+            rm -rf $linked_chains
+        }
+        {
+            name: "escape"
+            steps: [{method: "GET", url: $"($base_url)/linked-chain-escape"}]
+        } | to nuon | save -f ($outside_chains | path join "escape.nuon")
+        let outside_sentinel = ($outside_chains | path join "sentinel.txt")
+        "TEST-SECRET-SENTINEL" | save -f $outside_sentinel
+        let outside_before = (workspace-snapshot $outside_chains)
+
+        if not (create-directory-link $linked_chains $outside_chains) {
+            error make {msg: "SKIP: directory symlink/junction creation unavailable"}
+        }
+
+        assert-invalid-process $linked_root "api chain exec escape --quiet" "existing links cannot escape" | ignore
+        assert equal (network-count $server) 0 "linked named chain reached the local server"
+        assert equal (workspace-snapshot $outside_chains) $outside_before "linked named chain changed outside files"
+        assert equal (open $outside_sentinel --raw) "TEST-SECRET-SENTINEL"
+
+        $env.API_ROOT = $shadow_root
+        api init | ignore
+        api chain create safe | ignore
+        api chain create escape | ignore
+        api chain create escape.nuon | ignore
+        {
+            name: "safe"
+            steps: []
+        } | to nuon | save -f ($shadow_root | path join "chains" "safe.nuon")
+        {
+            name: "escape"
+            steps: []
+        } | to nuon | save -f ($shadow_root | path join "chains" "escape.nuon")
+        {
+            name: "escape.nuon"
+            steps: []
+        } | to nuon | save -f ($shadow_root | path join "chains" "escape.nuon.nuon")
+        let bare_shadow_file = ($shadow_cwd | path join "escape")
+        {
+            name: "cwd-bare-shadow"
+            steps: [{method: "GET", url: $"($base_url)/cwd-bare-shadow"}]
+        } | to nuon | save -f $bare_shadow_file
+        let bare_shadow_before = (open $bare_shadow_file --raw)
+        let shadow_file = ($shadow_cwd | path join "escape.nuon")
+        {
+            name: "cwd-shadow"
+            steps: [{method: "GET", url: $"($base_url)/cwd-shadow"}]
+        } | to nuon | save -f $shadow_file
+        let shadow_before = (open $shadow_file --raw)
+
+        let normal = (run-module-script $shadow_root "let result = (api chain exec safe --quiet); print $result.success")
+        assert equal $normal.exit_code 0
+        assert equal ($normal.stderr | str trim) ""
+        assert equal ($normal.stdout | str trim) "true"
+        assert equal (network-count $server) 0 "contained named chain unexpectedly reached the local server"
+
+        let bare_shadow_command = ([
+            "cd "
+            ($shadow_cwd | to nuon)
+            "; let result = (api chain exec escape --quiet); print $result.success"
+        ] | str join)
+        let bare_shadowed = (run-module-script $shadow_root $bare_shadow_command)
+        assert equal $bare_shadowed.exit_code 0
+        assert equal ($bare_shadowed.stderr | str trim) ""
+        assert equal ($bare_shadowed.stdout | str trim) "true"
+        assert equal (network-count $server) 0 "bare CWD chain shadow won over named workspace lookup"
+
+        let shadow_command = ([
+            "cd "
+            ($shadow_cwd | to nuon)
+            "; let result = (api chain exec escape.nuon --quiet); print $result.success"
+        ] | str join)
+        let shadowed = (run-module-script $shadow_root $shadow_command)
+        assert equal $shadowed.exit_code 0
+        assert equal ($shadowed.stderr | str trim) ""
+        assert equal ($shadowed.stdout | str trim) "true"
+        assert equal (network-count $server) 0 "CWD chain shadow won over named workspace lookup"
+        assert equal (open $bare_shadow_file --raw) $bare_shadow_before
+        assert equal (open $shadow_file --raw) $shadow_before
+
+        let invalid_step = ($shadow_root | path join "chains" "invalid-step.nuon")
+        {
+            name: "invalid-step"
+            steps: [{request: "../outside"}]
+        } | to nuon | save -f $invalid_step
+        assert-invalid-process $shadow_root "api chain exec invalid-step --quiet" "Invalid request name" | ignore
+        assert equal (network-count $server) 0 "invalid saved-request step reached the local server"
+
+        let explicit_file = ($tmp | path join "explicit outside chain.nuon")
+        {
+            name: "explicit"
+            steps: []
+        } | to nuon | save -f $explicit_file
+        let explicit_command = ([
+            "let result = (api chain exec "
+            ($explicit_file | to nuon)
+            " --quiet); print $result.success"
+        ] | str join)
+        let explicit = (run-module-script $shadow_root $explicit_command)
+        assert equal $explicit.exit_code 0
+        assert equal ($explicit.stderr | str trim) ""
+        assert equal ($explicit.stdout | str trim) "true"
+    }
 }
 
 def test-vars-collection-context [] {
@@ -726,6 +976,7 @@ def run-suite-resource-paths []: nothing -> list<record> {
     print $"\n(ansi yellow)── Resource Path Containment ──(ansi reset)"
     [
         (run-test "resource paths: helper boundaries" { test-resource-helper-boundaries })
+        (run-test "resource paths: loopback cleanup survives failures" { test-counting-server-failure-cleanup })
         (run-test "resource paths: original attacks blocked" { test-original-attacks-blocked })
         (run-test "resource paths: subprocess contracts for collection, env, chain, and vars" { test-subprocess-rejection-families })
         (run-test "resource paths: collection surface" { test-collection-surface })
@@ -734,6 +985,7 @@ def run-suite-resource-paths []: nothing -> list<record> {
         (run-test "resource paths: request command and output surface" { test-request-invalid-command-surface })
         (run-test "resource paths: invalid sends cannot reach curl or network" { test-no-network-and-valid_lifecycle })
         (run-test "resource paths: chain names, steps, and explicit paths" { test-chain-surface-and-explicit-path })
+        (run-test "resource paths: named chain exec containment" { test-chain-exec-named-containment })
         (run-test "resource paths: vars collection context" { test-vars-collection-context })
         (run-test "resource paths: symlink and junction escapes" { test-symlink-escapes })
         (run-test "resource paths: TUI catches validation errors" { test-tui-survives-validation-error })

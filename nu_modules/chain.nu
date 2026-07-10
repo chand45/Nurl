@@ -204,30 +204,9 @@ export def "api chain exec" [
         or ($normalized =~ '^[A-Za-z]:')
         or (($normalized | split row "/" | length) > 1)
     )
-    if not $explicit_syntax {
-        validate-resource-name "chain" $file | ignore
-    }
-    let direct_type = ($file | path type)
-    let root_relative = ($root | path join $file)
-    let root_relative_type = ($root_relative | path type)
-    let chains_relative = ($root | path join "chains" $file)
-    let chains_relative_type = ($chains_relative | path type)
-    let chains_relative_with_suffix = ($root | path join "chains" $"($file).nuon")
-    let chains_relative_with_suffix_type = ($chains_relative_with_suffix | path type)
 
-    # Existing explicit paths remain path-taking inputs and are not confined to the workspace.
-    let file_path = if ($direct_type | is-not-empty) and $direct_type != "dir" {
-        $file
-    } else if ($root_relative_type | is-not-empty) and $root_relative_type != "dir" {
-        $root_relative
-    } else if ($chains_relative_type | is-not-empty) and $chains_relative_type != "dir" {
-        $chains_relative
-    } else if ($chains_relative_with_suffix_type | is-not-empty) and $chains_relative_with_suffix_type != "dir" {
-        $chains_relative_with_suffix
-    } else if $explicit_syntax {
-        print $"(ansi red)Chain file not found: ($file)(ansi reset)"
-        return null
-    } else {
+    let file_path = if not $explicit_syntax {
+        validate-resource-name "chain" $file | ignore
         let chains_dir = (get-chains-dir)
         let named_file = (resolve-chain-file $chains_dir $file)
         if not ($named_file | path exists) {
@@ -235,6 +214,28 @@ export def "api chain exec" [
             return null
         }
         $named_file
+    } else {
+        # Explicit path syntax remains path-taking input and is not confined to the workspace.
+        let direct_type = ($file | path type)
+        let root_relative = ($root | path join $file)
+        let root_relative_type = ($root_relative | path type)
+        let chains_relative = ($root | path join "chains" $file)
+        let chains_relative_type = ($chains_relative | path type)
+        let chains_relative_with_suffix = ($root | path join "chains" $"($file).nuon")
+        let chains_relative_with_suffix_type = ($chains_relative_with_suffix | path type)
+
+        if ($direct_type | is-not-empty) and $direct_type != "dir" {
+            $file
+        } else if ($root_relative_type | is-not-empty) and $root_relative_type != "dir" {
+            $root_relative
+        } else if ($chains_relative_type | is-not-empty) and $chains_relative_type != "dir" {
+            $chains_relative
+        } else if ($chains_relative_with_suffix_type | is-not-empty) and $chains_relative_with_suffix_type != "dir" {
+            $chains_relative_with_suffix
+        } else {
+            print $"(ansi red)Chain file not found: ($file)(ansi reset)"
+            return null
+        }
     }
 
     let chain_def = (open $file_path)
