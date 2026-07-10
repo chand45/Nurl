@@ -20,7 +20,7 @@ export def validate-resource-name [
     )
     let segments = ($normalized | split row "/")
     let has_ambiguous_segment = ($segments | any {|segment|
-        ($segment | str ends-with ".") or ($segment | str ends-with " ")
+        ($segment | str ends-with ".") or ($segment | str ends-with " ") or ($segment | str contains ":")
     })
 
     if $nested {
@@ -30,11 +30,11 @@ export def validate-resource-name [
 
         if $rooted or $invalid_segment or $has_ambiguous_segment {
             let location = if $scope == "" { "its resource directory" } else { $scope }
-            invalid-resource-name $kind $name $"path must remain under ($location) and cannot contain empty, dot-only, or trailing-dot/space segments"
+            invalid-resource-name $kind $name $"path must remain under ($location) and cannot contain empty, dot-only, trailing-dot/space, or ':' stream segments"
         }
     } else {
         if $rooted or $name == "" or ($name =~ '^\.+$') or ($segments | length) != 1 or $has_ambiguous_segment {
-            invalid-resource-name $kind $name "expected one non-empty relative path segment without '/', '\\', or a trailing dot or space"
+            invalid-resource-name $kind $name "expected one non-empty relative path segment without '/', '\\', ':', or a trailing dot or space"
         }
     }
 

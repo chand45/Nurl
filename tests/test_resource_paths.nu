@@ -82,6 +82,10 @@ def workspace-snapshot [root: string] {
 }
 
 def create-directory-link [link_path: string, target_path: string] {
+    if ($env.NURL_TEST_DISABLE_LINKS? | default "") == "1" {
+        return false
+    }
+
     if $nu.os-info.name == "windows" {
         let command = $"New-Item -ItemType Junction -Path ($link_path | to nuon) -Target ($target_path | to nuon) | Out-Null"
         let result = (^powershell.exe -NoProfile -NonInteractive -Command $command | complete)
@@ -93,6 +97,10 @@ def create-directory-link [link_path: string, target_path: string] {
 }
 
 def create-file-link [link_path: string, target_path: string] {
+    if ($env.NURL_TEST_DISABLE_LINKS? | default "") == "1" {
+        return false
+    }
+
     if $nu.os-info.name == "windows" {
         let result = (^cmd.exe /d /c mklink $link_path $target_path | complete)
         $result.exit_code == 0
@@ -299,7 +307,7 @@ def test-resource-helper-boundaries [] {
         "" "." ".." "..." "...."
         "a/b" "a\\b" "a/..\\secret" "a\\.\\b"
         "/absolute" "C:\\absolute" "C:relative" "\\\\server\\share"
-        "alias." "alias "
+        "alias." "alias " "alias:stream" "foo::$INDEX_ALLOCATION"
     ] {
         expect-resource-error {
             validate-resource-name "collection" $name | ignore
@@ -318,6 +326,7 @@ def test-resource-helper-boundaries [] {
         "auth/./login" "auth/../secret" "auth/.../secret"
         "auth\\..//secret" "auth\\.\\login" "C:\\secret" "\\\\server\\share"
         "auth/alias." "auth/alias " "auth./login" "auth /login"
+        "auth:stream/login" "auth::$INDEX_ALLOCATION/login" "auth/login:stream"
     ] {
         expect-resource-error {
             validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
@@ -574,6 +583,69 @@ def test-trailing-dot-space-aliases [] {
     cleanup $tmp
 }
 
+def test-ntfs-stream-aliases [] {
+    let tmp = (make-temp-dir "resource-stream-aliases")
+    let root = ($tmp | path join "workspace")
+    mkdir $root
+    $env.API_ROOT = $root
+    api init | ignore
+    api collection create foo | ignore
+    api collection env create foo dev | ignore
+    api request create "auth/login" GET "http://127.0.0.1:1/should-never-run" --collection foo | ignore
+    api chain create safe | ignore
+    {name: "safe", steps: []} | to nuon | save -f ($root | path join "chains" "safe.nuon")
+    let sentinel = ($tmp | path join "outside-sentinel.txt")
+    "TEST-SECRET-SENTINEL" | save -f $sentinel
+
+    let collection_dir = ($root | path join "collections" "foo")
+    let request_file = ($collection_dir | path join "requests" "auth" "login.nuon")
+    let collection_before = (workspace-snapshot $collection_dir)
+    let request_before = (open $request_file --raw)
+    let workspace_before = (workspace-snapshot $root)
+    let sentinel_before = (open $sentinel --raw)
+
+    let cases = [
+        {command: "api collection create 'foo:stream'", expected: "Invalid collection name"}
+        {command: "api collection show 'foo::$INDEX_ALLOCATION'", expected: "Invalid collection name"}
+        {command: "api collection delete 'foo::$INDEX_ALLOCATION' --force", expected: "Invalid collection name"}
+        {command: "api collection copy 'foo::$INDEX_ALLOCATION' target", expected: "Invalid collection name"}
+        {command: "api collection copy foo 'target:stream'", expected: "Invalid collection name"}
+
+        {command: "api request create 'auth:stream/new' GET 'https://example.invalid' --collection foo", expected: "Invalid request name"}
+        {command: "api request show 'auth::$INDEX_ALLOCATION/login' --collection foo", expected: "Invalid request name"}
+        {command: "api request update 'auth::$INDEX_ALLOCATION/login' --method POST --collection foo", expected: "Invalid request name"}
+        {command: "api request delete 'auth::$INDEX_ALLOCATION/login' --collection foo --force", expected: "Invalid request name"}
+        {command: "api request export 'auth::$INDEX_ALLOCATION/login' --collection foo", expected: "Invalid request name"}
+        {command: "api send 'auth::$INDEX_ALLOCATION/login' --collection foo", expected: "Invalid request name"}
+
+        {command: "api collection env list 'foo::$INDEX_ALLOCATION'", expected: "Invalid collection name"}
+        {command: "api collection env create foo 'dev:stream'", expected: "Invalid environment name"}
+        {command: "api collection env show foo 'dev:stream'", expected: "Invalid environment name"}
+        {command: "api collection env delete foo 'dev:stream' --force", expected: "Invalid environment name"}
+
+        {command: "api chain create 'safe:stream'", expected: "Invalid chain name"}
+        {command: "api chain show 'safe:stream'", expected: "Invalid chain name"}
+        {command: "api chain delete 'safe:stream' --force", expected: "Invalid chain name"}
+        {command: "api chain exec 'safe:stream' --quiet", expected: "Invalid chain name"}
+
+        {command: "api vars get-merged --collection 'foo::$INDEX_ALLOCATION'", expected: "Invalid collection name"}
+        {command: "api vars interpolate '{{missing}}' --collection 'foo:stream'", expected: "Invalid collection name"}
+        {command: "api vars interpolate-record {value: '{{missing}}'} --collection 'foo:stream'", expected: "Invalid collection name"}
+    ]
+
+    for case in $cases {
+        assert-invalid-process $root $case.command $case.expected | ignore
+        assert equal (workspace-snapshot $root) $workspace_before $"stream alias changed workspace: ($case.command)"
+        assert equal (open $sentinel --raw) $sentinel_before $"stream alias changed outside sentinel: ($case.command)"
+    }
+
+    assert equal (workspace-snapshot $collection_dir) $collection_before
+    assert equal (open $request_file --raw) $request_before
+    assert ($collection_dir | path exists) "collection stream alias deleted the canonical collection"
+    assert ($request_file | path exists) "request directory-stream alias deleted the canonical request"
+    cleanup $tmp
+}
+
 def test-environment-surface [] {
     let tmp = (make-temp-dir "resource-envs")
     $env.API_ROOT = $tmp
@@ -769,6 +841,11 @@ def test-no-network-and-valid_lifecycle [] {
             assert equal (workspace-snapshot $tmp) $tmp_before $"invalid send changed files outside the workspace: ($flags)"
         }
 
+        assert-invalid-process $root "api send 'auth::$INDEX_ALLOCATION/ping 世界' --collection 'team api.v1 世界'" "Invalid request name" | ignore
+        assert-network-count-if-available $server 0 "request directory-stream alias reached the local server"
+        assert equal (workspace-snapshot $root) $workspace_before "request directory-stream alias changed workspace"
+        assert equal (workspace-snapshot $tmp) $tmp_before "request directory-stream alias changed files outside the workspace"
+
         let dry_run = (run-module-script $root "api send 'auth/ping 世界' --collection 'team api.v1 世界' --vars {route: dry-run} --dry-run")
         assert equal $dry_run.exit_code 0
         assert ($dry_run.stdout | str contains $"($base_url)/dry-run")
@@ -897,14 +974,15 @@ def test-chain-exec-named-containment [] {
         "TEST-SECRET-SENTINEL" | save -f $outside_sentinel
         let outside_before = (workspace-snapshot $outside_chains)
 
-        if not (create-directory-link $linked_chains $outside_chains) {
-            error make {msg: "SKIP: directory symlink/junction creation unavailable"}
+        let linked_root_available = (create-directory-link $linked_chains $outside_chains)
+        if $linked_root_available {
+            assert-invalid-process $linked_root "api chain exec escape --quiet" "existing links cannot escape" | ignore
+            assert-network-count-if-available $server 0 "linked named chain reached the local server"
+            assert equal (workspace-snapshot $outside_chains) $outside_before "linked named chain changed outside files"
+            assert equal (open $outside_sentinel --raw) "TEST-SECRET-SENTINEL"
+        } else {
+            print "  [capability gated: linked-root chain assertions require directory links]"
         }
-
-        assert-invalid-process $linked_root "api chain exec escape --quiet" "existing links cannot escape" | ignore
-        assert-network-count-if-available $server 0 "linked named chain reached the local server"
-        assert equal (workspace-snapshot $outside_chains) $outside_before "linked named chain changed outside files"
-        assert equal (open $outside_sentinel --raw) "TEST-SECRET-SENTINEL"
 
         $env.API_ROOT = $shadow_root
         api init | ignore
@@ -988,6 +1066,9 @@ def test-chain-exec-named-containment [] {
         assert equal $explicit.exit_code 0
         assert equal ($explicit.stderr | str trim) ""
         assert equal ($explicit.stdout | str trim) "true"
+        if not $linked_root_available {
+            print "  [link-disabled proof: named lookup, logical .nuon, CWD shadow, malicious-step rejection, and explicit paths executed]"
+        }
     }
 }
 
@@ -1024,17 +1105,25 @@ def test-dangling-link-writes [] {
     mkdir $root
     mkdir $outside
 
-    if not (create-file-link $capability_link $capability_target) {
-        cleanup $tmp
-        error make {msg: "SKIP: file symlink creation unavailable"}
-    }
-    rm $capability_link
-
     $env.API_ROOT = $root
     api init | ignore
     api collection create demo | ignore
-    mkdir ($root | path join "chains")
-    mkdir ($root | path join "collections" "demo" "environments")
+    api chain create safe-missing | ignore
+    api request create "safe/missing" GET "https://example.invalid/safe" --collection demo | ignore
+    api collection env create demo safe-missing | ignore
+    assert (($root | path join "chains" "safe-missing.nuon") | path exists)
+    assert (($root | path join "collections" "demo" "requests" "safe" "missing.nuon") | path exists)
+    assert (($root | path join "collections" "demo" "environments" "safe-missing.nuon") | path exists)
+    "TEST-SECRET-SENTINEL" | save -f ($outside | path join "sentinel.txt")
+
+    if not (create-file-link $capability_link $capability_target) {
+        print "  [capability gated: dangling and contained file-link assertions require file links]"
+        print "  [link-disabled proof: safe chain, request, and environment missing-leaf creation executed]"
+        assert equal (open ($outside | path join "sentinel.txt") --raw) "TEST-SECRET-SENTINEL"
+        cleanup $tmp
+        return
+    }
+    rm $capability_link
 
     let chain_target = ($outside | path join "chain-created.nuon")
     let request_target = ($outside | path join "request-created.nuon")
@@ -1045,7 +1134,6 @@ def test-dangling-link-writes [] {
     let request_link = ($root | path join "collections" "demo" "requests" "dangling.nuon")
     let environment_link = ($root | path join "collections" "demo" "environments" "dangling.nuon")
     let intermediate_link = ($root | path join "collections" "demo" "requests" "nested")
-    "TEST-SECRET-SENTINEL" | save -f ($outside | path join "sentinel.txt")
 
     assert (create-file-link $chain_link $chain_target) "dangling chain link creation failed after capability preflight"
     assert (create-file-link $request_link $request_target) "dangling request link creation failed after capability preflight"
@@ -1081,12 +1169,6 @@ def test-dangling-link-writes [] {
     rm $request_link
     rm $environment_link
     rm $intermediate_link
-    api chain create safe-missing | ignore
-    api request create "safe/missing" GET "https://example.invalid/safe" --collection demo | ignore
-    api collection env create demo safe-missing | ignore
-    assert (($root | path join "chains" "safe-missing.nuon") | path exists)
-    assert (($root | path join "collections" "demo" "requests" "safe" "missing.nuon") | path exists)
-    assert (($root | path join "collections" "demo" "environments" "safe-missing.nuon") | path exists)
 
     api chain create real | ignore
     {name: "real", steps: []} | to nuon | save -f ($root | path join "chains" "real.nuon")
@@ -1116,7 +1198,7 @@ def test-symlink-escapes [] {
 
     if not (create-directory-link $capability_link $capability_target) {
         cleanup $tmp
-        error make {msg: "SKIP: directory symlink/junction creation unavailable"}
+        error make {msg: "SKIP: link capability unavailable for symlink/junction containment assertions"}
     }
     rm $capability_link
 
@@ -1202,6 +1284,7 @@ def run-suite-resource-paths []: nothing -> list<record> {
         (run-test "resource paths: subprocess contracts for collection, env, chain, and vars" { test-subprocess-rejection-families })
         (run-test "resource paths: collection surface" { test-collection-surface })
         (run-test "resource paths: trailing-dot and trailing-space aliases" { test-trailing-dot-space-aliases })
+        (run-test "resource paths: NTFS stream aliases" { test-ntfs-stream-aliases })
         (run-test "resource paths: environment surface" { test-environment-surface })
         (run-test "resource paths: nested request lifecycle and body-file compatibility" { test-request-lifecycle-and-explicit-body-file })
         (run-test "resource paths: request command and output surface" { test-request-invalid-command-surface })
