@@ -92,6 +92,20 @@ def create-directory-link [link_path: string, target_path: string] {
     }
 }
 
+def create-file-link [link_path: string, target_path: string] {
+    if $nu.os-info.name == "windows" {
+        let result = (^cmd.exe /d /c mklink $link_path $target_path | complete)
+        $result.exit_code == 0
+    } else {
+        let result = (^ln -s $target_path $link_path | complete)
+        $result.exit_code == 0
+    }
+}
+
+def counting-server-capable [] {
+    ($env.NURL_TEST_DISABLE_NODE? | default "") != "1" and (not (which node | is-empty))
+}
+
 def process-is-running [pid: int] {
     let result = (^node -e '
 try {
@@ -134,8 +148,8 @@ try {
 }
 
 def start-counting-server [tmp: string] {
-    if (which node | is-empty) {
-        error make {msg: "SKIP: node unavailable for local no-network proof"}
+    if not (counting-server-capable) {
+        error make {msg: "CAPABILITY: node unavailable for local network-count proof"}
     }
 
     let counter_file = ($tmp | path join "network-count.txt")
@@ -250,6 +264,32 @@ def with-counting-server [tmp: string, action: closure] {
     }
 }
 
+def with-optional-counting-server [tmp: string, action: closure] {
+    if (counting-server-capable) {
+        with-counting-server $tmp $action
+        return
+    }
+
+    let action_error = try {
+        do $action null
+        null
+    } catch {|error|
+        $error
+    }
+    cleanup $tmp
+    print "  [capability gated: local network-count assertions require node]"
+
+    if $action_error != null {
+        error make {msg: $action_error.msg}
+    }
+}
+
+def assert-network-count-if-available [server: any, expected: int, message: string] {
+    if $server != null {
+        assert equal (network-count $server) $expected $message
+    }
+}
+
 def test-resource-helper-boundaries [] {
     for name in ["jsonplaceholder" "team api.v1" "hyphen-name" "équipe 世界"] {
         assert equal (validate-resource-name "collection" $name) [$name]
@@ -259,6 +299,7 @@ def test-resource-helper-boundaries [] {
         "" "." ".." "..." "...."
         "a/b" "a\\b" "a/..\\secret" "a\\.\\b"
         "/absolute" "C:\\absolute" "C:relative" "\\\\server\\share"
+        "alias." "alias "
     ] {
         expect-resource-error {
             validate-resource-name "collection" $name | ignore
@@ -276,6 +317,7 @@ def test-resource-helper-boundaries [] {
         "" "." ".." "..." "/auth" "auth/" "auth//login"
         "auth/./login" "auth/../secret" "auth/.../secret"
         "auth\\..//secret" "auth\\.\\login" "C:\\secret" "\\\\server\\share"
+        "auth/alias." "auth/alias " "auth./login" "auth /login"
     ] {
         expect-resource-error {
             validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
@@ -299,6 +341,12 @@ def test-counting-server-failure-cleanup [] {
     let pid_file = ($tmp | path join "failed-server-pid.txt")
     mkdir $server_tmp
 
+    if not (counting-server-capable) {
+        cleanup $tmp
+        print "  [capability gated: loopback failure-cleanup assertion requires node]"
+        return
+    }
+
     let caught = try {
         with-counting-server $server_tmp {|server|
             $server.pid | into string | save -f $pid_file
@@ -315,6 +363,23 @@ def test-counting-server-failure-cleanup [] {
     assert (not (process-is-running $pid)) "failed test left the local request counter running"
     assert (not ($server_tmp | path exists)) "failed test did not clean its server workspace"
     cleanup $tmp
+}
+
+def test-counting-server-capability-gate [] {
+    let tmp = (make-temp-dir "resource-server-capability")
+    let previous = ($env.NURL_TEST_DISABLE_NODE? | default "")
+    $env.NURL_TEST_DISABLE_NODE = "1"
+    let action_marker = $"($tmp)-essential-action-ran.txt"
+
+    with-optional-counting-server $tmp {|server|
+        assert equal $server null
+        "ran" | save -f $action_marker
+    }
+
+    $env.NURL_TEST_DISABLE_NODE = $previous
+    assert ($action_marker | path exists) "node capability gate did not run essential assertions"
+    rm $action_marker
+    assert (not ($tmp | path exists)) "node capability gate leaked temporary state"
 }
 
 def test-original-attacks-blocked [] {
@@ -444,6 +509,68 @@ def test-collection-surface [] {
     # Preserve duplicate and not-found behavior (no validation error).
     api collection create $valid | ignore
     assert equal (api collection show "missing-valid-name") null
+    cleanup $tmp
+}
+
+def test-trailing-dot-space-aliases [] {
+    let tmp = (make-temp-dir "resource-trailing-aliases")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    api collection create foo | ignore
+    api request create "auth/login" GET "https://example.invalid/canonical" --collection foo | ignore
+    let before = (workspace-snapshot $tmp)
+
+    let collection_cases = [
+        "api collection create 'foo.'"
+        "api collection create 'foo '"
+        "api collection show 'foo.'"
+        "api collection show 'foo '"
+        "api collection delete 'foo.' --force"
+        "api collection delete 'foo ' --force"
+        "api collection copy 'foo.' target"
+        "api collection copy 'foo ' target"
+        "api collection copy foo 'target.'"
+        "api collection copy foo 'target '"
+    ]
+    for command in $collection_cases {
+        assert-invalid-process $tmp $command "Invalid collection name" | ignore
+        assert equal (workspace-snapshot $tmp) $before $"collection alias changed workspace: ($command)"
+    }
+
+    let request_cases = [
+        "api request create 'auth/login.' GET 'https://example.invalid' --collection foo"
+        "api request create 'auth/login ' GET 'https://example.invalid' --collection foo"
+        "api request create 'auth./other' GET 'https://example.invalid' --collection foo"
+        "api request create 'auth /other' GET 'https://example.invalid' --collection foo"
+        "api request show 'auth/login.' --collection foo"
+        "api request show 'auth/login ' --collection foo"
+        "api request show 'auth./login' --collection foo"
+        "api request show 'auth /login' --collection foo"
+        "api request update 'auth/login.' --method POST --collection foo"
+        "api request update 'auth/login ' --method POST --collection foo"
+        "api request delete 'auth/login.' --collection foo --force"
+        "api request delete 'auth/login ' --collection foo --force"
+        "api request export 'auth/login.' --collection foo"
+        "api send 'auth/login ' --collection foo --dry-run"
+    ]
+    for command in $request_cases {
+        assert-invalid-process $tmp $command "Invalid request name" | ignore
+        assert equal (workspace-snapshot $tmp) $before $"request alias changed workspace: ($command)"
+    }
+
+    assert (($tmp | path join "collections" "foo") | path exists)
+    assert equal (api request show "auth/login" --collection foo | get url) "https://example.invalid/canonical"
+
+    api collection create "team api.v1" | ignore
+    api collection create "internal space 世界" | ignore
+    api request create "folder api.v1/login 世界" GET "https://example.invalid/valid" --collection "team api.v1" | ignore
+    api request create "release.nuon" GET "https://example.invalid/release" --collection "team api.v1" | ignore
+    assert equal (
+        api request show "folder api.v1/login 世界" --collection "team api.v1" | get name
+    ) "folder api.v1/login 世界"
+    assert equal (
+        api request show "release.nuon" --collection "team api.v1" | get name
+    ) "release.nuon"
     cleanup $tmp
 }
 
@@ -591,8 +718,12 @@ def test-no-network-and-valid_lifecycle [] {
     let tmp = (make-temp-dir "resource-local-network")
     let root = ($tmp | path join "workspace with spaces")
     mkdir $root
-    with-counting-server $tmp {|server|
-        let base_url = $"http://127.0.0.1:($server.port)"
+    with-optional-counting-server $tmp {|server|
+        let base_url = if $server == null {
+            "http://127.0.0.1:1"
+        } else {
+            $"http://127.0.0.1:($server.port)"
+        }
 
         $env.API_ROOT = $root
         api init | ignore
@@ -632,7 +763,7 @@ def test-no-network-and-valid_lifecycle [] {
         for flags in $flag_cases {
             let command = $"api send ($malicious_name | to nuon) --collection 'team api.v1 世界' ($flags)"
             assert-invalid-process $root $command "Invalid request name" | ignore
-            assert equal (network-count $server) 0 $"invalid send reached the local server: ($flags)"
+            assert-network-count-if-available $server 0 $"invalid send reached the local server: ($flags)"
             assert equal (workspace-snapshot $root) $workspace_before $"invalid send changed workspace: ($flags)"
             assert equal (open $outside_request --raw) $outside_before $"invalid send changed outside request: ($flags)"
             assert equal (workspace-snapshot $tmp) $tmp_before $"invalid send changed files outside the workspace: ($flags)"
@@ -641,39 +772,43 @@ def test-no-network-and-valid_lifecycle [] {
         let dry_run = (run-module-script $root "api send 'auth/ping 世界' --collection 'team api.v1 世界' --vars {route: dry-run} --dry-run")
         assert equal $dry_run.exit_code 0
         assert ($dry_run.stdout | str contains $"($base_url)/dry-run")
-        assert equal (network-count $server) 0 "valid dry-run must not reach the local server"
+        assert-network-count-if-available $server 0 "valid dry-run must not reach the local server"
 
-        let sent = (api send "auth/ping 世界" --collection "team api.v1 世界" --vars {route: direct} --raw --no-history)
-        assert equal $sent.response.status 200
-        assert equal $sent.response.body.marker "NETWORK-HIT-SENTINEL"
-        assert equal (network-count $server) 1
+        if $server == null {
+            print "  [capability gated: valid loopback lifecycle assertions require node]"
+        } else {
+            let sent = (api send "auth/ping 世界" --collection "team api.v1 世界" --vars {route: direct} --raw --no-history)
+            assert equal $sent.response.status 200
+            assert equal $sent.response.body.marker "NETWORK-HIT-SENTINEL"
+            assert equal (network-count $server) 1
 
-        api chain create workflow | ignore
-        {
-            name: "workflow"
-            steps: [{request: "auth/ping 世界"}]
-        } | to nuon | save -f ($root | path join "chains" "workflow.nuon")
-        let chain_result = (api chain exec workflow --quiet)
-        assert $chain_result.success
-        assert equal ($chain_result.results | first | get status) 200
-        assert equal (network-count $server) 2
+            api chain create workflow | ignore
+            {
+                name: "workflow"
+                steps: [{request: "auth/ping 世界"}]
+            } | to nuon | save -f ($root | path join "chains" "workflow.nuon")
+            let chain_result = (api chain exec workflow --quiet)
+            assert $chain_result.success
+            assert equal ($chain_result.results | first | get status) 200
+            assert equal (network-count $server) 2
 
-        let save_path = ($tmp | path join "explicit saved response.json")
-        api send "auth/ping 世界" --collection "team api.v1 世界" --save $save_path --no-history | ignore
-        assert ($save_path | path exists)
-        assert (open $save_path --raw | str contains "NETWORK-HIT-SENTINEL")
-        assert equal (network-count $server) 3
+            let save_path = ($tmp | path join "explicit saved response.json")
+            api send "auth/ping 世界" --collection "team api.v1 世界" --save $save_path --no-history | ignore
+            assert ($save_path | path exists)
+            assert (open $save_path --raw | str contains "NETWORK-HIT-SENTINEL")
+            assert equal (network-count $server) 3
 
-        let binary_path = ($tmp | path join "explicit binary response.bin")
-        let binary_result = (api send "auth/ping 世界" --collection "team api.v1 世界" --binary-save $binary_path --raw --no-history)
-        assert equal $binary_result.response.status 200
-        assert (open $binary_path --raw | str contains "NETWORK-HIT-SENTINEL")
-        assert equal (network-count $server) 4
+            let binary_path = ($tmp | path join "explicit binary response.bin")
+            let binary_result = (api send "auth/ping 世界" --collection "team api.v1 世界" --binary-save $binary_path --raw --no-history)
+            assert equal $binary_result.response.status 200
+            assert (open $binary_path --raw | str contains "NETWORK-HIT-SENTINEL")
+            assert equal (network-count $server) 4
 
-        let history_export = ($tmp | path join "explicit history export.json")
-        api history export --output $history_export | ignore
-        assert ($history_export | path exists)
-        assert ((open $history_export --raw | from json | length) >= 1)
+            let history_export = ($tmp | path join "explicit history export.json")
+            api history export --output $history_export | ignore
+            assert ($history_export | path exists)
+            assert ((open $history_export --raw | from json | length) >= 1)
+        }
     }
 }
 
@@ -741,8 +876,12 @@ def test-chain-exec-named-containment [] {
     mkdir $shadow_root
     mkdir $shadow_cwd
 
-    with-counting-server $tmp {|server|
-        let base_url = $"http://127.0.0.1:($server.port)"
+    with-optional-counting-server $tmp {|server|
+        let base_url = if $server == null {
+            "http://127.0.0.1:1"
+        } else {
+            $"http://127.0.0.1:($server.port)"
+        }
         $env.API_ROOT = $linked_root
         api init | ignore
 
@@ -763,7 +902,7 @@ def test-chain-exec-named-containment [] {
         }
 
         assert-invalid-process $linked_root "api chain exec escape --quiet" "existing links cannot escape" | ignore
-        assert equal (network-count $server) 0 "linked named chain reached the local server"
+        assert-network-count-if-available $server 0 "linked named chain reached the local server"
         assert equal (workspace-snapshot $outside_chains) $outside_before "linked named chain changed outside files"
         assert equal (open $outside_sentinel --raw) "TEST-SECRET-SENTINEL"
 
@@ -787,13 +926,13 @@ def test-chain-exec-named-containment [] {
         let bare_shadow_file = ($shadow_cwd | path join "escape")
         {
             name: "cwd-bare-shadow"
-            steps: [{method: "GET", url: $"($base_url)/cwd-bare-shadow"}]
+            steps: "CWD-BARE-SHADOW-SENTINEL"
         } | to nuon | save -f $bare_shadow_file
         let bare_shadow_before = (open $bare_shadow_file --raw)
         let shadow_file = ($shadow_cwd | path join "escape.nuon")
         {
             name: "cwd-shadow"
-            steps: [{method: "GET", url: $"($base_url)/cwd-shadow"}]
+            steps: "CWD-SHADOW-SENTINEL"
         } | to nuon | save -f $shadow_file
         let shadow_before = (open $shadow_file --raw)
 
@@ -801,7 +940,7 @@ def test-chain-exec-named-containment [] {
         assert equal $normal.exit_code 0
         assert equal ($normal.stderr | str trim) ""
         assert equal ($normal.stdout | str trim) "true"
-        assert equal (network-count $server) 0 "contained named chain unexpectedly reached the local server"
+        assert-network-count-if-available $server 0 "contained named chain unexpectedly reached the local server"
 
         let bare_shadow_command = ([
             "cd "
@@ -812,7 +951,7 @@ def test-chain-exec-named-containment [] {
         assert equal $bare_shadowed.exit_code 0
         assert equal ($bare_shadowed.stderr | str trim) ""
         assert equal ($bare_shadowed.stdout | str trim) "true"
-        assert equal (network-count $server) 0 "bare CWD chain shadow won over named workspace lookup"
+        assert-network-count-if-available $server 0 "bare CWD chain shadow won over named workspace lookup"
 
         let shadow_command = ([
             "cd "
@@ -823,7 +962,7 @@ def test-chain-exec-named-containment [] {
         assert equal $shadowed.exit_code 0
         assert equal ($shadowed.stderr | str trim) ""
         assert equal ($shadowed.stdout | str trim) "true"
-        assert equal (network-count $server) 0 "CWD chain shadow won over named workspace lookup"
+        assert-network-count-if-available $server 0 "CWD chain shadow won over named workspace lookup"
         assert equal (open $bare_shadow_file --raw) $bare_shadow_before
         assert equal (open $shadow_file --raw) $shadow_before
 
@@ -833,7 +972,7 @@ def test-chain-exec-named-containment [] {
             steps: [{request: "../outside"}]
         } | to nuon | save -f $invalid_step
         assert-invalid-process $shadow_root "api chain exec invalid-step --quiet" "Invalid request name" | ignore
-        assert equal (network-count $server) 0 "invalid saved-request step reached the local server"
+        assert-network-count-if-available $server 0 "invalid saved-request step reached the local server"
 
         let explicit_file = ($tmp | path join "explicit outside chain.nuon")
         {
@@ -873,6 +1012,87 @@ def test-vars-collection-context [] {
     expect-resource-error {
         api vars interpolate-record {host: "{{host}}"} --collection "../secrets" --env-vars {host: "ignored"}
     } "Invalid collection name"
+    cleanup $tmp
+}
+
+def test-dangling-link-writes [] {
+    let tmp = (make-temp-dir "resource-dangling-links")
+    let root = ($tmp | path join "workspace")
+    let outside = ($tmp | path join "outside")
+    let capability_link = ($tmp | path join "capability-link")
+    let capability_target = ($outside | path join "capability-target")
+    mkdir $root
+    mkdir $outside
+
+    if not (create-file-link $capability_link $capability_target) {
+        cleanup $tmp
+        error make {msg: "SKIP: file symlink creation unavailable"}
+    }
+    rm $capability_link
+
+    $env.API_ROOT = $root
+    api init | ignore
+    api collection create demo | ignore
+    mkdir ($root | path join "chains")
+    mkdir ($root | path join "collections" "demo" "environments")
+
+    let chain_target = ($outside | path join "chain-created.nuon")
+    let request_target = ($outside | path join "request-created.nuon")
+    let environment_target = ($outside | path join "environment-created.nuon")
+    let intermediate_target = ($outside | path join "missing-request-directory")
+    let base_target = ($outside | path join "missing-chains-directory")
+    let chain_link = ($root | path join "chains" "dangling.nuon")
+    let request_link = ($root | path join "collections" "demo" "requests" "dangling.nuon")
+    let environment_link = ($root | path join "collections" "demo" "environments" "dangling.nuon")
+    let intermediate_link = ($root | path join "collections" "demo" "requests" "nested")
+    "TEST-SECRET-SENTINEL" | save -f ($outside | path join "sentinel.txt")
+
+    assert (create-file-link $chain_link $chain_target) "dangling chain link creation failed after capability preflight"
+    assert (create-file-link $request_link $request_target) "dangling request link creation failed after capability preflight"
+    assert (create-file-link $environment_link $environment_target) "dangling environment link creation failed after capability preflight"
+    assert (create-file-link $intermediate_link $intermediate_target) "dangling intermediate link creation failed after capability preflight"
+    let before = (workspace-snapshot $root)
+    let outside_before = (workspace-snapshot $outside)
+
+    let target_cases = [
+        {command: "api chain create dangling", target: $chain_target}
+        {command: "api request create dangling GET 'https://example.invalid' --collection demo", target: $request_target}
+        {command: "api collection env create demo dangling", target: $environment_target}
+        {command: "api request create 'nested/leaf' GET 'https://example.invalid' --collection demo", target: $intermediate_target}
+    ]
+    for case in $target_cases {
+        assert-invalid-process $root $case.command "unresolved or dangling links are not allowed" | ignore
+        assert (not ($case.target | path exists)) $"dangling link created outside target: ($case.command)"
+        assert equal (workspace-snapshot $root) $before $"dangling link changed workspace: ($case.command)"
+        assert equal (workspace-snapshot $outside) $outside_before $"dangling link changed outside files: ($case.command)"
+    }
+
+    rm $chain_link
+    rm -rf ($root | path join "chains")
+    assert (create-file-link ($root | path join "chains") $base_target) "dangling chains base creation failed after capability preflight"
+    let base_before = (workspace-snapshot $root)
+    assert-invalid-process $root "api chain create base-dangling" "unresolved or dangling links are not allowed" | ignore
+    assert (not ($base_target | path exists)) "dangling chains base created an outside directory"
+    assert equal (workspace-snapshot $root) $base_before
+    assert equal (workspace-snapshot $outside) $outside_before
+
+    rm ($root | path join "chains")
+    mkdir ($root | path join "chains")
+    rm $request_link
+    rm $environment_link
+    rm $intermediate_link
+    api chain create safe-missing | ignore
+    api request create "safe/missing" GET "https://example.invalid/safe" --collection demo | ignore
+    api collection env create demo safe-missing | ignore
+    assert (($root | path join "chains" "safe-missing.nuon") | path exists)
+    assert (($root | path join "collections" "demo" "requests" "safe" "missing.nuon") | path exists)
+    assert (($root | path join "collections" "demo" "environments" "safe-missing.nuon") | path exists)
+
+    api chain create real | ignore
+    {name: "real", steps: []} | to nuon | save -f ($root | path join "chains" "real.nuon")
+    assert (create-file-link ($root | path join "chains" "contained.nuon") ($root | path join "chains" "real.nuon"))
+    assert equal (api chain show contained | get name) real
+    assert equal (open ($outside | path join "sentinel.txt") --raw) "TEST-SECRET-SENTINEL"
     cleanup $tmp
 }
 
@@ -976,10 +1196,12 @@ def run-suite-resource-paths []: nothing -> list<record> {
     print $"\n(ansi yellow)── Resource Path Containment ──(ansi reset)"
     [
         (run-test "resource paths: helper boundaries" { test-resource-helper-boundaries })
+        (run-test "resource paths: node capability gate preserves essential execution" { test-counting-server-capability-gate })
         (run-test "resource paths: loopback cleanup survives failures" { test-counting-server-failure-cleanup })
         (run-test "resource paths: original attacks blocked" { test-original-attacks-blocked })
         (run-test "resource paths: subprocess contracts for collection, env, chain, and vars" { test-subprocess-rejection-families })
         (run-test "resource paths: collection surface" { test-collection-surface })
+        (run-test "resource paths: trailing-dot and trailing-space aliases" { test-trailing-dot-space-aliases })
         (run-test "resource paths: environment surface" { test-environment-surface })
         (run-test "resource paths: nested request lifecycle and body-file compatibility" { test-request-lifecycle-and-explicit-body-file })
         (run-test "resource paths: request command and output surface" { test-request-invalid-command-surface })
@@ -987,6 +1209,7 @@ def run-suite-resource-paths []: nothing -> list<record> {
         (run-test "resource paths: chain names, steps, and explicit paths" { test-chain-surface-and-explicit-path })
         (run-test "resource paths: named chain exec containment" { test-chain-exec-named-containment })
         (run-test "resource paths: vars collection context" { test-vars-collection-context })
+        (run-test "resource paths: dangling links cannot create outside targets" { test-dangling-link-writes })
         (run-test "resource paths: symlink and junction escapes" { test-symlink-escapes })
         (run-test "resource paths: TUI catches validation errors" { test-tui-survives-validation-error })
     ]

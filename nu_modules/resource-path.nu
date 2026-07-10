@@ -19,31 +19,56 @@ export def validate-resource-name [
         or ($normalized =~ '^[A-Za-z]:')
     )
     let segments = ($normalized | split row "/")
+    let has_ambiguous_segment = ($segments | any {|segment|
+        ($segment | str ends-with ".") or ($segment | str ends-with " ")
+    })
 
     if $nested {
         let invalid_segment = ($segments | any {|segment|
             $segment == "" or ($segment =~ '^\.+$')
         })
 
-        if $rooted or $invalid_segment {
+        if $rooted or $invalid_segment or $has_ambiguous_segment {
             let location = if $scope == "" { "its resource directory" } else { $scope }
-            invalid-resource-name $kind $name $"path must remain under ($location) and cannot contain empty or dot-only navigation segments, including '.', '..', and '...'"
+            invalid-resource-name $kind $name $"path must remain under ($location) and cannot contain empty, dot-only, or trailing-dot/space segments"
         }
     } else {
-        if $rooted or $name == "" or ($name =~ '^\.+$') or ($segments | length) != 1 {
-            invalid-resource-name $kind $name "expected one non-empty relative path segment without '/' or '\\'"
+        if $rooted or $name == "" or ($name =~ '^\.+$') or ($segments | length) != 1 or $has_ambiguous_segment {
+            invalid-resource-name $kind $name "expected one non-empty relative path segment without '/', '\\', or a trailing dot or space"
         }
     }
 
     $segments
 }
 
-def canonicalize-base [base: string] {
+def resolve-existing-component [
+    path: string
+    path_type: string
+    kind: string
+    logical_name: string
+    location: string
+] {
+    let resolved = ($path | path expand)
+
+    if $path_type == "symlink" and (($resolved | path type) == "symlink") {
+        invalid-resource-name $kind $logical_name $"path must remain under ($location); unresolved or dangling links are not allowed"
+    }
+
+    $resolved
+}
+
+def canonicalize-base [
+    base: string
+    kind: string
+    logical_name: string
+    location: string
+] {
     mut probe = ($base | path expand --no-symlink)
+    mut probe_type = ($probe | path type)
     mut missing = []
 
     loop {
-        if (($probe | path type) | is-not-empty) {
+        if not ($probe_type | is-empty) {
             break
         }
 
@@ -54,9 +79,10 @@ def canonicalize-base [base: string] {
 
         $missing = ($missing | append ($probe | path basename))
         $probe = $parent
+        $probe_type = ($probe | path type)
     }
 
-    mut resolved = ($probe | path expand)
+    mut resolved = (resolve-existing-component $probe $probe_type $kind $logical_name $location)
     for segment in ($missing | reverse) {
         $resolved = ($resolved | path join $segment)
     }
@@ -99,8 +125,12 @@ export def resolve-under-base [
         }
     }
 
-    let canonical_base = if $base_is_canonical { $base } else { canonicalize-base $base }
-    let location = if $scope == "" { $canonical_base } else { $scope }
+    let location = if $scope == "" { $base } else { $scope }
+    let canonical_base = if $base_is_canonical {
+        $base
+    } else {
+        canonicalize-base $base $kind $logical_name $location
+    }
     mut lexical_candidate = $canonical_base
     for segment in $segments {
         $lexical_candidate = ($lexical_candidate | path join $segment)
@@ -117,8 +147,9 @@ export def resolve-under-base [
         $candidate = ($candidate | path join $segment)
 
         if $parent_exists {
-            if (($candidate | path type) | is-not-empty) {
-                $candidate = ($candidate | path expand)
+            let candidate_type = ($candidate | path type)
+            if not ($candidate_type | is-empty) {
+                $candidate = (resolve-existing-component $candidate $candidate_type $kind $logical_name $location)
                 if not (is-strict-descendant $candidate $canonical_base) {
                     invalid-resource-name $kind $logical_name $"path must remain under ($location); existing links cannot escape it"
                 }

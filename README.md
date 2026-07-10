@@ -497,7 +497,7 @@ api request create auth/login POST "{{base_url}}/auth/login" -c my-api
 api send auth/login -c my-api
 ```
 
-Collection, environment, and saved-chain names must each be one non-empty relative path segment. Spaces, embedded dots, hyphens, case, and Unicode are preserved, but rooted names, dot-only navigation names (`.`, `..`, `...`, and so on), and `/` or `\` separators are rejected. Saved-request names may use nested relative paths such as `auth/login`; every segment must be non-empty and cannot be a dot-only navigation segment. Request lookups that already accept a `.nuon` suffix continue to do so.
+Collection, environment, and saved-chain names must each be one non-empty relative path segment. Spaces, embedded dots, hyphens, case, and Unicode are preserved, but rooted names, dot-only navigation names (`.`, `..`, `...`, and so on), trailing dots or spaces, and `/` or `\` separators are rejected. Saved-request names may use nested relative paths such as `auth/login`; every segment must be non-empty and cannot be dot-only or end in a dot or space. Request lookups that already accept a `.nuon` suffix continue to do so.
 
 These rules apply only to resource identifiers. Explicit path options such as `--body-file`, `--save`, `--binary-save`, history export output, and explicit chain files remain unrestricted path-taking features.
 
