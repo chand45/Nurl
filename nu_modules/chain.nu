@@ -4,6 +4,40 @@
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use auth.nu ["api auth get-config"]
 use http.nu ["api request"]
+use resource-path.nu [validate-resource-name resolve-under-base]
+
+def get-api-root [] {
+    $env.API_ROOT? | default (pwd)
+}
+
+def get-collections-dir [] {
+    resolve-under-base (get-api-root) "collections" "collections directory" --scope "API workspace"
+}
+
+def resolve-collection-dir [collections_dir: string, collection: string] {
+    resolve-under-base $collections_dir $collection "collection" --scope "API workspace collections" --base-is-canonical
+}
+
+def resolve-requests-dir [collection_dir: string, collection: string] {
+    resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($collection)'" --base-is-canonical
+}
+
+def get-chains-dir [] {
+    resolve-under-base (get-api-root) "chains" "chains directory" --scope "API workspace"
+}
+
+def resolve-chain-file [chains_dir: string, name: string] {
+    resolve-under-base $chains_dir $name "chain" --suffix ".nuon" --always-suffix --scope "API workspace chains" --base-is-canonical
+}
+
+def validate-chain-steps [steps: list] {
+    for step in $steps {
+        let request_name = ($step.request? | default null)
+        if $request_name != null {
+            validate-resource-name "request" $request_name --nested --scope "<collection>/requests" | ignore
+        }
+    }
+}
 
 # Execute a chain of requests
 export def "api chain run" [
@@ -12,6 +46,11 @@ export def "api chain run" [
     --quiet (-q)           # Suppress output
     --collection (-c): string = ""  # Collection context for variable resolution
 ] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    validate-chain-steps $steps
+
     mut context = {}  # Variables extracted from responses
     mut results = []
     mut step_num = 0
@@ -158,23 +197,49 @@ export def "api chain exec" [
     --stop-on-error (-s)
     --quiet (-q)
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
+    let root = (get-api-root)
+    let normalized = ($file | str replace --all "\\" "/")
+    let explicit_syntax = (
+        ($normalized | str starts-with "/")
+        or ($normalized =~ '^[A-Za-z]:')
+        or (($normalized | split row "/" | length) > 1)
+    )
+    if not $explicit_syntax {
+        validate-resource-name "chain" $file | ignore
+    }
+    let direct_type = ($file | path type)
+    let root_relative = ($root | path join $file)
+    let root_relative_type = ($root_relative | path type)
+    let chains_relative = ($root | path join "chains" $file)
+    let chains_relative_type = ($chains_relative | path type)
+    let chains_relative_with_suffix = ($root | path join "chains" $"($file).nuon")
+    let chains_relative_with_suffix_type = ($chains_relative_with_suffix | path type)
 
-    # Try to find the file
-    let file_path = if ($file | path exists) {
+    # Existing explicit paths remain path-taking inputs and are not confined to the workspace.
+    let file_path = if ($direct_type | is-not-empty) and $direct_type != "dir" {
         $file
-    } else if (($root | path join $file) | path exists) {
-        $root | path join $file
-    } else if (($root | path join "chains" $file) | path exists) {
-        $root | path join "chains" $file
-    } else if (($root | path join "chains" $"($file).nuon") | path exists) {
-        $root | path join "chains" $"($file).nuon"
-    } else {
+    } else if ($root_relative_type | is-not-empty) and $root_relative_type != "dir" {
+        $root_relative
+    } else if ($chains_relative_type | is-not-empty) and $chains_relative_type != "dir" {
+        $chains_relative
+    } else if ($chains_relative_with_suffix_type | is-not-empty) and $chains_relative_with_suffix_type != "dir" {
+        $chains_relative_with_suffix
+    } else if $explicit_syntax {
         print $"(ansi red)Chain file not found: ($file)(ansi reset)"
         return null
+    } else {
+        let chains_dir = (get-chains-dir)
+        let named_file = (resolve-chain-file $chains_dir $file)
+        if not ($named_file | path exists) {
+            print $"(ansi red)Chain file not found: ($file)(ansi reset)"
+            return null
+        }
+        $named_file
     }
 
     let chain_def = (open $file_path)
+    let steps = ($chain_def.steps? | default $chain_def)
+    validate-chain-steps $steps
 
     if not $quiet {
         print $"(ansi blue)Running chain: ($chain_def.name? | default $file)(ansi reset)"
@@ -183,8 +248,6 @@ export def "api chain exec" [
         }
         print ""
     }
-
-    let steps = ($chain_def.steps? | default $chain_def)
 
     api chain run $steps --stop-on-error=$stop_on_error --quiet=$quiet
 }
@@ -197,8 +260,8 @@ def load-saved-request [name: string] {
 
 # Load saved request by name and return collection name too
 def load-saved-request-with-collection [name: string] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_dir = ($root | path join "collections")
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    let collections_dir = (get-collections-dir)
 
     if not ($collections_dir | path exists) {
         return null
@@ -206,14 +269,16 @@ def load-saved-request-with-collection [name: string] {
 
     # Search through all collections for the request
     let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-    for coll_path in $colls {
-        let requests_dir = ($coll_path | path join "requests")
+    for discovered_path in $colls {
+        let collection = ($discovered_path | path basename)
+        let coll_path = (resolve-collection-dir $collections_dir $collection)
+        let requests_dir = (resolve-requests-dir $coll_path $collection)
         if ($requests_dir | path exists) {
-            let request_file = ($requests_dir | path join $"($name).nuon")
+            let request_file = (resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix --scope "<collection>/requests" --base-is-canonical)
             if ($request_file | path exists) {
                 return {
                     request: (open $request_file)
-                    collection: ($coll_path | path basename)
+                    collection: $collection
                 }
             }
         }
@@ -227,14 +292,13 @@ export def "api chain create" [
     name: string                    # Chain name
     --description (-d): string = "" # Chain description
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let chains_dir = ($root | path join "chains")
+    validate-resource-name "chain" $name | ignore
+    let chains_dir = (get-chains-dir)
+    let file_path = (resolve-chain-file $chains_dir $name)
 
     if not ($chains_dir | path exists) {
         mkdir $chains_dir
     }
-
-    let file_path = ($chains_dir | path join $"($name).nuon")
 
     if ($file_path | path exists) {
         print $"(ansi red)Chain '($name)' already exists(ansi reset)"
@@ -267,8 +331,7 @@ export def "api chain create" [
 
 # List available chains
 export def "api chain list" [] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let chains_dir = ($root | path join "chains")
+    let chains_dir = (get-chains-dir)
 
     if not ($chains_dir | path exists) {
         print "(ansi yellow)No chains found. Create one with: api chain create <name>(ansi reset)"
@@ -283,14 +346,16 @@ export def "api chain list" [] {
     }
 
     $files | each {|file|
+        let logical_name = ($file | path basename | str replace -r '\.nuon$' '')
+        let resolved_file = (resolve-chain-file $chains_dir $logical_name)
         let chain = try {
-            open $file
+            open $resolved_file
         } catch {
-            { name: ($file | path basename | str replace ".nuon" ""), description: "", steps: [] }
+            { name: $logical_name, description: "", steps: [] }
         }
 
         {
-            name: ($chain.name? | default ($file | path basename | str replace ".nuon" ""))
+            name: ($chain.name? | default $logical_name)
             description: ($chain.description? | default "")
             steps: ($chain.steps? | default [] | length)
         }
@@ -299,8 +364,9 @@ export def "api chain list" [] {
 
 # Show chain details
 export def "api chain show" [name: string] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let file_path = ($root | path join "chains" $"($name).nuon")
+    validate-resource-name "chain" $name | ignore
+    let chains_dir = (get-chains-dir)
+    let file_path = (resolve-chain-file $chains_dir $name)
 
     if not ($file_path | path exists) {
         print $"(ansi red)Chain '($name)' not found(ansi reset)"
@@ -315,8 +381,9 @@ export def "api chain delete" [
     name: string  # Chain name
     --force (-f)  # Skip confirmation
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let file_path = ($root | path join "chains" $"($name).nuon")
+    validate-resource-name "chain" $name | ignore
+    let chains_dir = (get-chains-dir)
+    let file_path = (resolve-chain-file $chains_dir $name)
 
     if not ($file_path | path exists) {
         print $"(ansi red)Chain '($name)' not found(ansi reset)"

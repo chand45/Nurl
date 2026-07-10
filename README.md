@@ -491,7 +491,15 @@ api send create-user -c my-api --vars { name: "Alice" }
 
 # Send with auth override
 api send get-users -c my-api -a { type: bearer, token_ref: mytoken }
+
+# Nested request names are supported
+api request create auth/login POST "{{base_url}}/auth/login" -c my-api
+api send auth/login -c my-api
 ```
+
+Collection, environment, and saved-chain names must each be one non-empty relative path segment. Spaces, embedded dots, hyphens, case, and Unicode are preserved, but rooted names, dot-only navigation names (`.`, `..`, `...`, and so on), and `/` or `\` separators are rejected. Saved-request names may use nested relative paths such as `auth/login`; every segment must be non-empty and cannot be a dot-only navigation segment. Request lookups that already accept a `.nuon` suffix continue to do so.
+
+These rules apply only to resource identifiers. Explicit path options such as `--body-file`, `--save`, `--binary-save`, history export output, and explicit chain files remain unrestricted path-taking features.
 
 ### Authentication
 

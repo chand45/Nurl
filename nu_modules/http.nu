@@ -4,6 +4,31 @@
 use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use auth.nu ["api auth get-config"]
+use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+
+def get-api-root [] {
+    $env.API_ROOT? | default (pwd)
+}
+
+def get-collections-dir [] {
+    resolve-under-base (get-api-root) "collections" "collections directory" --scope "API workspace"
+}
+
+def resolve-collection-dir [collections_dir: string, collection: string] {
+    resolve-under-base $collections_dir $collection "collection" --scope "API workspace collections" --base-is-canonical
+}
+
+def resolve-requests-dir [collection_dir: string, collection: string] {
+    resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($collection)'" --base-is-canonical
+}
+
+def resolve-request-file [requests_dir: string, name: string, --optional-suffix] {
+    resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix=(not $optional_suffix) --scope "<collection>/requests" --base-is-canonical
+}
+
+def list-request-files [requests_dir: string] {
+    list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
+}
 
 # Internal function to save history (avoids module scoping issues)
 def save-to-history [request: record, response: record] {
@@ -1051,50 +1076,48 @@ export def "api send" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
     if $debug { $env.API_DEBUG = true }
-    let root = ($env.API_ROOT? | default (pwd))
+    let collections_dir = (get-collections-dir)
 
     # Find request file and determine collection name
     mut coll_name = $collection
-    let collection_path = if $collection != "" {
-        $root | path join "collections" $collection
+    let request_path = if $collection != "" {
+        let collection_path = (resolve-collection-dir $collections_dir $collection)
+        let requests_dir = (resolve-requests-dir $collection_path $collection)
+        resolve-request-file $requests_dir $name --optional-suffix
     } else {
         # Search in all collections
-        let collections_dir = ($root | path join "collections")
         let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-        mut found_path = null
-        for coll_path in $colls {
-            let request_file = ($coll_path | path join "requests" $"($name).nuon")
+        mut found_file = null
+        for discovered_path in $colls {
+            let discovered_name = ($discovered_path | path basename)
+            let coll_path = (resolve-collection-dir $collections_dir $discovered_name)
+            let requests_dir = (resolve-requests-dir $coll_path $discovered_name)
+            let request_file = (resolve-request-file $requests_dir $name --optional-suffix)
             if ($request_file | path exists) {
-                $found_path = $coll_path
-                $coll_name = ($coll_path | path basename)
+                $found_file = $request_file
+                $coll_name = $discovered_name
                 break
             }
         }
 
-        if $found_path == null {
+        if $found_file == null {
             log error $"Request '($name)' not found"
             if $debug { $env.API_DEBUG = false }
             return null
         }
 
-        $found_path
-    }
-
-    let request_path = if ($name | str ends-with ".nuon") {
-        $collection_path | path join "requests" $name
-    } else {
-        $collection_path | path join "requests" $"($name).nuon"
+        $found_file
     }
 
     if not ($request_path | path exists) {
-        # Try direct path
-        let direct_path = $root | path join "collections" $"($name).nuon"
-        if not ($direct_path | path exists) {
-            log error $"Request '($name)' not found"
-            if $debug { $env.API_DEBUG = false }
-            return null
-        }
+        log error $"Request '($name)' not found"
+        if $debug { $env.API_DEBUG = false }
+        return null
     }
 
     # Load request
@@ -1180,28 +1203,37 @@ export def "api request create" [
     --collection (-c): string = "default"  # Collection name
     --debug                        # Show verbose output
 ] {
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    validate-resource-name "collection" $collection | ignore
     if $debug { $env.API_DEBUG = true }
-    let root = ($env.API_ROOT? | default (pwd))
-    let collection_path = ($root | path join "collections" $collection)
+    let collections_dir = (get-collections-dir)
+    let collection_path = (resolve-collection-dir $collections_dir $collection)
 
     # Ensure collection exists
     if not ($collection_path | path exists) {
         mkdir $collection_path
-        mkdir ($collection_path | path join "requests")
-        mkdir ($collection_path | path join "environments")
+        let requests_dir = (resolve-requests-dir $collection_path $collection)
+        let environments_dir = (resolve-under-base $collection_path "environments" "environment directory" --scope $"collection '($collection)'" --base-is-canonical)
+        mkdir $requests_dir
+        mkdir $environments_dir
+        let collection_file = (resolve-under-base $collection_path "collection.nuon" "collection metadata" --scope $"collection '($collection)'" --base-is-canonical)
         {
             name: $collection
             description: ""
             created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-        } | to nuon --indent 4 | save ($collection_path | path join "collection.nuon")
+        } | to nuon --indent 4 | save $collection_file
     }
 
-    let requests_path = ($collection_path | path join "requests")
+    let requests_path = (resolve-requests-dir $collection_path $collection)
     if not ($requests_path | path exists) {
         mkdir $requests_path
     }
 
-    let request_file = ($requests_path | path join $"($name).nuon")
+    let request_file = (resolve-request-file $requests_path $name)
+    let request_parent = ($request_file | path dirname)
+    if not ($request_parent | path exists) {
+        mkdir $request_parent
+    }
 
     # Resolve body - prefer file, then inline record
     let body_content = if $body_file != "" {
@@ -1245,9 +1277,11 @@ export def "api request list" [
     --collection (-c): string = ""  # Filter by collection
     --debug                         # Show verbose output
 ] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
     if $debug { $env.API_DEBUG = true }
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_dir = ($root | path join "collections")
+    let collections_dir = (get-collections-dir)
 
     if not ($collections_dir | path exists) {
         log warn "No collections found"
@@ -1256,12 +1290,13 @@ export def "api request list" [
     }
 
     let requests = if $collection != "" {
-        let requests_dir = ($collections_dir | path join $collection "requests")
+        let collection_dir = (resolve-collection-dir $collections_dir $collection)
+        let requests_dir = (resolve-requests-dir $collection_dir $collection)
         if ($requests_dir | path exists) {
-            try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] } | each {|file|
-                let req = (open $file)
+            list-request-files $requests_dir | each {|file|
+                let req = (open $file.path)
                 {
-                    name: ($req.name? | default ($file | path basename | str replace ".nuon" ""))
+                    name: ($req.name? | default $file.name)
                     collection: $collection
                     method: ($req.method? | default "GET")
                     url: ($req.url? | default "")
@@ -1271,14 +1306,15 @@ export def "api request list" [
     } else {
         # Get all collections and their requests
         let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-        $colls | each {|coll_path|
-            let coll_name = ($coll_path | path basename)
-            let requests_dir = ($coll_path | path join "requests")
+        $colls | each {|discovered_path|
+            let coll_name = ($discovered_path | path basename)
+            let coll_path = (resolve-collection-dir $collections_dir $coll_name)
+            let requests_dir = (resolve-requests-dir $coll_path $coll_name)
             if ($requests_dir | path exists) {
-                try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] } | each {|file|
-                    let req = (open $file)
+                list-request-files $requests_dir | each {|file|
+                    let req = (open $file.path)
                     {
-                        name: ($req.name? | default ($file | path basename | str replace ".nuon" ""))
+                        name: ($req.name? | default $file.name)
                         collection: $coll_name
                         method: ($req.method? | default "GET")
                         url: ($req.url? | default "")
@@ -1303,17 +1339,25 @@ export def "api request show" [
     name: string                   # Request name
     --collection (-c): string = ""  # Collection name (searches all if not specified)
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_dir = ($root | path join "collections")
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let collections_dir = (get-collections-dir)
 
     let request_file = if $collection != "" {
         # Search in specific collection
-        $root | path join "collections" $collection "requests" $"($name).nuon"
+        let collection_dir = (resolve-collection-dir $collections_dir $collection)
+        let requests_dir = (resolve-requests-dir $collection_dir $collection)
+        resolve-request-file $requests_dir $name
     } else {
         # Search across all collections
         let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-        let found = $colls | each {|coll_path|
-            let file = ($coll_path | path join "requests" $"($name).nuon")
+        let found = $colls | each {|discovered_path|
+            let coll_name = ($discovered_path | path basename)
+            let coll_path = (resolve-collection-dir $collections_dir $coll_name)
+            let requests_dir = (resolve-requests-dir $coll_path $coll_name)
+            let file = (resolve-request-file $requests_dir $name)
             if ($file | path exists) { $file } else { null }
         } | where {|f| $f != null }
         if ($found | is-empty) { null } else { $found | first }
@@ -1339,8 +1383,12 @@ export def "api request update" [
     --auth (-a): record            # New authentication config (e.g., {type: bearer, token_ref: mytoken})
     --collection (-c): string = "default"  # Collection name
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let request_file = ($root | path join "collections" $collection "requests" $"($name).nuon")
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    validate-resource-name "collection" $collection | ignore
+    let collections_dir = (get-collections-dir)
+    let collection_dir = (resolve-collection-dir $collections_dir $collection)
+    let requests_dir = (resolve-requests-dir $collection_dir $collection)
+    let request_file = (resolve-request-file $requests_dir $name)
 
     if not ($request_file | path exists) {
         print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
@@ -1394,8 +1442,12 @@ export def "api request delete" [
     --collection (-c): string = "default"  # Collection name
     --force (-f)                   # Skip confirmation prompt
 ] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let request_file = ($root | path join "collections" $collection "requests" $"($name).nuon")
+    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
+    validate-resource-name "collection" $collection | ignore
+    let collections_dir = (get-collections-dir)
+    let collection_dir = (resolve-collection-dir $collections_dir $collection)
+    let requests_dir = (resolve-requests-dir $collection_dir $collection)
+    let request_file = (resolve-request-file $requests_dir $name)
 
     if not ($request_file | path exists) {
         print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
