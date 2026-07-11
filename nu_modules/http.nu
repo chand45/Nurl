@@ -107,6 +107,27 @@ def get-timeout [] {
     }
 }
 
+def validate-output-mode [output: string] {
+    let supported = ["pretty" "raw" "body" "json" "headers" "status" "none"]
+    if $output not-in $supported {
+        fail-command $"Unsupported output mode '($output)'. Expected one of: ($supported | str join ', ')."
+    }
+}
+
+def read-body-file [body_file: string] {
+    if not ($body_file | path exists) {
+        fail-command $"Body file '($body_file)' not found"
+    }
+    if ($body_file | path type) == "dir" {
+        fail-command $"Body file '($body_file)' must be a readable file"
+    }
+    try {
+        open $body_file --raw | str trim
+    } catch {
+        fail-command $"Body file '($body_file)' could not be read"
+    }
+}
+
 # Resolve body from multiple input sources (inline record/string, file)
 # Priority: body-file > inline body
 # Returns: JSON string ready for request
@@ -116,12 +137,7 @@ def resolve-body [
 ] {
     # Body file takes priority
     if $body_file != "" {
-        if not ($body_file | path exists) {
-            log error $"Body file not found: ($body_file)"
-            return null
-        }
-
-        let file_content = (open $body_file --raw | str trim)
+        let file_content = (read-body-file $body_file)
 
         # Try to validate as JSON, but allow raw content
         try {
@@ -182,7 +198,7 @@ def build-curl-args [
     mut args = [
         "-s"                    # Silent mode
         "-S"                    # Show errors
-        "-w" "\n---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
+        "-w" "---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
         "--max-time" (get-timeout | into string)
     ]
 
@@ -222,11 +238,6 @@ def build-curl-args [
     # Add body if provided
     if $body != null and $body != "" {
         $args = ($args | append ["-d" $body])
-    }
-
-    # Include response headers in output (HEAD already outputs headers via --head)
-    if $method != "HEAD" {
-        $args = ($args | append ["-i"])
     }
 
     $args
@@ -345,7 +356,7 @@ def build-curl-args-binary [
     mut args = [
         "-s"
         "-S"
-        "-w" "\n---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
+        "-w" "---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
         "-X" $method
         "--max-time" (get-timeout | into string)
         "-o" $output_path
@@ -508,12 +519,19 @@ export def http-status-text [code: int] {
     }
 }
 
-export def parse-curl-response [output: string] {
-    # Split response into headers and body
+def split-curl-output [output: string] {
     let parts = ($output | split row "---RESPONSE_META---")
-    let response_part = ($parts | first | str trim)
-    let meta_part = if ($parts | length) > 1 { $parts | get 1 | str trim } else { "" }
+    {
+        payload: (if ($parts | length) > 1 {
+            $parts | drop 1 | str join "---RESPONSE_META---"
+        } else {
+            $parts | first
+        })
+        metadata: (if ($parts | length) > 1 { $parts | last | str trim } else { "" })
+    }
+}
 
+def parse-response-parts [body_raw: string, headers_raw: string, meta_part: string] {
     # Parse meta information
     let meta_lines = ($meta_part | lines)
     let status_code = if ($meta_lines | length) > 0 {
@@ -525,24 +543,6 @@ export def parse-curl-response [output: string] {
     let size = if ($meta_lines | length) > 2 {
         $meta_lines | get 2 | into int
     } else { 0 }
-
-    # Handle multiple response blocks — curl -L -i produces one block per redirect hop.
-    # We need the LAST HTTP header block and everything after it as the final body.
-    let sep = if ($response_part | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
-    let all_blocks = ($response_part | split row $sep)
-
-    # Find the index of the last block that starts with an HTTP status line
-    let http_block_indices = ($all_blocks
-        | enumerate
-        | where {|b| $b.item | str trim | str starts-with "HTTP/"}
-        | get index)
-
-    let last_http_idx = if ($http_block_indices | is-empty) { 0 } else { $http_block_indices | last }
-
-    let headers_raw = ($all_blocks | get $last_http_idx)
-    let body_raw = if ($last_http_idx + 1) < ($all_blocks | length) {
-        $all_blocks | skip ($last_http_idx + 1) | str join $sep
-    } else { "" }
 
     # Parse headers
     let header_lines = ($headers_raw | lines | skip 1)  # Skip status line
@@ -566,17 +566,55 @@ export def parse-curl-response [output: string] {
         $body_raw
     }
 
-    # Determine status text
-    let status_text = http-status-text $status_code
-
     {
         status: $status_code
-        status_text: $status_text
+        status_text: (http-status-text $status_code)
         headers: $headers
         body: $body
+        _raw_body: $body_raw
         time_ms: (($time_total * 1000) | math round)
         size_bytes: $size
     }
+}
+
+def last-header-block [header_output: string] {
+    # curl appends one header block per redirect; only the final response is public.
+    let sep = if ($header_output | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
+    let header_blocks = ($header_output | split row $sep)
+    let indices = ($header_blocks
+        | enumerate
+        | where {|block| $block.item | str trim | str starts-with "HTTP/"}
+        | get index)
+    if ($indices | is-empty) { "" } else { $header_blocks | get ($indices | last) }
+}
+
+def parse-curl-response-captured [output: string, header_output: string] {
+    let split = (split-curl-output $output)
+    parse-response-parts $split.payload (last-header-block $header_output) $split.metadata
+}
+
+def parse-curl-response-internal [output: string] {
+    let split = (split-curl-output $output)
+    # Compatibility parser for callers that provide historical curl `-i` output.
+    let response_part = $split.payload
+    let sep = if ($response_part | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
+    let all_blocks = ($response_part | split row $sep)
+    let http_block_indices = ($all_blocks
+        | enumerate
+        | where {|b| $b.item | str trim | str starts-with "HTTP/"}
+        | get index)
+
+    let last_http_idx = if ($http_block_indices | is-empty) { 0 } else { $http_block_indices | last }
+
+    let headers_raw = ($all_blocks | get $last_http_idx)
+    let body_raw = if ($last_http_idx + 1) < ($all_blocks | length) {
+        $all_blocks | skip ($last_http_idx + 1) | str join $sep
+    } else { "" }
+    parse-response-parts $body_raw $headers_raw $split.metadata
+}
+
+export def parse-curl-response [output: string] {
+    parse-curl-response-internal $output | reject _raw_body
 }
 
 # Execute HTTP request
@@ -595,6 +633,7 @@ def execute-request [
     --retries: int = 0               # Number of retries on 5xx or connection failure
     --retry-delay: int = 0           # Seconds to wait between retries
     --binary-save (-B): string = ""  # Save binary response to file (bypasses body parse)
+    --quiet-binary-status             # Suppress download status in data output modes
 ] {
     # Merge default headers with provided headers
     let all_headers = (get-default-headers | merge $headers)
@@ -663,7 +702,9 @@ def execute-request [
         let request_record = { method: $method, url: $final_url, headers: $final_headers, body: null }
         if not $no_history { save-to-history $request_record $bin_response }
 
-        print $"(ansi green)Downloaded: ($binary_save) (($size)B)(ansi reset)"
+        if not $quiet_binary_status {
+            print $"(ansi green)Downloaded: ($binary_save) (($size)B)(ansi reset)"
+        }
         return {
             request: $request_record
             response: $bin_response
@@ -682,7 +723,21 @@ def execute-request [
 
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
-        let output = (curl ...$curl_args $request_url | complete)
+        let header_file = ($nu.temp-dir | path join $"nurl-headers-(random uuid).txt")
+        let capture_args = ($curl_args | append ["--dump-header" $header_file])
+        let final_args = if $method == "HEAD" {
+            let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
+            $capture_args | append ["--output" $null_device]
+        } else {
+            $capture_args
+        }
+        let output = (curl ...$final_args $request_url | complete)
+        let header_output = if ($header_file | path exists) {
+            try { open $header_file --raw } catch { "" }
+        } else {
+            ""
+        }
+        rm -f $header_file
 
         if $output.exit_code != 0 {
             if $attempt < $max_attempts {
@@ -693,7 +748,8 @@ def execute-request [
             return null
         }
 
-        let parsed = (parse-curl-response $output.stdout)
+        let parsed = (parse-curl-response-captured $output.stdout $header_output)
+        let response = ($parsed | reject _raw_body)
 
         # Retry on 5xx if attempts remain
         if $parsed.status >= 500 and $attempt < $max_attempts {
@@ -710,18 +766,66 @@ def execute-request [
         }
 
         if not $no_history {
-            save-to-history $request_record $parsed
+            save-to-history $request_record $response
         }
 
         return {
             request: $request_record
-            response: $parsed
+            response: $response
             timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
+            _raw_body: $parsed._raw_body
         }
     }
 
     log error "All request attempts failed"
     null
+}
+
+def save-response-body [body: any, path: string, --announce] {
+    if $path == "" or $body == null {
+        return
+    }
+    let body_type = ($body | describe)
+    let body_value = if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
+        $body | to json
+    } else {
+        try { $body | into string } catch { $body }
+    }
+    $body_value | save -f $path
+    if $announce {
+        print $"(ansi green)Saved to: ($path)(ansi reset)"
+    }
+}
+
+def save-result-body [result: record, path: string, --announce] {
+    if $path == "" {
+        return
+    }
+    if "_raw_body" in ($result | columns) {
+        if $result._raw_body == "" {
+            return
+        }
+        $result._raw_body | save -f $path
+        if $announce {
+            print $"(ansi green)Saved to: ($path)(ansi reset)"
+        }
+    } else {
+        save-response-body ($result.response.body? | default null) $path --announce=$announce
+    }
+}
+
+def raw-response-body [result: record] {
+    if "_raw_body" in ($result | columns) {
+        if $result._raw_body == "" { null } else { $result._raw_body }
+    } else {
+        let body = ($result.response.body? | default null)
+        let body_type = ($body | describe)
+        if ($body_type | str starts-with "record") or ($body_type | str starts-with "list") or ($body_type | str starts-with "table") {
+            $body | to json --raw
+        } else {
+            $body
+        }
+    }
 }
 
 # Pretty-mode display only (A1, C3). Called only when output == "pretty".
@@ -765,15 +869,7 @@ def display-response [
 
     # --save: write body to file
     if $save != "" {
-        if $body != null {
-            let body_str = if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") or ($body | describe | str starts-with "table") {
-                $body | to json
-            } else {
-                try { $body | into string } catch { $body | to json }
-            }
-            $body_str | save -f $save
-            print $"(ansi green)Saved to: ($save)(ansi reset)"
-        }
+        save-result-body $result $save --announce
     }
 }
 
@@ -790,8 +886,18 @@ def apply-output-selection [
     include: bool
     save: string
 ] {
+    let public_result = if "_raw_body" in ($result | columns) {
+        $result | reject _raw_body
+    } else {
+        $result
+    }
+    let body = ($public_result.response.body? | default null)
+    if $save != "" and ($raw or $select_path != "" or $output != "pretty") {
+        save-result-body $result $save
+    }
+
     if $raw {
-        return $result
+        return $public_result
     }
 
     # --select: normalize shorthand paths, extract and return the value
@@ -801,7 +907,7 @@ def apply-output-selection [
         } else {
             $select_path
         }
-        let extracted = (api vars extract $result $full_path)
+        let extracted = (api vars extract $public_result $full_path)
         if $extracted != null {
             return $extracted
         } else {
@@ -812,16 +918,18 @@ def apply-output-selection [
     }
 
     match $output {
-        "status"  => { $result.response.status? | default 0 }
-        "body"    => { $result.response.body? | default null }
-        "headers" => { $result.response.headers? | default {} }
-        "json"    => { $result | to json }
+        "status"  => { $public_result.response.status? | default 0 }
+        "body"    => { $public_result.response.body? | default null }
+        "raw"     => { raw-response-body $result }
+        "headers" => { $public_result.response.headers? | default {} }
+        "json"    => { $public_result | to json }
         "none"    => { null }
-        _         => {
+        "pretty"  => {
             # pretty / interactive: print custom display, return null (no REPL double-render)
             display-response $result --verbose=$verbose --include=$include --save=$save
             null
         }
+        _ => { fail-command $"Unsupported output mode '($output)'" }
     }
 }
 
@@ -844,9 +952,11 @@ export def "api get" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
-    let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -877,8 +987,9 @@ export def "api post" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
+    if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
 
     # Form encoding takes precedence over --body/--body-file
     let final_body = if not ($form | is-empty) {
@@ -891,13 +1002,15 @@ export def "api post" [
         }
         $b
     }
+    let resolved_auth = (api auth get-config $auth)
 
     # Override Content-Type header for form encoding
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
     } else { $headers }
 
-    let result = (execute-request "POST" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request "POST" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -930,8 +1043,9 @@ export def "api put" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
+    if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
 
     let final_body = if not ($form | is-empty) {
         encode-form-data $form
@@ -943,12 +1057,14 @@ export def "api put" [
         }
         $b
     }
+    let resolved_auth = (api auth get-config $auth)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
     } else { $headers }
 
-    let result = (execute-request "PUT" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request "PUT" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -981,8 +1097,9 @@ export def "api patch" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
+    if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
 
     let final_body = if not ($form | is-empty) {
         encode-form-data $form
@@ -994,12 +1111,14 @@ export def "api patch" [
         }
         $b
     }
+    let resolved_auth = (api auth get-config $auth)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
     } else { $headers }
 
-    let result = (execute-request "PATCH" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request "PATCH" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -1027,6 +1146,7 @@ export def "api delete" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
     let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay)
@@ -1063,8 +1183,9 @@ export def "api request" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
+    if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
 
     let final_body = if not ($form | is-empty) {
         encode-form-data $form
@@ -1076,12 +1197,14 @@ export def "api request" [
         }
         $b
     }
+    let resolved_auth = (api auth get-config $auth)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
     } else { $headers }
 
-    let result = (execute-request $method $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request $method $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -1114,9 +1237,16 @@ export def "api send" [
     --retries: int = 0                   # Retry count on 5xx/connection error
     --retry-delay: int = 0              # Seconds between retries
 ] {
+    validate-output-mode $output
     validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
+    }
+    let has_body_override = (not ($body | is-empty)) or $body_file != ""
+    let resolved_body_override = if $has_body_override {
+        resolve-body -b $body -f $body_file
+    } else {
+        null
     }
     if $debug { $env.API_DEBUG = true }
     let collections_dir = (get-collections-dir)
@@ -1163,14 +1293,8 @@ export def "api send" [
     let headers = ($request.headers? | default {})
 
     # Build body - check for override first, then use saved body
-    let body = if (not ($body | is-empty)) or $body_file != "" {
-        # Body override provided - resolve from override sources
-        let override_body = (resolve-body -b $body -f $body_file)
-        if $override_body == null {
-            if $debug { $env.API_DEBUG = false }
-            return null
-        }
-        $override_body
+    let body = if $has_body_override {
+        $resolved_body_override
     } else if ($request.body?.content? | default null) != null {
         # Use saved request body
         $request.body.content | to json
@@ -1188,7 +1312,8 @@ export def "api send" [
     }
 
     # Execute request with collection context for variable resolution
-    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars --no-history=$no_history --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save)
+    let data_output = ($raw or $select != "" or $output != "pretty")
+    let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars --no-history=$no_history --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
     if $result == null {
         if $debug { $env.API_DEBUG = false }
@@ -1241,6 +1366,18 @@ export def "api request create" [
 ] {
     validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
     validate-resource-name "collection" $collection | ignore
+    let body_content = if $body_file != "" {
+        let file_content = (read-body-file $body_file)
+        try {
+            $file_content | from json
+        } catch {
+            $file_content
+        }
+    } else if not ($body | is-empty) {
+        $body
+    } else {
+        null
+    }
     if $debug { $env.API_DEBUG = true }
     let collections_dir = (get-collections-dir)
     let collection_path = (resolve-collection-dir $collections_dir $collection)
@@ -1269,25 +1406,6 @@ export def "api request create" [
     let request_parent = ($request_file | path dirname)
     if not ($request_parent | path exists) {
         mkdir $request_parent
-    }
-
-    # Resolve body - prefer file, then inline record
-    let body_content = if $body_file != "" {
-        if not ($body_file | path exists) {
-            log error $"Body file not found: ($body_file)"
-            if $debug { $env.API_DEBUG = false }
-            return
-        }
-        let file_content = (open $body_file --raw | str trim)
-        try {
-            $file_content | from json
-        } catch {
-            $file_content
-        }
-    } else if not ($body | is-empty) {
-        $body
-    } else {
-        null
     }
 
     {
@@ -1429,6 +1547,17 @@ export def "api request update" [
         fail-command $"Request '($name)' not found in collection '($collection)'"
     }
 
+    let file_body_content = if $body_file != null and $body_file != "" {
+        let file_content = (read-body-file $body_file)
+        try {
+            $file_content | from json
+        } catch {
+            $file_content
+        }
+    } else {
+        null
+    }
+
     mut req = (open $request_file)
 
     if $method != null {
@@ -1443,16 +1572,7 @@ export def "api request update" [
     # Handle body update from either inline record or file
     if $body != null or $body_file != null {
         let body_content = if $body_file != null and $body_file != "" {
-            if not ($body_file | path exists) {
-                log error $"Body file not found: ($body_file)"
-                return
-            }
-            let file_content = (open $body_file --raw | str trim)
-            try {
-                $file_content | from json
-            } catch {
-                $file_content
-            }
+            $file_body_content
         } else if $body != null and not ($body | is-empty) {
             $body
         } else {
@@ -1528,6 +1648,7 @@ export def "api head" [
     --include (-I)                       # Include response headers above body
     --save (-S): string = ""             # Save response body to file
 ] {
+    validate-output-mode $output
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
     let result = (execute-request "HEAD" $url -H $headers -a $resolved_auth --no-history=$no_history)
@@ -1561,6 +1682,7 @@ export def "api options" [
     --include (-I)                       # Include response headers above body
     --save (-S): string = ""             # Save response body to file
 ] {
+    validate-output-mode $output
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
     let result = (execute-request "OPTIONS" $url -H $headers -a $resolved_auth --no-history=$no_history)

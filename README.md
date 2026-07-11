@@ -363,6 +363,10 @@ $code | describe        # → int
 # Capture the parsed body value
 let body = (api get "https://api.example.com/users" --output body)
 
+# Capture only the undecorated response body text.
+# JSON quoting/whitespace is preserved; empty bodies return nothing.
+let rawBody = (api get "https://api.example.com/users" --output raw)
+
 # Capture the full result as a JSON string
 let json = (api get "https://api.example.com/users" --output json)
 
@@ -379,6 +383,13 @@ let id = (api post "https://api.example.com/users" --body {name: "Alice"} --sele
 # Full dot-path also works
 let ct = (api get "https://api.example.com/" --select headers.Content-Type)
 ```
+
+Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`.
+`--output raw` preserves the response payload text exactly, including JSON scalar syntax and
+whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
+takes precedence over `--output`. With `--dry-run`, the curl preview is returned instead of an
+HTTP response. `--save` may be combined with data modes, and `--binary-save` writes the response
+bytes while returning a safe saved-file marker for `--output raw`.
 
 **Verbose / inspect flags** (always combine with pretty mode):
 ```nushell
@@ -446,6 +457,15 @@ api collection show my-api
 # Delete a collection
 api collection delete my-api
 ```
+
+`api collection show` returns a stable record with:
+- `metadata`: the stored collection metadata record.
+- `active_environment`: the active environment name or `null`.
+- `requests`: request summaries with `name`, `method`, and `url`.
+- `environments`: environment summaries with `name`, boolean `active`, variable count, and
+  `description`.
+
+Request bodies, authentication values, and environment variable values are not included.
 
 ### Environments
 

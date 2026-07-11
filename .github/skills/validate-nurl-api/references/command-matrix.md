@@ -45,7 +45,7 @@ collection) → expected result**. Internal helpers and TUI views are summarized
 |---|---|---|
 | api collection list | `api collection list` | Lists collections incl. `jsonplaceholder`. |
 | api collection create | `api collection create tmp-col --description test` | Creates `collections/tmp-col`. |
-| api collection show | `api collection show jsonplaceholder` | Prints metadata + requests/envs. |
+| api collection show | `api collection show jsonplaceholder` | Returns `{metadata, active_environment, requests, environments}`. Requests contain only `name/method/url`; environments contain only `name/active/variables/description`, so credentials and variable values are excluded. |
 | api collection copy | `api collection copy jsonplaceholder tmp-copy` | Deep-copies into `tmp-copy`. |
 | api collection delete | `api collection delete tmp-col --force; api collection delete tmp-copy --force` | Removes the temp collections. |
 
@@ -95,6 +95,11 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
 | api send | `api send get-post -c jsonplaceholder -r` | `200`; `{{base_url}}` resolved from the active env. Try every saved request. |
 
+All HTTP `--output` values are case-sensitive and preflighted before body/auth/network/history
+work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--output raw` returns only
+the exact undecorated payload text (including JSON scalar syntax and whitespace; nothing for an empty body), while the
+separate `--raw` flag returns the full result record and takes precedence over `--output`.
+
 ## saved-requests
 Full lifecycle on a temp request, cleaned up at the end.
 | Command | Invocation | Expected |
@@ -114,7 +119,7 @@ Full lifecycle on a temp request, cleaned up at the end.
 | api history resend | `api history resend <id>` | Re-executes; POST bodies re-sent as a string (no double-encode). `-e` is **inert** (warns). |
 | api history search | `api history search posts` | Matching entries. |
 | api history clear | `api history clear` | Removes only date directories older than `history_retention_days`; use `--before YYYY-MM-DD` for an explicit cutoff or `--all --force` to remove everything. Run destructive variants in a throwaway `API_ROOT`. |
-| api history export | `let out = ($nu.temp-dir \| path join $"nurl-hist-(random uuid).json"); api history export --format json --output $out; rm -f $out` | Writes the isolated export file and then removes it. |
+| api history export | `let out = ($nu.temp-dir \| path join $"nurl-hist-(random uuid).json"); api history export --format json --output $out; rm -f $out` | `--format` accepts case-sensitive `json` or `csv`; other values fail before output creation. This writes the isolated JSON export and then removes it. |
 | api history rebuild-index | `let tmp = ($nu.temp-dir \| path join $"nurl-rebuild-(random uuid)"); mkdir $tmp; with-env {API_ROOT: $tmp} { api init \| ignore; api history save {method: GET, url: "https://example.invalid", headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} \| ignore; rm ($tmp \| path join history index.nuon); api history rebuild-index }; rm -rf $tmp` | Exit 0, stdout reports one indexed entry, stderr is empty, and the isolated `history/index.nuon` contains that synthetic entry. |
 
 ## chaining
@@ -140,4 +145,4 @@ parse/throw, then exit; do full interaction in a real terminal.
 - **auth:** `api auth get-config` — covered when a request applies auth.
 - **history:** `api history save`, `api history get` — covered by any live request / `history show`.
 - **display:** `api headers`, `api table`, `api explore`, `api pretty`, `api summary` — covered
-  by request output rendering.
+  by request output rendering; `api pretty` serializes Nushell tables as JSON arrays.

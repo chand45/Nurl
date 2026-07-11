@@ -156,8 +156,44 @@ try {
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
                 [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + [Environment]::NewLine)
-                $payload = '{\"ok\":true}'
-                $contentType = 'application/json'
+                switch ($requestPath) {
+                    '/array' {
+                        $payload = '[{\"id\":1}]'
+                        $contentType = 'application/json'
+                    }
+                    '/text' {
+                        $payload = 'plain-text-response'
+                        $contentType = 'text/plain'
+                    }
+                    '/padded' {
+                        $payload = '  padded text  '
+                        $contentType = 'text/plain'
+                    }
+                    '/sentinel' {
+                        $payload = 'prefix---RESPONSE_META---suffix'
+                        $contentType = 'text/plain'
+                    }
+                    '/http-like-text' {
+                        $payload = \"prefix`r`n`r`nHTTP/1.1 200 OK`r`n`r`nsuffix\"
+                        $contentType = 'text/plain'
+                    }
+                    '/json-string' {
+                        $payload = '\"json-string-response\"'
+                        $contentType = 'application/json'
+                    }
+                    '/json-null' {
+                        $payload = 'null'
+                        $contentType = 'application/json'
+                    }
+                    '/empty' {
+                        $payload = ''
+                        $contentType = 'text/plain'
+                    }
+                    default {
+                        $payload = '{\"ok\":true}'
+                        $contentType = 'application/json'
+                    }
+                }
             }
 
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
@@ -277,9 +313,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         authorization = self.headers.get('Authorization', '')
         with open(wire_file, 'a', encoding='utf-8') as handle:
             handle.write(self.path + '\\t' + authorization + '\\n')
-        encoded = json.dumps({'ok': True}).encode('utf-8')
+        if self.path == '/array':
+            encoded = b'[{\"id\":1}]'
+            content_type = 'application/json'
+        elif self.path == '/text':
+            encoded = b'plain-text-response'
+            content_type = 'text/plain'
+        elif self.path == '/padded':
+            encoded = b'  padded text  '
+            content_type = 'text/plain'
+        elif self.path == '/sentinel':
+            encoded = b'prefix---RESPONSE_META---suffix'
+            content_type = 'text/plain'
+        elif self.path == '/http-like-text':
+            encoded = b'prefix\\r\\n\\r\\nHTTP/1.1 200 OK\\r\\n\\r\\nsuffix'
+            content_type = 'text/plain'
+        elif self.path == '/json-string':
+            encoded = b'\"json-string-response\"'
+            content_type = 'application/json'
+        elif self.path == '/json-null':
+            encoded = b'null'
+            content_type = 'application/json'
+        elif self.path == '/empty':
+            encoded = b''
+            content_type = 'text/plain'
+        else:
+            encoded = b'{\"ok\":true}'
+            content_type = 'application/json'
         self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -343,10 +405,20 @@ def start-command-error-server [tmp: string] {
     }
 
     $server.port = (open $server.port_file --raw | str trim | into int)
-    let ready = (^curl -s --max-time 2 $"http://127.0.0.1:($server.port)/ready" | complete)
-    if $ready.exit_code != 0 or ($ready.stdout | str trim) != "ready" {
+    mut ready_ok = false
+    mut ready_stderr = ""
+    for _ in 1..40 {
+        let ready = (^curl -s --max-time 2 $"http://127.0.0.1:($server.port)/ready" | complete)
+        $ready_stderr = $ready.stderr
+        if $ready.exit_code == 0 and ($ready.stdout | str trim) == "ready" {
+            $ready_ok = true
+            break
+        }
+        sleep 50ms
+    }
+    if not $ready_ok {
         try { stop-command-error-server $server } catch {}
-        error make {msg: $"OAuth test server readiness check failed: ($ready.stderr)"}
+        error make {msg: $"OAuth test server readiness check failed: ($ready_stderr)"}
     }
     $server
 }

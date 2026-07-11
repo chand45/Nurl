@@ -350,7 +350,7 @@ export def "api explore" [result: record] {
 export def "api pretty" [result: record] {
     if ($result.response.body? | default null) != null {
         let body = $result.response.body
-        if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") {
+        if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") or ($body | describe | str starts-with "table") {
             $body | to json --indent 2
         } else {
             $body

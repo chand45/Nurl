@@ -509,7 +509,7 @@ def test-collection-surface [] {
     let copied = "copy api.v1 世界"
     api collection create $valid | ignore
     assert (($root | path join "collections" $valid) | path exists)
-    assert ((api collection show $valid) | describe | str starts-with "list")
+    assert ((api collection show $valid) | describe | str starts-with "record")
     api collection copy $valid $copied | ignore
     assert (($root | path join "collections" $copied) | path exists)
     api collection delete $copied --force | ignore
@@ -706,7 +706,7 @@ def test-request-lifecycle-and-explicit-body-file [] {
     let listed = (api request list --collection $collection)
     assert ($request in $listed.name)
     assert equal (api collection list | where name == $collection | get requests | first) 1
-    assert equal (api collection show $collection | get name | first) $request
+    assert equal (api collection show $collection | get requests.name | first) $request
 
     let request_with_suffix = $"($request).nuon"
     let send_result = (run-module-script $root $"api send ($request_with_suffix | to nuon) --collection ($collection | to nuon) --dry-run")
@@ -1234,7 +1234,7 @@ def test-symlink-escapes [] {
     assert (create-directory-link $chain_link $outside_chain) "chain link creation failed after capability preflight"
 
     assert (($contained_collections | path join "demo") | path exists) "linked collections base should remain usable"
-    assert ((api collection show alias) | describe | str starts-with "list") "contained collection link should be accepted"
+    assert ((api collection show alias) | describe | str starts-with "record") "contained collection link should be accepted"
     assert equal (api request show "contained/inside" --collection demo | get name) inside
     expect-resource-error { api collection show escape } "existing links cannot escape"
     expect-resource-error { api request show "escape/secret" --collection demo } "existing links cannot escape"

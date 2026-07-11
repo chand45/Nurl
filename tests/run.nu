@@ -29,6 +29,7 @@ source test_vars.nu
 source test_chain.nu
 source test_resource_paths.nu
 source test_command_errors.nu
+source test_surface_contracts.nu
 source test_packaging.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ let all_results = (
         ...(run-suite-chain $net_ok)
         ...(run-suite-resource-paths)
         ...(run-suite-command-errors)
+        ...(run-suite-surface-contracts)
         ...(run-suite-packaging)
     ]
 )

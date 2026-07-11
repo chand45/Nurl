@@ -221,6 +221,7 @@ export def "api help" [] {
                                   pretty    print colored status+body, return null  [interactive]
                                   status    return HTTP status int, no print        [scripting]
                                   body      return parsed body value, no print      [scripting]
+                                  raw       return undecorated response body text   [scripting]
                                   headers   return response headers record, no print [scripting]
                                   json      return full result as JSON string, no print [scripting]
                                   none      return null, print nothing               [silent]
@@ -275,12 +276,12 @@ export def "api help" [] {
   api history clear             Delete entries older than configured retention
   api history clear --before <date>  Delete entries before YYYY-MM-DD
   api history clear --all --force    Delete all history entries
-  api history export --output <file> Export history entries to a file
+  api history export --format <json|csv> --output <file>  Export history entries
 
 (ansi yellow)Collections:(ansi reset)
   api collection list              List collections
   api collection create <name>     Create collection
-  api collection show <name>       Show collection details
+  api collection show <name>       Return metadata, request, and environment summaries
   api collection delete <name>     Delete collection and all its requests
   api collection copy <src> <dst>  Copy collection to a new name
   Collection, environment, and chain names are one relative segment \(spaces/dots/Unicode allowed\).
@@ -302,7 +303,9 @@ export def "api help" [] {
   api tui                       Launch the terminal UI
 
 (ansi yellow)Scripting:(ansi reset)
-  --raw / --output / --select modes RETURN typed values and print nothing — pipe cleanly.
+  --output values are case-sensitive: pretty, raw, body, json, headers, status, none.
+  --raw returns the full result; --output raw returns only the undecorated response body.
+  --raw / --output / --select data modes RETURN values and print nothing — pipe cleanly.
   Default `pretty` mode prints to terminal and returns null \(interactive use\).
 
   api get URL -o body             # returns parsed body, prints nothing
@@ -442,14 +445,42 @@ export def "api collection show" [name: string] {
             {
                 name: ($req.name? | default $request_file.name)
                 method: ($req.method? | default "GET")
-                url: ($req.url? | default "" | str substring 0..50)
+                url: ($req.url? | default "")
             }
-        }
+        } | sort-by name
     } else {
         []
     }
 
-    $requests
+    let collection_meta_file = (resolve-under-base $collection_dir "meta.nuon" "collection runtime metadata" --scope $"collection '($name)'" --base-is-canonical)
+    let collection_meta = if ($collection_meta_file | path exists) {
+        open $collection_meta_file
+    } else {
+        {active_environment: null}
+    }
+    let active_environment = ($collection_meta.active_environment? | default null)
+    let environments_dir = (resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($name)'" --base-is-canonical)
+    let environments = if ($environments_dir | path exists) {
+        list-contained-resource-files $environments_dir "environment" --suffix ".nuon" --scope $"collection '($name)'/environments" | each {|environment_file|
+            let environment = (open $environment_file.path)
+            let environment_name = ($environment.name? | default $environment_file.name)
+            {
+                name: $environment_name
+                active: ($environment_name == $active_environment)
+                variables: ($environment.variables? | default {} | columns | length)
+                description: ($environment.description? | default "")
+            }
+        } | sort-by name
+    } else {
+        []
+    }
+
+    {
+        metadata: $meta
+        active_environment: $active_environment
+        requests: $requests
+        environments: $environments
+    }
 }
 
 # Copy a collection

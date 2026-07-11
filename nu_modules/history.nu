@@ -466,6 +466,10 @@ export def "api history export" [
     --output (-o): string = ""      # Output file path
     --limit (-l): int = 100         # Max entries
 ] {
+    let supported_formats = ["json" "csv"]
+    if $format not-in $supported_formats {
+        fail-command $"Unsupported history export format '($format)'. Expected one of: ($supported_formats | str join ', ')."
+    }
     let dir = (get-history-dir)
 
     if not ($dir | path exists) {
@@ -500,10 +504,7 @@ export def "api history export" [
                 }
             } | to csv
         }
-        _ => {
-            print $"(ansi red)Unknown format: ($format)(ansi reset)"
-            return
-        }
+        _ => { fail-command $"Unsupported history export format '($format)'" }
     }
 
     if $output != "" {
