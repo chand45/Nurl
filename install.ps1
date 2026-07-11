@@ -25,8 +25,26 @@ if (-not $curlPath) {
     Write-Host "Error: curl $MinimumCurlVersion or newer is required." -ForegroundColor Red
     exit 1
 }
-$curlVersionText = (& $curlPath.Source --version | Select-Object -First 1)
-if ($curlVersionText -notmatch '^curl\s+(\d+)\.(\d+)\.(\d+)') {
+$curlVersionStart = New-Object System.Diagnostics.ProcessStartInfo
+$curlVersionStart.FileName = $curlPath.Source
+$curlVersionStart.Arguments = "--version"
+$curlVersionStart.UseShellExecute = $false
+$curlVersionStart.CreateNoWindow = $true
+$curlVersionStart.RedirectStandardOutput = $true
+$curlVersionStart.RedirectStandardError = $true
+$curlVersionProcess = [System.Diagnostics.Process]::Start($curlVersionStart)
+$curlVersionStdout = $curlVersionProcess.StandardOutput.ReadToEndAsync()
+$curlVersionStderr = $curlVersionProcess.StandardError.ReadToEndAsync()
+$curlVersionProcess.WaitForExit()
+$curlVersionExit = $curlVersionProcess.ExitCode
+$curlVersionOutput = $curlVersionStdout.Result
+$null = $curlVersionStderr.Result
+if ($curlVersionExit -ne 0) {
+    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
+    exit 1
+}
+$curlVersionText = [string](($curlVersionOutput -split "\r?\n") | Select-Object -First 1)
+if ($curlVersionText -notmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
     Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
     exit 1
 }

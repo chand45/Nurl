@@ -5,11 +5,19 @@
 set -e
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 # Configuration
 NURL_HOME="$HOME/.nurl"
@@ -34,14 +42,20 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
-CURL_VERSION="$(curl --version | head -n 1 | awk '{print $2}')"
-IFS=. read -r CURL_MAJOR CURL_MINOR CURL_PATCH_EXTRA <<< "$CURL_VERSION"
-CURL_PATCH="${CURL_PATCH_EXTRA%%[^0-9]*}"
-IFS=. read -r MINIMUM_CURL_MAJOR MINIMUM_CURL_MINOR MINIMUM_CURL_PATCH <<< "$MINIMUM_CURL_VERSION"
-if [[ ! "$CURL_MAJOR" =~ ^[0-9]+$ || ! "$CURL_MINOR" =~ ^[0-9]+$ || ! "$CURL_PATCH" =~ ^[0-9]+$ ]]; then
+if ! CURL_VERSION_OUTPUT="$(curl --version 2>/dev/null)"; then
     echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
     exit 1
 fi
+CURL_VERSION_LINE="${CURL_VERSION_OUTPUT%%$'\n'*}"
+if [[ ! "$CURL_VERSION_LINE" =~ ^curl(\.exe)?[[:space:]]+([0-9]+)\.([0-9]+)\.([0-9]+)([^0-9.].*)?$ ]]; then
+    echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
+    exit 1
+fi
+CURL_MAJOR="${BASH_REMATCH[2]}"
+CURL_MINOR="${BASH_REMATCH[3]}"
+CURL_PATCH="${BASH_REMATCH[4]}"
+CURL_VERSION="$CURL_MAJOR.$CURL_MINOR.$CURL_PATCH"
+IFS=. read -r MINIMUM_CURL_MAJOR MINIMUM_CURL_MINOR MINIMUM_CURL_PATCH <<< "$MINIMUM_CURL_VERSION"
 if (( CURL_MAJOR < MINIMUM_CURL_MAJOR ||
       (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR < MINIMUM_CURL_MINOR) ||
       (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR == MINIMUM_CURL_MINOR && CURL_PATCH < MINIMUM_CURL_PATCH) )); then
