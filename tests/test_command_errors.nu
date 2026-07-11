@@ -132,6 +132,7 @@ try {
                 $body = -join $buffer[0..($read - 1)]
             }
 
+            $requestPath = ''
             if ($requestLine -match ' /ready ') {
                 $payload = 'ready'
                 $contentType = 'text/plain'
@@ -156,6 +157,12 @@ try {
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
                 [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + [Environment]::NewLine)
+                if ($requestPath -eq '/slow') {
+                    Start-Sleep -Seconds 3
+                }
+                if ($requestPath -eq '/timeout') {
+                    Start-Sleep -Seconds 3
+                }
                 switch ($requestPath) {
                     '/array' {
                         $payload = '[{\"id\":1}]'
@@ -198,14 +205,31 @@ try {
 
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             $crlf = [Environment]::NewLine
-            $header = 'HTTP/1.1 200 OK' + $crlf +
+            $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } else { 'HTTP/1.1 200 OK' }
+            $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
+                'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
+                'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
+                'X-Debug-Auth: Bearer RESPONSE-BEARER-SENTINEL' + $crlf
+            } else { '' }
+            $header = $statusLine + $crlf +
                 'Content-Type: ' + $contentType + $crlf +
+                $extraHeaders +
                 'Content-Length: ' + $bytes.Length + $crlf +
                 'Connection: close' + $crlf + $crlf
             $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
+            if ($requestPath -eq '/malformed-header') {
+                $headerBytes = [System.Text.Encoding]::ASCII.GetBytes(
+                    'HTTP/1.1 200 OK' + $crlf + 'X-Malformed: '
+                ) + [byte[]](255) + [System.Text.Encoding]::ASCII.GetBytes(
+                    $crlf + 'Content-Type: application/json' + $crlf +
+                    'Content-Length: ' + $bytes.Length + $crlf + 'Connection: close' + $crlf + $crlf
+                )
+            }
             $stream.Write($headerBytes, 0, $headerBytes.Length)
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush()
+        } catch {
+            # Clients intentionally disconnect in timeout/interruption regressions.
         } finally {
             $client.Dispose()
         }
@@ -313,6 +337,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         authorization = self.headers.get('Authorization', '')
         with open(wire_file, 'a', encoding='utf-8') as handle:
             handle.write(self.path + '\\t' + authorization + '\\n')
+        if self.path in ('/slow', '/timeout'):
+            time.sleep(3)
         if self.path == '/array':
             encoded = b'[{\"id\":1}]'
             content_type = 'application/json'
@@ -340,8 +366,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             encoded = b'{\"ok\":true}'
             content_type = 'application/json'
-        self.send_response(200)
+        if self.path == '/malformed-header':
+            self.connection.sendall(
+                b'HTTP/1.1 200 OK\\r\\nX-Malformed: \\xff\\r\\n'
+                b'Content-Type: application/json\\r\\n'
+                + ('Content-Length: ' + str(len(encoded)) + '\\r\\n').encode('ascii')
+                + b'Connection: close\\r\\n\\r\\n'
+                + encoded
+            )
+            return
+        self.send_response(503 if self.path == '/http-error' else 200)
         self.send_header('Content-Type', content_type)
+        if self.path == '/sensitive-headers':
+            self.send_header('Set-Cookie', 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly')
+            self.send_header('X-Session-Token', 'RESPONSE-TOKEN-SENTINEL')
+            self.send_header('X-Debug-Auth', 'Bearer RESPONSE-BEARER-SENTINEL')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)

@@ -588,6 +588,185 @@ def last-header-block [header_output: string] {
     if ($indices | is-empty) { "" } else { $header_blocks | get ($indices | last) }
 }
 
+def find-path-entries [path: string] {
+    let parent = ($path | path dirname)
+    let name = ($path | path basename)
+    let listing = try {
+        {value: (ls -la $parent), error: null}
+    } catch {|error|
+        {value: null, error: $error}
+    }
+    if $listing.error != null {
+        fail-command "Could not inspect private response-header capture storage"
+    }
+    $listing.value | where {|entry| ($entry.name | path basename) == $name }
+}
+
+def get-path-entry [path: string] {
+    let matches = (find-path-entries $path)
+    if ($matches | length) != 1 {
+        fail-command "Could not verify private response-header capture storage"
+    }
+    $matches | first
+}
+
+def get-posix-mode [path: string] {
+    let gnu = (^stat -c "%a" $path | complete)
+    let raw_mode = if $gnu.exit_code == 0 {
+        $gnu.stdout | str trim
+    } else {
+        let bsd = (^stat -f "%Lp" $path | complete)
+        if $bsd.exit_code != 0 {
+            fail-command "Could not verify private response-header capture permissions"
+        }
+        $bsd.stdout | str trim
+    }
+    try {
+        $raw_mode | into int
+    } catch {
+        fail-command "Could not verify private response-header capture permissions"
+    }
+}
+
+def verify-private-header-capture [capture: record] {
+    let dir_entry = (get-path-entry $capture.dir)
+    if $dir_entry.type != "dir" or $dir_entry.target != null {
+        fail-command "Private response-header capture directory is not a real directory"
+    }
+    let file_entry = (get-path-entry $capture.file)
+    if $file_entry.type != "file" or $file_entry.target != null {
+        fail-command "Private response-header capture file is not a real file"
+    }
+    if $nu.os-info.name != "windows" {
+        if (get-posix-mode $capture.dir) != 700 or (get-posix-mode $capture.file) != 600 {
+            fail-command "Private response-header capture permissions are too broad"
+        }
+    }
+}
+
+def remove-private-header-capture [capture: record] {
+    if not (($capture.dir | path basename) | str starts-with "nurl-response-headers-") {
+        fail-command "Refusing to remove unowned response-header capture storage"
+    }
+    if ($capture.file | path dirname) != $capture.dir {
+        fail-command "Refusing to remove invalid response-header capture storage"
+    }
+
+    let dir_matches = (find-path-entries $capture.dir)
+    if ($dir_matches | is-empty) {
+        return
+    }
+    if ($dir_matches | length) != 1 {
+        fail-command "Could not verify private response-header capture storage during cleanup"
+    }
+    let dir_entry = ($dir_matches | first)
+    if $dir_entry.type != "dir" or $dir_entry.target != null {
+        rm -f $capture.dir
+        return
+    }
+
+    let file_matches = (find-path-entries $capture.file)
+    if ($file_matches | length) > 1 {
+        fail-command "Could not verify private response-header capture file during cleanup"
+    }
+    if not ($file_matches | is-empty) {
+        let file_entry = ($file_matches | first)
+        if $file_entry.type == "dir" and $file_entry.target == null {
+            fail-command "Response-header capture file was replaced by a directory"
+        }
+        rm -f $capture.file
+    }
+
+    rm -rf $capture.dir
+}
+
+def create-private-header-capture [] {
+    let capture_dir = ($nu.temp-dir | path join $"nurl-response-headers-(random uuid)")
+    let capture = {
+        dir: $capture_dir
+        file: ($capture_dir | path join "headers")
+    }
+    let created = try {
+        if $nu.os-info.name == "windows" {
+            let temp_entry = (get-path-entry $nu.temp-dir)
+            if $temp_entry.type != "dir" or $temp_entry.target != null {
+                fail-command "The user temporary directory is not a real directory"
+            }
+            mkdir $capture.dir
+        } else {
+            let made = (^mkdir -m 700 $capture.dir | complete)
+            if $made.exit_code != 0 {
+                fail-command "Could not create private response-header capture storage"
+            }
+        }
+
+        let dir_entry = (get-path-entry $capture.dir)
+        if $dir_entry.type != "dir" or $dir_entry.target != null {
+            fail-command "Private response-header capture directory is not a real directory"
+        }
+        if $nu.os-info.name == "windows" {
+            "" | save -f $capture.file
+        } else {
+            # A restrictive umask makes the file private at creation, before curl can access it.
+            let made_file = (^sh -c 'umask 077; : > "$1"' sh $capture.file | complete)
+            if $made_file.exit_code != 0 {
+                fail-command "Could not create private response-header capture file"
+            }
+        }
+
+        verify-private-header-capture $capture
+        {value: $capture, error: null}
+    } catch {|error|
+        {value: null, error: $error}
+    }
+
+    if $created.error != null {
+        let cleanup_error = try {
+            remove-private-header-capture $capture
+            null
+        } catch {|error|
+            $error
+        }
+        if $cleanup_error != null {
+            fail-command "Could not establish or remove private response-header capture storage"
+        }
+        fail-command $"Could not establish private response-header capture storage: ($created.error.msg)"
+    }
+    $created.value
+}
+
+def curl-with-private-header-capture [curl_args: list, url: string, method: string] {
+    let capture = (create-private-header-capture)
+    let outcome = try {
+        let capture_args = ($curl_args | append ["--dump-header" $capture.file])
+        let final_args = if $method == "HEAD" {
+            let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
+            $capture_args | append ["--output" $null_device]
+        } else {
+            $capture_args
+        }
+        let output = (curl ...$final_args $url | complete)
+        verify-private-header-capture $capture
+        let header_output = (open $capture.file --raw)
+        {value: {output: $output, headers: $header_output}, error: null}
+    } catch {|error|
+        {value: null, error: $error}
+    }
+    let cleanup_error = try {
+        remove-private-header-capture $capture
+        null
+    } catch {|error|
+        $error
+    }
+    if $cleanup_error != null {
+        fail-command $"Could not remove private response-header capture storage: ($cleanup_error.msg)"
+    }
+    if $outcome.error != null {
+        fail-command $"Could not capture response headers privately: ($outcome.error.msg)"
+    }
+    $outcome.value
+}
+
 def parse-curl-response-captured [output: string, header_output: string] {
     let split = (split-curl-output $output)
     parse-response-parts $split.payload (last-header-block $header_output) $split.metadata
@@ -615,6 +794,16 @@ def parse-curl-response-internal [output: string] {
 
 export def parse-curl-response [output: string] {
     parse-curl-response-internal $output | reject _raw_body
+}
+
+def redact-sensitive-response-headers [headers: record] {
+    $headers | transpose key value | reduce -f {} {|header, redacted|
+        let sensitive = (
+            (($header.key | str downcase) =~ '(authorization|cookie|token|secret|api-key|session)')
+            or (($header.value | into string | str downcase) | str starts-with "bearer ")
+        )
+        $redacted | upsert $header.key (if $sensitive { "******" } else { $header.value })
+    }
 }
 
 # Execute HTTP request
@@ -723,21 +912,8 @@ def execute-request [
 
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
-        let header_file = ($nu.temp-dir | path join $"nurl-headers-(random uuid).txt")
-        let capture_args = ($curl_args | append ["--dump-header" $header_file])
-        let final_args = if $method == "HEAD" {
-            let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
-            $capture_args | append ["--output" $null_device]
-        } else {
-            $capture_args
-        }
-        let output = (curl ...$final_args $request_url | complete)
-        let header_output = if ($header_file | path exists) {
-            try { open $header_file --raw } catch { "" }
-        } else {
-            ""
-        }
-        rm -f $header_file
+        let captured = (curl-with-private-header-capture $curl_args $request_url $method)
+        let output = $captured.output
 
         if $output.exit_code != 0 {
             if $attempt < $max_attempts {
@@ -748,7 +924,7 @@ def execute-request [
             return null
         }
 
-        let parsed = (parse-curl-response-captured $output.stdout $header_output)
+        let parsed = (parse-curl-response-captured $output.stdout $captured.headers)
         let response = ($parsed | reject _raw_body)
 
         # Retry on 5xx if attempts remain
@@ -766,7 +942,8 @@ def execute-request [
         }
 
         if not $no_history {
-            save-to-history $request_record $response
+            let history_response = ($response | update headers (redact-sensitive-response-headers $response.headers))
+            save-to-history $request_record $history_response
         }
 
         return {
@@ -855,7 +1032,7 @@ def display-response [
     # Response headers (verbose or --include)
     if $verbose or $include {
         print ""
-        for hdr in ($response.headers? | default {} | transpose key value) {
+        for hdr in (redact-sensitive-response-headers ($response.headers? | default {}) | transpose key value) {
             print $"(ansi cyan)< ($hdr.key): ($hdr.value)(ansi reset)"
         }
     }
