@@ -6,6 +6,7 @@ use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars ex
 use auth.nu ["api auth get-config"]
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
+use curl-capability.nu [require-curl-capability]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -125,6 +126,14 @@ def read-body-file [body_file: string] {
         open $body_file --raw | str trim
     } catch {
         fail-command $"Body file '($body_file)' could not be read"
+    }
+}
+
+def resolve-request-auth [auth: record, --dry-run] {
+    if $dry_run and ($auth.type? | default "none") == "oauth2" {
+        {type: "bearer", token: "redacted"}
+    } else {
+        api auth get-config $auth
     }
 }
 
@@ -576,76 +585,6 @@ def parse-response-parts [body_raw: string, headers_raw: string, meta_part: stri
     }
 }
 
-def require-fileless-header-curl [] {
-    let version_result = try {
-        {value: (curl --version | complete), error: null}
-    } catch {|error|
-        {value: null, error: $error}
-    }
-    if $version_result.error != null or $version_result.value.exit_code != 0 {
-        fail-command "Nurl requires curl 7.83.0 or newer for fileless response-header capture"
-    }
-    let parsed = (
-        $version_result.value.stdout
-        | lines
-        | get 0
-        | parse --regex '^curl\s+(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)'
-    )
-    if ($parsed | is-empty) {
-        fail-command "Could not determine whether curl supports fileless response-header capture"
-    }
-    let version = ($parsed | get 0)
-    let major = ($version.major | into int)
-    let minor = ($version.minor | into int)
-    let patch = ($version.patch | into int)
-    let supported = (
-        $major > 7
-        or ($major == 7 and $minor > 83)
-        or ($major == 7 and $minor == 83 and $patch >= 0)
-    )
-    if not $supported {
-        fail-command $"Nurl requires curl 7.83.0 or newer for fileless response-header capture \(found ($major).($minor).($patch)\)"
-    }
-}
-
-def canonical-header-name [name: string] {
-    let acronyms = {
-        "cf": "CF"
-        "dnt": "DNT"
-        "md5": "MD5"
-        "te": "TE"
-        "www": "WWW"
-        "xss": "XSS"
-    }
-    $name
-    | split row "-"
-    | each {|part|
-        if $part in ($acronyms | columns) {
-            $acronyms | get $part
-        } else {
-            $part | str capitalize
-        }
-    }
-    | str join "-"
-}
-
-def normalize-header-json [headers: record] {
-    $headers
-    | transpose name values
-    | reduce -f {} {|header, normalized|
-        let value_type = ($header.values | describe)
-        if not ($value_type | str starts-with "list") {
-            fail-command "Curl returned invalid structured response headers"
-        }
-        let value = if ($header.values | is-empty) {
-            ""
-        } else {
-            $header.values | get (($header.values | length) - 1)
-        }
-        $normalized | upsert (canonical-header-name $header.name) $value
-    }
-}
-
 def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_code: int] {
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
     let ending = $"NURL_RESPONSE_META_($token)_END"
@@ -665,7 +604,7 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     } catch {
         fail-command "Curl returned malformed structured response metadata"
     }
-    let required = ["headers" "status" "time_total" "size_download" "exit_code"]
+    let required = ["status" "time_total" "size_download" "size_header" "exit_code"]
     for field in $required {
         if $field not-in ($metadata | columns) {
             fail-command "Curl returned incomplete structured response metadata"
@@ -679,33 +618,24 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     if $metadata_exit != $expected_exit_code {
         fail-command "Curl response metadata did not match the transfer result"
     }
-    if not (($metadata.headers | describe) | str starts-with "record") {
-        fail-command "Curl returned invalid structured response headers"
-    }
     {
         diagnostics: ($begin_parts | get 0 | str trim)
-        metadata: ($metadata | update headers (normalize-header-json $metadata.headers))
+        metadata: $metadata
     }
 }
 
-def curl-with-fileless-metadata [curl_args: list, url: string, method: string] {
+def curl-with-fileless-metadata [curl_args: list, url: string] {
     let token = (random uuid | str replace --all "-" "")
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
     let ending = $"NURL_RESPONSE_META_($token)_END"
     let write_out = (
         "%{stderr}\n"
         + $begin
-        + "\n{\"headers\":%{header_json},\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"exit_code\":\"%{exitcode}\"}\n"
+        + "\n{\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"size_header\":\"%{size_header}\",\"exit_code\":\"%{exitcode}\"}\n"
         + $ending
         + "\n"
     )
-    let framed_args = ($curl_args | append ["--write-out" $write_out])
-    let final_args = if $method == "HEAD" {
-        let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
-        $framed_args | append ["--output" $null_device]
-    } else {
-        $framed_args
-    }
+    let final_args = ($curl_args | append ["--include" "--write-out" $write_out])
     let output = (curl ...$final_args $url | complete)
     if (($output.stderr | describe) | str starts-with "binary") {
         fail-command "Curl returned malformed structured response metadata"
@@ -717,16 +647,184 @@ def curl-with-fileless-metadata [curl_args: list, url: string, method: string] {
     }
 }
 
-def parse-curl-response-fileless [body_raw: string, metadata: record] {
-    let body = try {
-        $body_raw | from json
-    } catch {
-        $body_raw
+def last-header-block [header_output: string] {
+    let separator = if ($header_output | str contains "\r\n\r\n") {
+        "\r\n\r\n"
+    } else {
+        "\n\n"
     }
+    if not ($header_output | str ends-with $separator) {
+        fail-command "Curl response header size did not end at a complete header block"
+    }
+    let blocks = ($header_output | split row $separator)
+    let indices = (
+        $blocks
+        | enumerate
+        | where {|block| $block.item | str trim | str starts-with "HTTP/" }
+        | get index
+    )
+    if ($indices | is-empty) {
+        fail-command "Curl returned malformed response headers"
+    }
+    $blocks | get ($indices | last)
+}
+
+def upsert-wire-header [headers: record, key: string, value: string] {
+    let normalized = ($key | str downcase)
+    let retained = (
+        $headers
+        | transpose key value
+        | where {|header| ($header.key | str downcase) != $normalized }
+        | reduce -f {} {|header, result| $result | upsert $header.key $header.value }
+    )
+    $retained | upsert $key $value
+}
+
+def parse-wire-headers [header_output: string] {
+    let final_block = (last-header-block $header_output)
+    $final_block
+    | lines
+    | skip 1
+    | reduce -f {} {|line, headers|
+        let parts = ($line | split row ":")
+        if ($parts | length) < 2 {
+            $headers
+        } else {
+            let key = ($parts | get 0 | str trim)
+            let value = ($parts | skip 1 | str join ":" | str trim)
+            if ($key | is-empty) {
+                $headers
+            } else {
+                upsert-wire-header $headers $key $value
+            }
+        }
+    }
+}
+
+def parse-wire-trailers [trailer_bytes: binary] {
+    if ($trailer_bytes | bytes length) == 0 {
+        return {}
+    }
+    let output = try {
+        $trailer_bytes | decode utf-8
+    } catch {
+        fail-command "Curl returned malformed response trailers"
+    }
+    if ($output | str trim | is-empty) {
+        return {}
+    }
+    $output
+    | lines
+    | where {|line| not ($line | str trim | is-empty) }
+    | reduce -f {} {|line, trailers|
+        let parts = ($line | split row ":")
+        if ($parts | length) < 2 {
+            fail-command "Curl returned malformed response trailers"
+        }
+        let raw_key = ($parts | get 0)
+        let key = ($raw_key | str trim)
+        if ($key | is-empty) or $raw_key != $key {
+            fail-command "Curl returned malformed response trailers"
+        }
+        let allowed = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        let invalid_name = (
+            $key
+            | split chars
+            | any {|character| not ($allowed | str contains $character) }
+        )
+        if $invalid_name {
+            fail-command "Curl returned malformed response trailers"
+        }
+        let value = ($parts | skip 1 | str join ":" | str trim)
+        upsert-wire-header $trailers $key $value
+    }
+}
+
+def as-binary [value: any] {
+    if (($value | describe) | str starts-with "binary") {
+        $value
+    } else {
+        $value | encode utf-8
+    }
+}
+
+def parse-curl-response-fileless [included_output: any, metadata: record] {
+    let bytes = (as-binary $included_output)
+    let total_size = ($bytes | bytes length)
+    let header_size = try {
+        $metadata.size_header | into int
+    } catch {
+        fail-command "Curl returned an invalid response header size"
+    }
+    if $header_size < 0 or $header_size > $total_size {
+        fail-command "Curl response header size did not match the transfer output"
+    }
+    let body_size = try {
+        $metadata.size_download | into int
+    } catch {
+        fail-command "Curl returned an invalid response body size"
+    }
+    let body_end = ($header_size + $body_size)
+    if $body_size < 0 or $body_end > $total_size {
+        fail-command "Curl response body size did not match the transfer output"
+    }
+
+    let header_bytes = if $header_size == 0 {
+        0x[]
+    } else {
+        $bytes | bytes at 0..<$header_size
+    }
+    let body_bytes = if $body_size == 0 {
+        0x[]
+    } else {
+        $bytes | bytes at $header_size..<$body_end
+    }
+    let trailer_bytes = if $body_end == $total_size {
+        0x[]
+    } else {
+        $bytes | bytes at $body_end..
+    }
+    let header_output = try {
+        $header_bytes | decode utf-8
+    } catch {
+        fail-command "Curl returned malformed response headers"
+    }
+    let body_raw = if ($body_bytes | bytes length) == 0 {
+        ""
+    } else {
+        let decoded = try {
+            $body_bytes | decode utf-8
+        } catch {
+            null
+        }
+        if $decoded == null or ($decoded | encode utf-8) != $body_bytes {
+            $body_bytes
+        } else {
+            $decoded
+        }
+    }
+    let body = if (($body_raw | describe) | str starts-with "binary") {
+        $body_raw
+    } else {
+        try {
+            $body_raw | from json
+        } catch {
+            $body_raw
+        }
+    }
+    let response_headers = (parse-wire-headers $header_output)
+    let trailer_headers = (parse-wire-trailers $trailer_bytes)
+    let headers = (
+        $trailer_headers
+        | transpose key value
+        | reduce -f $response_headers {|header, result|
+            upsert-wire-header $result $header.key $header.value
+        }
+    )
     {
         status: ($metadata.status | into int)
         status_text: (http-status-text ($metadata.status | into int))
-        headers: $metadata.headers
+        headers: $headers
         body: $body
         _raw_body: $body_raw
         time_ms: ((($metadata.time_total | into float) * 1000) | math round)
@@ -866,8 +964,6 @@ def execute-request [
     # Build curl arguments
     let base_args = (build-curl-args $method $request_url $final_headers $final_body $auth)
     let curl_args = if $follow_redirects { $base_args | append "-L" } else { $base_args }
-    require-fileless-header-curl
-
     # Execute with retry loop (C8) — return-in-loop avoids null-typed mut variable
     let start_time = (date now)
     let max_attempts = ($retries + 1)
@@ -875,7 +971,7 @@ def execute-request [
 
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
-        let captured = (curl-with-fileless-metadata $curl_args $request_url $method)
+        let captured = (curl-with-fileless-metadata $curl_args $request_url)
         let output = $captured.output
 
         if $output.exit_code != 0 {
@@ -1093,8 +1189,9 @@ export def "api get" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
     let data_output = ($raw or $select != "" or $output != "pretty")
     let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
 
@@ -1128,6 +1225,7 @@ export def "api post" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
 
@@ -1142,7 +1240,7 @@ export def "api post" [
         }
         $b
     }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
 
     # Override Content-Type header for form encoding
     let req_headers = if not ($form | is-empty) {
@@ -1184,6 +1282,7 @@ export def "api put" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
 
@@ -1197,7 +1296,7 @@ export def "api put" [
         }
         $b
     }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
@@ -1238,6 +1337,7 @@ export def "api patch" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
 
@@ -1251,7 +1351,7 @@ export def "api patch" [
         }
         $b
     }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
@@ -1287,8 +1387,9 @@ export def "api delete" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $debug { $env.API_DEBUG = true }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
     let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay)
 
     if $result == null {
@@ -1324,6 +1425,7 @@ export def "api request" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     if $body_file != "" { read-body-file $body_file | ignore }
     if $debug { $env.API_DEBUG = true }
 
@@ -1337,7 +1439,7 @@ export def "api request" [
         }
         $b
     }
-    let resolved_auth = (api auth get-config $auth)
+    let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
 
     let req_headers = if not ($form | is-empty) {
         $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
@@ -1378,6 +1480,7 @@ export def "api send" [
     --retry-delay: int = 0              # Seconds between retries
 ] {
     validate-output-mode $output
+    require-curl-capability --dry-run=$dry_run
     validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
@@ -1444,9 +1547,9 @@ export def "api send" [
 
     # Build auth from override or request config
     let auth = if not ($auth | is-empty) {
-        api auth get-config $auth
+        resolve-request-auth $auth --dry-run=$dry_run
     } else if ($request.auth? | default null) != null {
-        api auth get-config $request.auth
+        resolve-request-auth $request.auth --dry-run=$dry_run
     } else {
         {}
     }
@@ -1789,6 +1892,7 @@ export def "api head" [
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
+    require-curl-capability
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
     let result = (execute-request "HEAD" $url -H $headers -a $resolved_auth --no-history=$no_history)
@@ -1823,6 +1927,7 @@ export def "api options" [
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
+    require-curl-capability
     if $debug { $env.API_DEBUG = true }
     let resolved_auth = (api auth get-config $auth)
     let result = (execute-request "OPTIONS" $url -H $headers -a $resolved_auth --no-history=$no_history)

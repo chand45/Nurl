@@ -206,8 +206,12 @@ try {
                 }
             }
 
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-            $crlf = [Environment]::NewLine
+            $bytes = if ($requestPath -eq '/binary-body') {
+                [byte[]](0, 255, 1, 128, 65, 66)
+            } else {
+                [System.Text.Encoding]::UTF8.GetBytes($payload)
+            }
+            $crlf = \"`r`n\"
             $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
@@ -216,11 +220,19 @@ try {
             } elseif ($requestPath -eq '/duplicate-headers') {
                 'X-Duplicate: first' + $crlf +
                 'X-Duplicate: second' + $crlf +
+                'X-Mixed-Dupe: first' + $crlf +
+                'x-mIxEd-DuPe: second' + $crlf +
                 'X-Marker-Like: NURL_RESPONSE_META_static_BEGIN' + $crlf
             } elseif ($requestPath -eq '/redirect') {
                 'Location: /sensitive-headers' + $crlf
             } elseif ($requestPath -eq '/early-hints') {
                 'X-Final: final-value' + $crlf
+            } elseif ($requestPath -eq '/case-headers') {
+                'ETag: \"case-etag\"' + $crlf +
+                'WWW-Authenticate: Bearer realm=\"nurl\"' + $crlf +
+                'X-RateLimit-Remaining: 42' + $crlf +
+                'x-CuStOm-AcRoNyM: mixed-value' + $crlf +
+                'X-Empty-Value:' + $crlf
             } else { '' }
             if ($requestPath -eq '/early-hints') {
                 $early = [System.Text.Encoding]::ASCII.GetBytes(
@@ -229,6 +241,25 @@ try {
                 )
                 $stream.Write($early, 0, $early.Length)
                 $stream.Flush()
+            }
+            if ($requestPath -eq '/trailers') {
+                $trailerHeader = [System.Text.Encoding]::ASCII.GetBytes(
+                    $statusLine + $crlf +
+                    'Content-Type: text/plain' + $crlf +
+                    'Transfer-Encoding: chunked' + $crlf +
+                    'Trailer: x-TrAiLeR-CaSe, Set-Cookie' + $crlf + $crlf
+                )
+                $chunked = [System.Text.Encoding]::ASCII.GetBytes(
+                    '4' + $crlf + 'BODY' + $crlf + '0' + $crlf +
+                    'X-Mixed-Trailer: first' + $crlf +
+                    'x-MiXeD-TrAiLeR: second' + $crlf +
+                    'x-TrAiLeR-CaSe: trailer-value' + $crlf +
+                    'Set-Cookie: trailer-secret-sentinel' + $crlf + $crlf
+                )
+                $stream.Write($trailerHeader, 0, $trailerHeader.Length)
+                $stream.Write($chunked, 0, $chunked.Length)
+                $stream.Flush()
+                continue
             }
             $header = if ($requestPath -eq '/empty-headers') {
                 $statusLine + $crlf + $crlf
@@ -388,6 +419,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/empty':
             encoded = b''
             content_type = 'text/plain'
+        elif self.path == '/binary-body':
+            encoded = bytes([0, 255, 1, 128, 65, 66])
+            content_type = 'application/octet-stream'
         else:
             encoded = b'{\"ok\":true}'
             content_type = 'application/json'
@@ -398,6 +432,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 + ('Content-Length: ' + str(len(encoded)) + '\\r\\n').encode('ascii')
                 + b'Connection: close\\r\\n\\r\\n'
                 + encoded
+            )
+            return
+        if self.path == '/trailers':
+            self.connection.sendall(
+                b'HTTP/1.1 200 OK\r\n'
+                b'Content-Type: text/plain\r\n'
+                b'Transfer-Encoding: chunked\r\n'
+                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\r\n\r\n'
+                b'4\r\nBODY\r\n0\r\n'
+                b'X-Mixed-Trailer: first\r\n'
+                b'x-MiXeD-TrAiLeR: second\r\n'
+                b'x-TrAiLeR-CaSe: trailer-value\r\n'
+                b'Set-Cookie: trailer-secret-sentinel\r\n\r\n'
             )
             return
         if self.path == '/early-hints':
@@ -414,11 +461,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/duplicate-headers':
             self.send_header('X-Duplicate', 'first')
             self.send_header('X-Duplicate', 'second')
+            self.send_header('X-Mixed-Dupe', 'first')
+            self.send_header('x-mIxEd-DuPe', 'second')
             self.send_header('X-Marker-Like', 'NURL_RESPONSE_META_static_BEGIN')
         elif self.path == '/redirect':
             self.send_header('Location', '/sensitive-headers')
         elif self.path == '/early-hints':
             self.send_header('X-Final', 'final-value')
+        elif self.path == '/case-headers':
+            self.send_header('ETag', '\"case-etag\"')
+            self.send_header('WWW-Authenticate', 'Bearer realm=\"nurl\"')
+            self.send_header('X-RateLimit-Remaining', '42')
+            self.send_header('x-CuStOm-AcRoNyM', 'mixed-value')
+            self.send_header('X-Empty-Value', '')
         if self.path == '/sensitive-headers':
             self.send_header('Set-Cookie', 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly')
             self.send_header('X-Session-Token', 'RESPONSE-TOKEN-SENTINEL')

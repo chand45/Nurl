@@ -207,20 +207,61 @@ public static class FakeCurl
     public static int Main(string[] args)
     {
         string version = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_VERSION") ?? "8.13.0";
+        string log = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_LOG");
         if (args.Length > 0 && args[0] == "--version")
         {
+            if (!String.IsNullOrEmpty(log))
+            {
+                File.AppendAllText(log, "version" + Environment.NewLine);
+            }
             Console.WriteLine("curl " + version + " Windows libcurl/" + version);
             return 0;
         }
-        string log = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_LOG");
         if (!String.IsNullOrEmpty(log))
         {
             File.AppendAllText(log, "request" + Environment.NewLine);
         }
-        if (Environment.GetEnvironmentVariable("NURL_FAKE_CURL_MODE") == "malformed")
+        string mode = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_MODE") ?? "";
+        if (mode == "malformed")
         {
             Console.Error.WriteLine("FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL");
             Console.Out.Write("UNTRUSTED-BODY-SENTINEL");
+            return 0;
+        }
+        if (mode == "size-too-large" || mode == "size-too-small" || mode == "malformed-trailer" || mode.StartsWith("invalid-trailer"))
+        {
+            string format = "";
+            for (int index = 0; index + 1 < args.Length; index++)
+            {
+                if (args[index] == "--write-out")
+                {
+                    format = args[index + 1];
+                    break;
+                }
+            }
+            string header = "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\n";
+            string trailer = mode == "malformed-trailer"
+                ? "NOT-A-TRAILER\r\n"
+                : (mode == "invalid-trailer-name"
+                    ? "Bad Name: value\r\n"
+                    : (mode == "invalid-trailer-leading-space"
+                        ? " Bad: value\r\n"
+                        : (mode == "invalid-trailer-before-colon"
+                            ? "Bad : value\r\n"
+                            : (mode == "invalid-trailer-tab-before-colon" ? "Bad\t: value\r\n" : ""))));
+            string output = header + "BODY" + trailer;
+            Console.Out.Write(output);
+            string headerSize = mode == "size-too-large"
+                ? "9999"
+                : (mode == "size-too-small" ? "10" : System.Text.Encoding.ASCII.GetByteCount(header).ToString());
+            string metadata = format
+                .Replace("%{stderr}", "")
+                .Replace("%{http_code}", "200")
+                .Replace("%{time_total}", "0.001")
+                .Replace("%{size_download}", "4")
+                .Replace("%{size_header}", headerSize)
+                .Replace("%{exitcode}", "0");
+            Console.Error.Write(metadata);
             return 0;
         }
         return 99;
@@ -239,11 +280,53 @@ Add-Type -TypeDefinition $source -OutputAssembly $env:NURL_FAKE_CURL_EXE -Output
             'printf "%s\n" "FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL" >&2
 printf "%s" "UNTRUSTED-BODY-SENTINEL"
 exit 0'
+        } else if $mode in ["size-too-large" "size-too-small" "malformed-trailer"] or ($mode | str starts-with "invalid-trailer") {
+            let header_size = if $mode == "size-too-large" {
+                "9999"
+            } else if $mode == "size-too-small" {
+                "10"
+            } else {
+                "52"
+            }
+            let trailer = if $mode == "malformed-trailer" {
+                "NOT-A-TRAILER\\r\\n"
+            } else if $mode == "invalid-trailer-name" {
+                "Bad Name: value\\r\\n"
+            } else if $mode == "invalid-trailer-leading-space" {
+                " Bad: value\\r\\n"
+            } else if $mode == "invalid-trailer-before-colon" {
+                "Bad : value\\r\\n"
+            } else if $mode == "invalid-trailer-tab-before-colon" {
+                "Bad\\t: value\\r\\n"
+            } else {
+                ""
+            }
+            'format=""
+previous=""
+for argument in "$@"; do
+  if [ "x$previous" = "x--write-out" ]; then
+    format="$argument"
+    break
+  fi
+  previous="$argument"
+done
+printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
+metadata=$(printf "%s" "$format" | sed \
+  -e "s/%{stderr}//g" \
+  -e "s/%{http_code}/200/g" \
+  -e "s/%{time_total}/0.001/g" \
+  -e "s/%{size_download}/4/g" \
+  -e "s/%{size_header}/HEADER_SIZE/g" \
+  -e "s/%{exitcode}/0/g")
+metadata=$(printf "%s" "$metadata" | sed "s/HEADER_SIZE/' + $header_size + '/g")
+printf "%s" "$metadata" >&2
+exit 0' | str replace "TRAILER_TEXT" $trailer
         } else {
             'exit 99'
         }
         $"#!/bin/sh
 if [ \"x$1\" = \"x--version\" ]; then
+  echo version >> \"$NURL_FAKE_CURL_LOG\"
   echo \"curl ($version) libcurl/($version)\"
   exit 0
 fi
@@ -311,9 +394,77 @@ def test-fileless-header-correctness-and-secrecy [] {
         let duplicate = (run-command-process $root (
             "let result = (api get "
             + (($base + "/duplicate-headers") | to nuon)
-            + " --raw --no-history); if ($result.response.headers | get 'X-Duplicate') != 'second' { error make {msg: 'duplicate-header compatibility changed'} }; if ($result.response.headers | get 'X-Marker-Like') != 'NURL_RESPONSE_META_static_BEGIN' { error make {msg: 'marker-like header changed'} }; print 'duplicate and marker headers parsed'"
+            + " --raw --no-history); let headers = $result.response.headers; if ($headers | get 'X-Duplicate') != 'second' { error make {msg: 'duplicate-header compatibility changed'} }; if ($headers | get 'x-mIxEd-DuPe') != 'second' { error make {msg: 'mixed-case duplicate did not keep final value/spelling'} }; if 'X-Mixed-Dupe' in ($headers | columns) { error make {msg: 'mixed-case duplicate kept the earlier alias'} }; if ($headers | get 'X-Marker-Like') != 'NURL_RESPONSE_META_static_BEGIN' { error make {msg: 'marker-like header changed'} }; print 'duplicate and marker headers parsed'"
         ))
         assert equal $duplicate.exit_code 0 $"duplicate response-header parse failed: ($duplicate.stderr)"
+
+        let trailers = (run-command-process $root (
+            "let result = (api get "
+            + (($base + "/trailers") | to nuon)
+            + " --raw); let headers = $result.response.headers; if $result.response.body != 'BODY' { error make {msg: 'trailers contaminated the body'} }; if ($headers | get 'x-TrAiLeR-CaSe') != 'trailer-value' { error make {msg: 'trailer spelling/value changed'} }; if ($headers | get 'x-MiXeD-TrAiLeR') != 'second' { error make {msg: 'mixed-case trailer duplicate changed'} }; if 'X-Mixed-Trailer' in ($headers | columns) { error make {msg: 'mixed-case trailer kept the earlier alias'} }; if ($headers | get 'Set-Cookie') != 'trailer-secret-sentinel' { error make {msg: 'sensitive trailer was not parsed'} }; print 'trailers separated and parsed'"
+        ))
+        assert equal $trailers.exit_code 0 $"response-trailer parse failed: ($trailers.stderr)"
+        let trailer_history_id = (api history list --limit 1 | first | get id)
+        let trailer_history = (api history show $trailer_history_id)
+        assert equal ($trailer_history.response.headers | get "Set-Cookie") "******" "sensitive trailer was not redacted in history"
+        let trailer_display = (run-command-process $root $"api get (($base + '/trailers') | to nuon) --include --no-history")
+        assert equal $trailer_display.exit_code 0 "response-trailer human rendering failed"
+        assert ($trailer_display.stdout | str contains "******") "sensitive trailer was not redacted in human output"
+        assert (not ($trailer_display.stdout | str contains "trailer-secret-sentinel")) "sensitive trailer leaked in human output"
+        let trailer_raw = (run-command-process $root $"api get (($base + '/trailers') | to nuon) --output raw --no-history")
+        assert equal $trailer_raw.exit_code 0 "raw trailer response failed"
+        assert equal ($trailer_raw.stdout | str trim) "BODY" "raw body included response trailers"
+
+        let exact_case = (run-command-process $root (
+            "let result = (api get "
+            + (($base + "/case-headers") | to nuon)
+            + " --raw --no-history); let headers = $result.response.headers; "
+            + "if ($headers | get 'ETag') != '\"case-etag\"' { error make {msg: 'ETag spelling/value changed'} }; "
+            + "if ($headers | get 'WWW-Authenticate') != 'Bearer realm=\"nurl\"' { error make {msg: 'WWW-Authenticate spelling/value changed'} }; "
+            + "if ($headers | get 'X-RateLimit-Remaining') != '42' { error make {msg: 'rate-limit spelling/value changed'} }; "
+            + "if ($headers | get 'x-CuStOm-AcRoNyM') != 'mixed-value' { error make {msg: 'custom spelling/value changed'} }; "
+            + "if ($headers | get 'Content-Type') != 'application/json' { error make {msg: 'ordinary header changed'} }; "
+            + "if ($headers | get 'X-Empty-Value') != '' { error make {msg: 'empty header value changed'} }; "
+            + "for alias in ['Etag' 'X-Ratelimit-Remaining' 'X-Custom-Acronym'] { if $alias in ($headers | columns) { error make {msg: $'guessed alias survived: ($alias)'} } }; "
+            + "print 'exact wire header casing preserved'"
+        ))
+        assert equal $exact_case.exit_code 0 $"exact response-header casing failed: ($exact_case.stderr)"
+        assert ($exact_case.stdout | str contains "exact wire header casing preserved")
+
+        api request create case-wire GET $"($base)/case-headers" --collection contracts | ignore
+        api auth basic set case-basic case-user case-password | ignore
+        api auth apikey set case-key case-api-key | ignore
+        api auth oauth2 configure case-oauth --client-id case-client --client-secret case-secret --token-url $"($base)/token" | ignore
+        mkdir ($root | path join "chains")
+        {
+            name: case-wire
+            steps: [{method: GET, url: $"($base)/case-headers"}]
+        } | to nuon --indent 4 | save -f ($root | path join "chains" "case-wire.nuon")
+        let case_route_commands = [
+            "let result = (api send case-wire --collection contracts --raw --no-history); $result.response.headers | get 'ETag'"
+            ("let result = (api chain run ([{method: GET, url: " + (($base + "/case-headers") | to nuon) + "}]) --quiet); $result.results.0.response.headers | get 'ETag'")
+            "let result = (api chain exec case-wire --quiet); $result.results.0.response.headers | get 'ETag'"
+            ("let result = (api get " + (($base + "/case-headers") | to nuon) + " -a {type: basic, username: case-user, password: case-password} --raw --no-history); $result.response.headers | get 'ETag'")
+            ("let result = (api get " + (($base + "/case-headers") | to nuon) + " -a {type: api_key, key: case-api-key, header: X-Case-Key} --raw --no-history); $result.response.headers | get 'ETag'")
+            ("let result = (api get " + (($base + "/case-headers") | to nuon) + " -a {type: oauth2, ref: case-oauth} --raw --no-history); $result.response.headers | get 'ETag'")
+            $"api get (($base + '/case-headers') | to nuon) --output headers --no-history | get 'ETag'"
+            $"api get (($base + '/case-headers') | to nuon) --select headers.ETag --no-history"
+            $"api get (($base + '/case-headers') | to nuon) --output json --no-history | from json | get response.headers.ETag"
+        ]
+        for command in $case_route_commands {
+            let routed = (run-command-process $root $command)
+            assert equal $routed.exit_code 0 $"header casing failed on a public execution route: ($routed.stderr)"
+            assert equal ($routed.stdout | str trim) "\"case-etag\"" "public execution route changed the exact ETag key/value"
+        }
+        api get $"($base)/case-headers" --output none
+        let latest_history = (api history list --limit 1 | first)
+        let persisted_case = (api history show $latest_history.id)
+        assert equal ($persisted_case.response.headers | get "ETag") "\"case-etag\"" "history changed response-header casing"
+        assert ("Etag" not-in ($persisted_case.response.headers | columns)) "history persisted a guessed response-header alias"
+        let case_display = (run-command-process $root $"api get (($base + '/case-headers') | to nuon) --include --no-history")
+        assert equal $case_display.exit_code 0 "human header rendering failed"
+        assert ($case_display.stdout | str contains "ETag") "human output changed exact response-header casing"
+        assert (not ($case_display.stdout | str contains "Etag")) "human output included a guessed response-header alias"
 
         let redirected = (run-command-process $root (
             "let result = (api get "
@@ -341,6 +492,13 @@ def test-fileless-header-correctness-and-secrecy [] {
             assert equal $result.exit_code 0 $"marker/scalar/empty body failed: ($path): ($result.stderr)"
         }
 
+        let binary_exact = (run-command-process $root (
+            "let result = (api get "
+            + (($base + "/binary-body") | to nuon)
+            + " --raw --no-history); if ($result.response.body | describe) !~ '^binary' { error make {msg: 'binary body was decoded as text'} }; if $result.response.body != 0x[00ff01804142] { error make {msg: 'binary body boundary changed'} }; print 'binary boundary preserved'"
+        ))
+        assert equal $binary_exact.exit_code 0 $"binary response-body split failed: ($binary_exact.stderr)"
+
         for mode in ["pretty" "raw" "body" "json" "headers" "status" "none"] {
             let result = (run-command-process $root $"api get (($base + '/success') | to nuon) --output ($mode) --no-history")
             assert equal $result.exit_code 0 $"fileless response failed for --output ($mode)"
@@ -358,6 +516,12 @@ def test-fileless-header-correctness-and-secrecy [] {
             $sensitive.stdout $sensitive.stderr
             $displayed.stdout $displayed.stderr
             $duplicate.stdout $duplicate.stderr
+            $trailers.stdout $trailers.stderr
+            $trailer_display.stdout $trailer_display.stderr
+            $trailer_raw.stdout $trailer_raw.stderr
+            $exact_case.stdout $exact_case.stderr
+            $case_display.stdout $case_display.stderr
+            $binary_exact.stdout $binary_exact.stderr
             $redirected.stdout $redirected.stderr
             $early.stdout $early.stderr
             $empty_headers.stdout $empty_headers.stderr
@@ -368,6 +532,7 @@ def test-fileless-header-correctness-and-secrecy [] {
             "RESPONSE-TOKEN-SENTINEL"
             $bearer_secret
             "INTERNAL-METADATA-SENTINEL"
+            "trailer-secret-sentinel"
         ] {
             assert (not ($public_streams | str contains $secret)) $"sensitive/internal header transport data leaked publicly: ($secret)"
             assert (not ($persisted | str contains $secret)) $"sensitive/internal header transport data leaked to persisted state: ($secret)"
@@ -417,11 +582,9 @@ def test-fileless-failure-retry-and-capability-contracts [] {
         assert-no-new-header-artifacts $baseline "curl timeout"
 
         let malformed_header = (run-command-process $root $"api get (($base + '/malformed-header') | to nuon) --output none --no-history")
-        assert ($malformed_header.exit_code != 0) "non-UTF8 structured response metadata unexpectedly succeeded"
-        assert equal ($malformed_header.stdout | str trim) "" "non-UTF8 structured response metadata wrote stdout"
-        assert ($malformed_header.stderr | str contains "malformed structured response metadata") "non-UTF8 structured response metadata diagnostic was not actionable"
-        assert (not ($malformed_header.stderr | str contains "NURL_RESPONSE_META_")) "non-UTF8 structured response metadata exposed its internal frame"
-        assert-no-new-header-artifacts $baseline "malformed wire header"
+        assert equal $malformed_header.exit_code 0 "obs-text response-header compatibility changed"
+        assert equal ($malformed_header.stderr | str trim) "" "obs-text response header wrote stderr"
+        assert-no-new-header-artifacts $baseline "obs-text wire header"
 
         let wire_before_selection = (command-error-wire-events $server | length)
         let selection = (run-command-process $root $"api get (($base + '/post-capture-failure') | to nuon) --select response.body.missing --no-history")
@@ -439,7 +602,7 @@ def test-fileless-failure-retry-and-capability-contracts [] {
         assert ($old_curl.stderr | str contains "requires curl 7.83.0 or newer") "unsupported curl diagnostic was not actionable"
         assert equal $old_curl.stderr ($old_curl.stderr | ansi strip) "unsupported curl diagnostic contained ANSI"
         assert equal (command-error-wire-events $server | length) $wire_before_unsupported "unsupported curl reached the network"
-        assert (not ($unsupported.log | path exists)) "unsupported curl advanced past the version preflight"
+        assert equal (open $unsupported.log --raw | lines) ["version"] "unsupported curl must run only its version preflight"
 
         let malformed_dir = ($fake_dir | path join "malformed")
         mkdir $malformed_dir
@@ -452,12 +615,147 @@ def test-fileless-failure-retry-and-capability-contracts [] {
             assert (not ($malformed_frame.stdout | str contains $forbidden)) $"malformed metadata leaked to stdout: ($forbidden)"
             assert (not ($malformed_frame.stderr | str contains $forbidden)) $"malformed metadata leaked to stderr: ($forbidden)"
         }
+
+        for mode in ["size-too-large" "size-too-small"] {
+            let mismatch_dir = ($fake_dir | path join $mode)
+            mkdir $mismatch_dir
+            let mismatch = (make-fake-curl $mismatch_dir "8.13.0" $mode)
+            let mismatch_result = (run-with-fake-curl $root $mismatch $"api get (($base + '/fake-transfer') | to nuon) --output none --no-history")
+            assert ($mismatch_result.exit_code != 0) $"mismatched size_header unexpectedly succeeded: ($mode)"
+            assert equal ($mismatch_result.stdout | str trim) "" $"mismatched size_header exposed body: ($mode)"
+            assert ($mismatch_result.stderr | str contains "response header size") $"mismatched size_header diagnostic was not actionable: ($mode): ($mismatch_result.stderr)"
+            assert (not ($mismatch_result.stderr | str contains "NURL_RESPONSE_META_")) $"mismatched size_header exposed internal framing: ($mode)"
+        }
+        for mode in [
+            "malformed-trailer"
+            "invalid-trailer-name"
+            "invalid-trailer-leading-space"
+            "invalid-trailer-before-colon"
+            "invalid-trailer-tab-before-colon"
+        ] {
+            let malformed_trailer_dir = ($fake_dir | path join $mode)
+            mkdir $malformed_trailer_dir
+            let malformed_trailer = (make-fake-curl $malformed_trailer_dir "8.13.0" $mode)
+            let malformed_trailer_result = (run-with-fake-curl $root $malformed_trailer $"api get (($base + '/fake-transfer') | to nuon) --output none --no-history")
+            assert ($malformed_trailer_result.exit_code != 0) $"malformed response trailers unexpectedly succeeded: ($mode)"
+            assert equal ($malformed_trailer_result.stdout | str trim) "" $"malformed response trailers exposed body output: ($mode)"
+            assert ($malformed_trailer_result.stderr | str contains "malformed response trailers") $"malformed trailer diagnostic was not actionable: ($mode): ($malformed_trailer_result.stderr)"
+            assert (not ($malformed_trailer_result.stderr | str contains "NURL_RESPONSE_META_")) $"malformed response trailers exposed internal framing: ($mode)"
+        }
         assert-no-new-header-artifacts $baseline "capability and malformed framing"
         null
     } catch {|error| $error }
 
     let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
     assert-no-new-header-artifacts $baseline "failure teardown"
+    cleanup $root
+    cleanup $infra
+    cleanup $fake_dir
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
+def test-unsupported-curl-precedes-oauth-and-state [] {
+    let root = (make-temp-dir "old-curl-oauth-preflight")
+    let infra = (make-temp-dir "old-curl-oauth-server")
+    let fake_dir = (make-temp-dir "old-curl-oauth-fake")
+    let server = (surface-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        api collection create preflight | ignore
+        api auth oauth2 configure obtain --client-id obtain-client --client-secret obtain-secret --token-url $"($base)/token" | ignore
+        api auth oauth2 configure refresh --client-id refresh-client --client-secret refresh-secret --token-url $"($base)/token" | ignore
+
+        let secrets_path = ($root | path join "secrets.nuon")
+        let expired = (
+            open $secrets_path
+            | update oauth.refresh.access_token "OLD-ACCESS-SENTINEL"
+            | update oauth.refresh.refresh_token "OLD-REFRESH-SENTINEL"
+            | update oauth.refresh.expires_at "2000-01-01T00:00:00Z"
+        )
+        $expired | to nuon --indent 4 | save -f $secrets_path
+
+        api request create oauth-saved GET $"($base)/saved-protected" --collection preflight --auth {type: oauth2, ref: obtain} | ignore
+        mkdir ($root | path join "chains")
+        {
+            name: preflight
+            steps: [{
+                method: GET
+                url: $"($base)/named-chain-protected"
+                auth: {type: oauth2, ref: refresh}
+            }]
+        } | to nuon --indent 4 | save -f ($root | path join "chains" "preflight.nuon")
+
+        let output_file = ($root | path join "must-not-exist.bin")
+        let save_file = ($root | path join "must-not-save.txt")
+        let missing_body_file = ($root | path join "missing-body.json")
+        let dry_run_before = (command-error-snapshot $root)
+        let dry_run_commands = [
+            $"api get (($base + '/dry-run-obtain') | to nuon) -a {type: oauth2, ref: obtain} --dry-run --no-history"
+            $"api get (($base + '/dry-run-refresh') | to nuon) -a {type: oauth2, ref: refresh} --dry-run --no-history"
+            "api request export oauth-saved --collection preflight"
+        ]
+        for command in $dry_run_commands {
+            let rendered = (run-command-process $root $command)
+            assert equal $rendered.exit_code 0 $"OAuth dry-run/export failed: ($command)"
+            assert ($rendered.stdout | str contains "Authorization: ******") $"OAuth dry-run/export omitted the redacted header: ($command)"
+            assert equal ($rendered.stderr | str trim) "" $"OAuth dry-run/export wrote stderr: ($command)"
+            for secret in ["obtain-secret" "refresh-secret" "OLD-ACCESS-SENTINEL" "OLD-REFRESH-SENTINEL"] {
+                assert (not ($rendered.stdout | str contains $secret)) $"OAuth dry-run/export leaked state: ($secret)"
+            }
+        }
+        assert equal (command-error-snapshot $root) $dry_run_before "OAuth dry-run/export mutated request/config/secret/history state"
+        assert equal (open $server.count_file --raw | str trim) "0" "OAuth dry-run/export reached the token endpoint"
+        assert equal (command-error-wire-events $server | length) 0 "OAuth dry-run/export reached a protected endpoint"
+
+        let unsupported_dir = ($fake_dir | path join "unsupported")
+        mkdir $unsupported_dir
+        let unsupported = (make-fake-curl $unsupported_dir "7.82.0" "unsupported")
+        let before = (command-error-snapshot $root)
+        let invalid_output = (run-with-fake-curl $root $unsupported $"api get (($base + '/invalid-output') | to nuon) --output Pretty --no-history")
+        assert ($invalid_output.exit_code != 0) "invalid output mode unexpectedly succeeded"
+        assert ($invalid_output.stderr | str contains "Unsupported output mode") "invalid output must precede curl capability probing"
+        assert (not ($unsupported.log | path exists)) "invalid output mode invoked curl capability probing"
+        let commands = [
+            $"api request -m GET (($base + '/direct-protected') | to nuon) -a {type: oauth2, ref: obtain} --output none --no-history"
+            $"api request -m POST (($base + '/body-file-protected') | to nuon) --body-file ($missing_body_file | to nuon) -a {type: oauth2, ref: obtain} --save ($save_file | to nuon) --output none --no-history"
+            "api send oauth-saved --collection preflight --output none --no-history"
+            $"api chain run ([{method: GET, url: (($base + '/inline-chain-protected') | to nuon), auth: {type: oauth2, ref: obtain}}]) --quiet | ignore"
+            "api chain exec preflight --quiet | ignore"
+            $"api get (($base + '/binary-protected') | to nuon) -a {type: oauth2, ref: refresh} --binary-save ($output_file | to nuon) --output none --no-history"
+        ]
+        for command in $commands {
+            let rejected = (run-with-fake-curl $root $unsupported $command)
+            assert ($rejected.exit_code != 0) $"unsupported curl unexpectedly executed: ($command)"
+            assert equal ($rejected.stdout | str trim) "" $"unsupported curl wrote stdout: ($command)"
+            assert ($rejected.stderr | str contains "requires curl 7.83.0 or newer") $"unsupported curl diagnostic was not actionable: ($command)"
+            assert equal $rejected.stderr ($rejected.stderr | ansi strip) $"unsupported curl diagnostic contained ANSI: ($command)"
+            for secret in ["obtain-secret" "refresh-secret" "OLD-ACCESS-SENTINEL" "OLD-REFRESH-SENTINEL" "ACCESS-TOKEN-SENTINEL" "REFRESH-TOKEN-SENTINEL"] {
+                assert (not ($rejected.stderr | str contains $secret)) $"unsupported curl leaked OAuth state: ($secret)"
+            }
+        }
+
+        assert equal (command-error-snapshot $root) $before "unsupported curl mutated request/config/secret/history state"
+        assert (not ($output_file | path exists)) "unsupported curl created the binary output file"
+        assert (not ($save_file | path exists)) "unsupported curl created the text output file"
+        assert equal (open $server.count_file --raw | str trim) "0" "unsupported curl reached the OAuth token endpoint"
+        assert equal (command-error-wire-events $server | length) 0 "unsupported curl reached a protected endpoint"
+        let invocations = (open $unsupported.log --raw | lines)
+        assert equal ($invocations | length) ($commands | length) "each rejected route must perform exactly one capability probe"
+        assert equal ($invocations | where $it != "version" | length) 0 "unsupported curl advanced beyond a version probe"
+
+        let valid_obtain = (api request -m GET $"($base)/valid-obtain" -a {type: oauth2, ref: obtain} --raw --no-history)
+        let valid_refresh = (api get $"($base)/valid-refresh" -a {type: oauth2, ref: refresh} --raw --no-history)
+        assert equal $valid_obtain.response.status 200 "supported curl OAuth obtain counterpart failed"
+        assert equal $valid_refresh.response.status 200 "supported curl OAuth refresh counterpart failed"
+        assert equal (open $server.count_file --raw | str trim) "2" "supported curl did not execute obtain and refresh"
+        assert equal (command-error-wire-events $server | length) 2 "supported curl did not reach both protected endpoints"
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
     cleanup $root
     cleanup $infra
     cleanup $fake_dir
@@ -574,6 +872,7 @@ export def run-suite-secure-header-capture [] {
     [
         (run-test "fileless headers preserve structured responses without secret/frame leaks" { test-fileless-header-correctness-and-secrecy })
         (run-test "fileless failures, retries, capability checks, and malformed frames create no artifacts" { test-fileless-failure-retry-and-capability-contracts })
+        (run-test "unsupported curl fails before OAuth, files, history, or network side effects" { test-unsupported-curl-precedes-oauth-and-state })
         (run-test "fileless parallel, interruption, and redirected-temp paths create no artifacts" { test-fileless-parallel-interruption-and-redirected-temp })
         (run-test "Windows local-request latency excludes cold PowerShell regressions" { test-fileless-windows-latency-regression })
     ]

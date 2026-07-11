@@ -67,7 +67,7 @@ echo -e "[2/4] Downloading nurl files..."
 curl -sSL "$REPO_URL/api.nu" -o "$NURL_HOME/api.nu"
 
 # Download nu_modules
-MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu")
+MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu" "curl-capability.nu")
 for module in "${MODULES[@]}"; do
     curl -sSL "$REPO_URL/nu_modules/$module" -o "$NURL_HOME/nu_modules/$module"
 done

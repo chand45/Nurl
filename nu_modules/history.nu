@@ -2,6 +2,7 @@
 # Saves and manages request/response history
 
 use command-error.nu [fail-command]
+use curl-capability.nu [require-curl-capability]
 
 # Get history directory
 def get-history-dir [] {
@@ -274,6 +275,7 @@ export def "api history resend" [
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {
+    require-curl-capability --dry-run=$dry_run
     let entry = (find-history-entry $id)
 
     if $entry == null {

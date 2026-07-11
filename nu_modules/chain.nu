@@ -2,10 +2,10 @@
 # Execute sequences of requests with variable extraction and passing
 
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use auth.nu ["api auth get-config"]
 use http.nu ["api request"]
 use resource-path.nu [validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
+use curl-capability.nu [require-curl-capability]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -47,6 +47,7 @@ export def "api chain run" [
     --quiet (-q)           # Suppress output
     --collection (-c): string = ""  # Collection context for variable resolution
 ] {
+    require-curl-capability
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
     }
@@ -112,11 +113,7 @@ export def "api chain run" [
         }
 
         # Get auth config
-        let auth = if ($request_config.auth? | default null) != null {
-            api auth get-config $request_config.auth
-        } else {
-            {}
-        }
+        let auth = ($request_config.auth? | default {})
 
         # Execute request
         let method = ($request_config.method? | default "GET")
@@ -198,6 +195,7 @@ export def "api chain exec" [
     --stop-on-error (-s)
     --quiet (-q)
 ] {
+    require-curl-capability
     let root = (get-api-root)
     let normalized = ($file | str replace --all "\\" "/")
     let explicit_syntax = (
