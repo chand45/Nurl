@@ -44,7 +44,7 @@ if ($curlVersionExit -ne 0) {
     exit 1
 }
 $curlVersionText = [string](($curlVersionOutput -split "\r?\n") | Select-Object -First 1)
-if ($curlVersionText -notmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
+if ($curlVersionText -cnotmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
     Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
     exit 1
 }

@@ -104,6 +104,38 @@ def installer-version-cases [] {
             diagnostic: ""
         }
         {
+            name: "uppercase-banner"
+            version_line: "CURL 7.75.0 (x86_64-pc-linux-gnu) libcurl/7.75.0"
+            probe_exit: 0
+            probe_stderr: ""
+            accepted: false
+            diagnostic: "Could not determine the installed curl version"
+        }
+        {
+            name: "mixed-case-banner"
+            version_line: "CuRl 7.75.0 (x86_64-pc-linux-gnu) libcurl/7.75.0"
+            probe_exit: 0
+            probe_stderr: ""
+            accepted: false
+            diagnostic: "Could not determine the installed curl version"
+        }
+        {
+            name: "uppercase-exe-banner"
+            version_line: "CURL.EXE 7.82.5 Windows libcurl/7.82.5 Schannel"
+            probe_exit: 0
+            probe_stderr: ""
+            accepted: false
+            diagnostic: "Could not determine the installed curl version"
+        }
+        {
+            name: "mixed-case-exe-banner"
+            version_line: "cUrL.ExE 7.82.5 Windows libcurl/7.82.5 Schannel"
+            probe_exit: 0
+            probe_stderr: ""
+            accepted: false
+            diagnostic: "Could not determine the installed curl version"
+        }
+        {
             name: "numeric-tail"
             version_line: "curl 7.75.0.1 libcurl/7.75.0"
             probe_exit: 0
