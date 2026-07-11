@@ -208,17 +208,37 @@ try {
 
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
             $crlf = [Environment]::NewLine
-            $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } else { 'HTTP/1.1 200 OK' }
+            $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
                 'X-Debug-Auth: Bearer RESPONSE-BEARER-SENTINEL' + $crlf
+            } elseif ($requestPath -eq '/duplicate-headers') {
+                'X-Duplicate: first' + $crlf +
+                'X-Duplicate: second' + $crlf +
+                'X-Marker-Like: NURL_RESPONSE_META_static_BEGIN' + $crlf
+            } elseif ($requestPath -eq '/redirect') {
+                'Location: /sensitive-headers' + $crlf
+            } elseif ($requestPath -eq '/early-hints') {
+                'X-Final: final-value' + $crlf
             } else { '' }
-            $header = $statusLine + $crlf +
-                'Content-Type: ' + $contentType + $crlf +
-                $extraHeaders +
-                'Content-Length: ' + $bytes.Length + $crlf +
-                'Connection: close' + $crlf + $crlf
+            if ($requestPath -eq '/early-hints') {
+                $early = [System.Text.Encoding]::ASCII.GetBytes(
+                    'HTTP/1.1 103 Early Hints' + $crlf +
+                    'Link: </style.css>; rel=preload' + $crlf + $crlf
+                )
+                $stream.Write($early, 0, $early.Length)
+                $stream.Flush()
+            }
+            $header = if ($requestPath -eq '/empty-headers') {
+                $statusLine + $crlf + $crlf
+            } else {
+                $statusLine + $crlf +
+                    'Content-Type: ' + $contentType + $crlf +
+                    $extraHeaders +
+                    'Content-Length: ' + $bytes.Length + $crlf +
+                    'Connection: close' + $crlf + $crlf
+            }
             $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($header)
             if ($requestPath -eq '/malformed-header') {
                 $headerBytes = [System.Text.Encoding]::ASCII.GetBytes(
@@ -380,8 +400,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 + encoded
             )
             return
-        self.send_response(503 if self.path == '/http-error' else 200)
+        if self.path == '/early-hints':
+            self.connection.sendall(
+                b'HTTP/1.1 103 Early Hints\\r\\n'
+                b'Link: </style.css>; rel=preload\\r\\n\\r\\n'
+            )
+        if self.path == '/empty-headers':
+            self.connection.sendall(b'HTTP/1.1 204 No Content\\r\\n\\r\\n')
+            return
+        status = 503 if self.path == '/http-error' else (302 if self.path == '/redirect' else 200)
+        self.send_response(status)
         self.send_header('Content-Type', content_type)
+        if self.path == '/duplicate-headers':
+            self.send_header('X-Duplicate', 'first')
+            self.send_header('X-Duplicate', 'second')
+            self.send_header('X-Marker-Like', 'NURL_RESPONSE_META_static_BEGIN')
+        elif self.path == '/redirect':
+            self.send_header('Location', '/sensitive-headers')
+        elif self.path == '/early-hints':
+            self.send_header('X-Final', 'final-value')
         if self.path == '/sensitive-headers':
             self.send_header('Set-Cookie', 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly')
             self.send_header('X-Session-Token', 'RESPONSE-TOKEN-SENTINEL')

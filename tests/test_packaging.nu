@@ -93,6 +93,13 @@ def test-installer-module-payloads [] {
         assert equal ($sh_modules | uniq | length) ($sh_modules | length) "shell installer payload must not contain duplicates"
         assert ("resource-path.nu" in $required)
         assert ("command-error.nu" in $required)
+        assert ("windows-private-capture.nu" not-in $required) "obsolete filesystem capture helper remains in the module closure"
+        assert (not (($repo | path join "nu_modules" "windows-private-capture.nu") | path exists)) "obsolete filesystem capture helper remains shipped"
+        for installer in ["install.ps1" "install.sh"] {
+            let source = (open ($repo | path join $installer) --raw)
+            assert ($source | str contains "7.83.0") $"($installer) does not enforce the documented curl feature floor"
+            assert (not ($source | str contains "windows-private-capture.nu")) $"($installer) still packages the obsolete capture helper"
+        }
 
         for payload in [
             {name: "powershell", modules: $ps_modules}

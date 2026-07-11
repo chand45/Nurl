@@ -6,7 +6,6 @@ use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars ex
 use auth.nu ["api auth get-config"]
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
-use windows-private-capture.nu [run-windows-private-capture]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -199,7 +198,6 @@ def build-curl-args [
     mut args = [
         "-s"                    # Silent mode
         "-S"                    # Show errors
-        "-w" "---RESPONSE_META---\n%{http_code}\n%{time_total}\n%{size_download}"
         "--max-time" (get-timeout | into string)
     ]
 
@@ -578,208 +576,162 @@ def parse-response-parts [body_raw: string, headers_raw: string, meta_part: stri
     }
 }
 
-def last-header-block [header_output: string] {
-    # curl appends one header block per redirect; only the final response is public.
-    let sep = if ($header_output | str contains "\r\n\r\n") { "\r\n\r\n" } else { "\n\n" }
-    let header_blocks = ($header_output | split row $sep)
-    let indices = ($header_blocks
-        | enumerate
-        | where {|block| $block.item | str trim | str starts-with "HTTP/"}
-        | get index)
-    if ($indices | is-empty) { "" } else { $header_blocks | get ($indices | last) }
-}
-
-def find-path-entries [path: string] {
-    let parent = ($path | path dirname)
-    let name = ($path | path basename)
-    let listing = try {
-        {value: (ls -la $parent), error: null}
+def require-fileless-header-curl [] {
+    let version_result = try {
+        {value: (curl --version | complete), error: null}
     } catch {|error|
         {value: null, error: $error}
     }
-    if $listing.error != null {
-        fail-command "Could not inspect private response-header capture storage"
+    if $version_result.error != null or $version_result.value.exit_code != 0 {
+        fail-command "Nurl requires curl 7.83.0 or newer for fileless response-header capture"
     }
-    $listing.value | where {|entry| ($entry.name | path basename) == $name }
+    let parsed = (
+        $version_result.value.stdout
+        | lines
+        | get 0
+        | parse --regex '^curl\s+(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)'
+    )
+    if ($parsed | is-empty) {
+        fail-command "Could not determine whether curl supports fileless response-header capture"
+    }
+    let version = ($parsed | get 0)
+    let major = ($version.major | into int)
+    let minor = ($version.minor | into int)
+    let patch = ($version.patch | into int)
+    let supported = (
+        $major > 7
+        or ($major == 7 and $minor > 83)
+        or ($major == 7 and $minor == 83 and $patch >= 0)
+    )
+    if not $supported {
+        fail-command $"Nurl requires curl 7.83.0 or newer for fileless response-header capture \(found ($major).($minor).($patch)\)"
+    }
 }
 
-def get-path-entry [path: string] {
-    let matches = (find-path-entries $path)
-    if ($matches | length) != 1 {
-        fail-command "Could not verify private response-header capture storage"
+def canonical-header-name [name: string] {
+    let acronyms = {
+        "cf": "CF"
+        "dnt": "DNT"
+        "md5": "MD5"
+        "te": "TE"
+        "www": "WWW"
+        "xss": "XSS"
     }
-    $matches | first
-}
-
-def get-posix-mode [path: string] {
-    let gnu = (^stat -c "%a" $path | complete)
-    let raw_mode = if $gnu.exit_code == 0 {
-        $gnu.stdout | str trim
-    } else {
-        let bsd = (^stat -f "%Lp" $path | complete)
-        if $bsd.exit_code != 0 {
-            fail-command "Could not verify private response-header capture permissions"
+    $name
+    | split row "-"
+    | each {|part|
+        if $part in ($acronyms | columns) {
+            $acronyms | get $part
+        } else {
+            $part | str capitalize
         }
-        $bsd.stdout | str trim
     }
-    try {
-        $raw_mode | into int
+    | str join "-"
+}
+
+def normalize-header-json [headers: record] {
+    $headers
+    | transpose name values
+    | reduce -f {} {|header, normalized|
+        let value_type = ($header.values | describe)
+        if not ($value_type | str starts-with "list") {
+            fail-command "Curl returned invalid structured response headers"
+        }
+        let value = if ($header.values | is-empty) {
+            ""
+        } else {
+            $header.values | get (($header.values | length) - 1)
+        }
+        $normalized | upsert (canonical-header-name $header.name) $value
+    }
+}
+
+def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_code: int] {
+    let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
+    let ending = $"NURL_RESPONSE_META_($token)_END"
+    let begin_parts = ($stderr | split row $begin)
+    if ($begin_parts | length) != 2 {
+        fail-command "Curl did not return trusted response metadata"
+    }
+    let end_parts = ($begin_parts | get 1 | split row $ending)
+    if ($end_parts | length) != 2 {
+        fail-command "Curl returned malformed response metadata framing"
+    }
+    if not (($end_parts | get 1 | str trim) | is-empty) {
+        fail-command "Curl returned malformed response metadata framing"
+    }
+    let metadata = try {
+        $end_parts | get 0 | str trim | from json
     } catch {
-        fail-command "Could not verify private response-header capture permissions"
+        fail-command "Curl returned malformed structured response metadata"
+    }
+    let required = ["headers" "status" "time_total" "size_download" "exit_code"]
+    for field in $required {
+        if $field not-in ($metadata | columns) {
+            fail-command "Curl returned incomplete structured response metadata"
+        }
+    }
+    let metadata_exit = try {
+        $metadata.exit_code | into int
+    } catch {
+        fail-command "Curl returned an invalid response metadata exit code"
+    }
+    if $metadata_exit != $expected_exit_code {
+        fail-command "Curl response metadata did not match the transfer result"
+    }
+    if not (($metadata.headers | describe) | str starts-with "record") {
+        fail-command "Curl returned invalid structured response headers"
+    }
+    {
+        diagnostics: ($begin_parts | get 0 | str trim)
+        metadata: ($metadata | update headers (normalize-header-json $metadata.headers))
     }
 }
 
-def verify-private-header-capture [capture: record] {
-    if $nu.os-info.name == "windows" {
-        return
-    }
-    let dir_entry = (get-path-entry $capture.dir)
-    if $dir_entry.type != "dir" or $dir_entry.target != null {
-        fail-command "Private response-header capture directory is not a real directory"
-    }
-    let file_entry = (get-path-entry $capture.file)
-    if $file_entry.type != "file" or $file_entry.target != null {
-        fail-command "Private response-header capture file is not a real file"
-    }
-    if $nu.os-info.name != "windows" {
-        if (get-posix-mode $capture.dir) != 700 or (get-posix-mode $capture.file) != 600 {
-            fail-command "Private response-header capture permissions are too broad"
-        }
-    }
-}
-
-def remove-private-header-capture [capture: record] {
-    if $nu.os-info.name == "windows" {
-        run-windows-private-capture cleanup $capture | ignore
-        return
-    }
-    if not (($capture.dir | path basename) | str starts-with "nurl-response-headers-") {
-        fail-command "Refusing to remove unowned response-header capture storage"
-    }
-    if ($capture.file | path dirname) != $capture.dir {
-        fail-command "Refusing to remove invalid response-header capture storage"
-    }
-
-    let dir_matches = (find-path-entries $capture.dir)
-    if ($dir_matches | is-empty) {
-        return
-    }
-    if ($dir_matches | length) != 1 {
-        fail-command "Could not verify private response-header capture storage during cleanup"
-    }
-    let dir_entry = ($dir_matches | first)
-    if $dir_entry.type != "dir" or $dir_entry.target != null {
-        rm -f $capture.dir
-        return
-    }
-
-    let file_matches = (find-path-entries $capture.file)
-    if ($file_matches | length) > 1 {
-        fail-command "Could not verify private response-header capture file during cleanup"
-    }
-    if not ($file_matches | is-empty) {
-        let file_entry = ($file_matches | first)
-        if $file_entry.type == "dir" and $file_entry.target == null {
-            fail-command "Response-header capture file was replaced by a directory"
-        }
-        rm -f $capture.file
-    }
-
-    rm -rf $capture.dir
-}
-
-def create-private-header-capture [] {
-    let capture_name = $"nurl-response-headers-(random uuid)"
-    if $nu.os-info.name == "windows" {
-        return (run-windows-private-capture create {name: $capture_name})
-    }
-    let capture_dir = ($nu.temp-dir | path join $capture_name)
-    let capture = {
-        dir: $capture_dir
-        file: ($capture_dir | path join "headers")
-    }
-    let created = try {
-        let made = (^mkdir -m 700 $capture.dir | complete)
-        if $made.exit_code != 0 {
-            fail-command "Could not create private response-header capture storage"
-        }
-
-        let dir_entry = (get-path-entry $capture.dir)
-        if $dir_entry.type != "dir" or $dir_entry.target != null {
-            fail-command "Private response-header capture directory is not a real directory"
-        }
-        # A restrictive umask makes the file private at creation, before curl can access it.
-        let made_file = (^sh -c 'umask 077; : > "$1"' sh $capture.file | complete)
-        if $made_file.exit_code != 0 {
-            fail-command "Could not create private response-header capture file"
-        }
-
-        verify-private-header-capture $capture
-        {value: $capture, error: null}
-    } catch {|error|
-        {value: null, error: $error}
-    }
-
-    if $created.error != null {
-        let cleanup_error = try {
-            remove-private-header-capture $capture
-            null
-        } catch {|error|
-            $error
-        }
-        if $cleanup_error != null {
-            fail-command "Could not establish or remove private response-header capture storage"
-        }
-        fail-command $"Could not establish private response-header capture storage: ($created.error.msg)"
-    }
-    $created.value
-}
-
-def curl-with-private-header-capture [curl_args: list, url: string, method: string] {
-    let capture = (create-private-header-capture)
-    let outcome = try {
-        let capture_args = ($curl_args | append ["--dump-header" $capture.file])
-        let final_args = if $method == "HEAD" {
-            let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
-            $capture_args | append ["--output" $null_device]
-        } else {
-            $capture_args
-        }
-        let output = (curl ...$final_args $url | complete)
-        let header_output = if $nu.os-info.name == "windows" {
-            let finished = (run-windows-private-capture finish $capture)
-            let decoded = ($finished.header_base64 | decode base64)
-            if ($decoded | describe) == "binary" { $decoded | decode utf-8 } else { $decoded }
-        } else {
-            verify-private-header-capture $capture
-            open $capture.file --raw
-        }
-        {value: {output: $output, headers: $header_output}, error: null, capture_removed: ($nu.os-info.name == "windows")}
-    } catch {|error|
-        {value: null, error: $error, capture_removed: false}
-    }
-    let cleanup_error = if $outcome.capture_removed {
-        null
+def curl-with-fileless-metadata [curl_args: list, url: string, method: string] {
+    let token = (random uuid | str replace --all "-" "")
+    let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
+    let ending = $"NURL_RESPONSE_META_($token)_END"
+    let write_out = (
+        "%{stderr}\n"
+        + $begin
+        + "\n{\"headers\":%{header_json},\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"exit_code\":\"%{exitcode}\"}\n"
+        + $ending
+        + "\n"
+    )
+    let framed_args = ($curl_args | append ["--write-out" $write_out])
+    let final_args = if $method == "HEAD" {
+        let null_device = if $nu.os-info.name == "windows" { "NUL" } else { "/dev/null" }
+        $framed_args | append ["--output" $null_device]
     } else {
-        try {
-            remove-private-header-capture $capture
-            null
-        } catch {|error|
-            $error
-        }
+        $framed_args
     }
-    if $cleanup_error != null {
-        fail-command $"Could not remove private response-header capture storage: ($cleanup_error.msg)"
+    let output = (curl ...$final_args $url | complete)
+    if (($output.stderr | describe) | str starts-with "binary") {
+        fail-command "Curl returned malformed structured response metadata"
     }
-    if $outcome.error != null {
-        fail-command $"Could not capture response headers privately: ($outcome.error.msg)"
+    let parsed = (parse-fileless-curl-stderr $output.stderr $token $output.exit_code)
+    {
+        output: ($output | update stderr $parsed.diagnostics)
+        metadata: $parsed.metadata
     }
-    $outcome.value
 }
 
-def parse-curl-response-captured [output: string, header_output: string] {
-    let split = (split-curl-output $output)
-    parse-response-parts $split.payload (last-header-block $header_output) $split.metadata
+def parse-curl-response-fileless [body_raw: string, metadata: record] {
+    let body = try {
+        $body_raw | from json
+    } catch {
+        $body_raw
+    }
+    {
+        status: ($metadata.status | into int)
+        status_text: (http-status-text ($metadata.status | into int))
+        headers: $metadata.headers
+        body: $body
+        _raw_body: $body_raw
+        time_ms: ((($metadata.time_total | into float) * 1000) | math round)
+        size_bytes: ($metadata.size_download | into int)
+    }
 }
 
 def parse-curl-response-internal [output: string] {
@@ -914,6 +866,7 @@ def execute-request [
     # Build curl arguments
     let base_args = (build-curl-args $method $request_url $final_headers $final_body $auth)
     let curl_args = if $follow_redirects { $base_args | append "-L" } else { $base_args }
+    require-fileless-header-curl
 
     # Execute with retry loop (C8) — return-in-loop avoids null-typed mut variable
     let start_time = (date now)
@@ -922,7 +875,7 @@ def execute-request [
 
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
-        let captured = (curl-with-private-header-capture $curl_args $request_url $method)
+        let captured = (curl-with-fileless-metadata $curl_args $request_url $method)
         let output = $captured.output
 
         if $output.exit_code != 0 {
@@ -934,7 +887,7 @@ def execute-request [
             return null
         }
 
-        let parsed = (parse-curl-response-captured $output.stdout $captured.headers)
+        let parsed = (parse-curl-response-fileless $output.stdout $captured.metadata)
         let response = ($parsed | reject _raw_body)
 
         # Retry on 5xx if attempts remain

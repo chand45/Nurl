@@ -19,6 +19,22 @@ if (-not $nuPath) {
     exit 1
 }
 
+$curlPath = Get-Command curl.exe -ErrorAction SilentlyContinue
+if (-not $curlPath) {
+    Write-Host "Error: curl 7.83.0 or newer is required." -ForegroundColor Red
+    exit 1
+}
+$curlVersionText = (& $curlPath.Source --version | Select-Object -First 1)
+if ($curlVersionText -notmatch '^curl\s+(\d+)\.(\d+)\.(\d+)') {
+    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
+    exit 1
+}
+$curlVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
+if ($curlVersion -lt [version]"7.83.0") {
+    Write-Host "Error: curl 7.83.0 or newer is required (found $curlVersion)." -ForegroundColor Red
+    exit 1
+}
+
 # Check if this is an update
 $IsUpdate = Test-Path $NurlHome
 
@@ -41,7 +57,7 @@ Write-Host "[2/4] Downloading nurl files..."
 Invoke-WebRequest -Uri "$RepoUrl/api.nu" -OutFile "$NurlHome\api.nu" -UseBasicParsing
 
 # Download nu_modules
-$Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu", "windows-private-capture.nu")
+$Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu")
 foreach ($module in $Modules) {
     Invoke-WebRequest -Uri "$RepoUrl/nu_modules/$module" -OutFile "$NurlHome\nu_modules\$module" -UseBasicParsing
 }

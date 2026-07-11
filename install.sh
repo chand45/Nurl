@@ -33,6 +33,18 @@ if ! command -v curl &> /dev/null; then
     exit 1
 fi
 
+CURL_VERSION="$(curl --version | head -n 1 | awk '{print $2}')"
+IFS=. read -r CURL_MAJOR CURL_MINOR CURL_PATCH_EXTRA <<< "$CURL_VERSION"
+CURL_PATCH="${CURL_PATCH_EXTRA%%[^0-9]*}"
+if [[ ! "$CURL_MAJOR" =~ ^[0-9]+$ || ! "$CURL_MINOR" =~ ^[0-9]+$ || ! "$CURL_PATCH" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
+    exit 1
+fi
+if (( CURL_MAJOR < 7 || (CURL_MAJOR == 7 && CURL_MINOR < 83) )); then
+    echo -e "${RED}Error: curl 7.83.0 or newer is required (found $CURL_VERSION).${NC}"
+    exit 1
+fi
+
 # Check if this is an update
 IS_UPDATE=false
 if [ -d "$NURL_HOME" ]; then
@@ -55,7 +67,7 @@ echo -e "[2/4] Downloading nurl files..."
 curl -sSL "$REPO_URL/api.nu" -o "$NURL_HOME/api.nu"
 
 # Download nu_modules
-MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu" "windows-private-capture.nu")
+MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu")
 for module in "${MODULES[@]}"; do
     curl -sSL "$REPO_URL/nu_modules/$module" -o "$NURL_HOME/nu_modules/$module"
 done

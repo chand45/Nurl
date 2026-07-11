@@ -31,7 +31,7 @@
 ## Requirements
 
 - [Nushell](https://www.nushell.sh/) >= 0.89
-- curl (system installed)
+- curl >= 7.83.0 (required for fileless structured response-header capture)
 
 ---
 
