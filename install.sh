@@ -15,6 +15,7 @@ NC='\033[0m' # No Color
 NURL_HOME="$HOME/.nurl"
 REPO_URL="https://raw.githubusercontent.com/chand45/Nurl/main"
 NUSHELL_CONFIG_DIR="$HOME/.config/nushell"
+MINIMUM_CURL_VERSION="7.75.0"
 
 echo -e "${BLUE}Installing Nurl - Terminal API Client${NC}"
 echo ""
@@ -36,12 +37,15 @@ fi
 CURL_VERSION="$(curl --version | head -n 1 | awk '{print $2}')"
 IFS=. read -r CURL_MAJOR CURL_MINOR CURL_PATCH_EXTRA <<< "$CURL_VERSION"
 CURL_PATCH="${CURL_PATCH_EXTRA%%[^0-9]*}"
+IFS=. read -r MINIMUM_CURL_MAJOR MINIMUM_CURL_MINOR MINIMUM_CURL_PATCH <<< "$MINIMUM_CURL_VERSION"
 if [[ ! "$CURL_MAJOR" =~ ^[0-9]+$ || ! "$CURL_MINOR" =~ ^[0-9]+$ || ! "$CURL_PATCH" =~ ^[0-9]+$ ]]; then
     echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
     exit 1
 fi
-if (( CURL_MAJOR < 7 || (CURL_MAJOR == 7 && CURL_MINOR < 83) )); then
-    echo -e "${RED}Error: curl 7.83.0 or newer is required (found $CURL_VERSION).${NC}"
+if (( CURL_MAJOR < MINIMUM_CURL_MAJOR ||
+      (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR < MINIMUM_CURL_MINOR) ||
+      (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR == MINIMUM_CURL_MINOR && CURL_PATCH < MINIMUM_CURL_PATCH) )); then
+    echo -e "${RED}Error: curl $MINIMUM_CURL_VERSION or newer is required (found $CURL_VERSION).${NC}"
     exit 1
 fi
 

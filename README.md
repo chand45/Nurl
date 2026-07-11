@@ -31,7 +31,7 @@
 ## Requirements
 
 - [Nushell](https://www.nushell.sh/) >= 0.89
-- curl >= 7.83.0 (required for fileless framed response metadata)
+- curl >= 7.75.0 (required for fileless framed response metadata)
 
 ---
 

@@ -96,9 +96,44 @@ def test-installer-module-payloads [] {
         assert ("curl-capability.nu" in $required)
         assert ("windows-private-capture.nu" not-in $required) "obsolete filesystem capture helper remains in the module closure"
         assert (not (($repo | path join "nu_modules" "windows-private-capture.nu") | path exists)) "obsolete filesystem capture helper remains shipped"
+        let runtime_source = (open ($repo | path join "nu_modules" "curl-capability.nu") --raw)
+        let runtime_floor = (
+            $runtime_source
+            | parse --regex 'const CURL_MIN_VERSION = "(?<version>\d+\.\d+\.\d+)"'
+            | get 0.version
+        )
+        let declared_floors = [
+            {
+                name: "PowerShell installer"
+                version: (
+                    open ($repo | path join "install.ps1") --raw
+                    | parse --regex '\$MinimumCurlVersion = \[version\]"(?<version>\d+\.\d+\.\d+)"'
+                    | get 0.version
+                )
+            }
+            {
+                name: "shell installer"
+                version: (
+                    open ($repo | path join "install.sh") --raw
+                    | parse --regex 'MINIMUM_CURL_VERSION="(?<version>\d+\.\d+\.\d+)"'
+                    | get 0.version
+                )
+            }
+            {
+                name: "README"
+                version: (
+                    open ($repo | path join "README.md") --raw
+                    | parse --regex 'curl >= (?<version>\d+\.\d+\.\d+)'
+                    | get 0.version
+                )
+            }
+        ]
+        for declaration in $declared_floors {
+            assert equal $declaration.version $runtime_floor $"($declaration.name) curl floor drifted from the runtime constant"
+        }
+        assert equal $runtime_floor "7.75.0" "runtime curl floor must match the newest fileless write-out feature"
         for installer in ["install.ps1" "install.sh"] {
             let source = (open ($repo | path join $installer) --raw)
-            assert ($source | str contains "7.83.0") $"($installer) does not enforce the documented curl feature floor"
             assert (not ($source | str contains "windows-private-capture.nu")) $"($installer) still packages the obsolete capture helper"
         }
 

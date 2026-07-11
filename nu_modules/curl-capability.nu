@@ -2,6 +2,8 @@
 
 use command-error.nu [fail-command]
 
+const CURL_MIN_VERSION = "7.75.0"
+
 export def require-curl-capability [--dry-run] {
     if $dry_run {
         return
@@ -13,13 +15,13 @@ export def require-curl-capability [--dry-run] {
         {value: null, error: $error}
     }
     if $version_result.error != null or $version_result.value.exit_code != 0 {
-        fail-command "Nurl requires curl 7.83.0 or newer for fileless response metadata"
+        fail-command $"Nurl requires curl ($CURL_MIN_VERSION) or newer for fileless response metadata"
     }
     let parsed = (
         $version_result.value.stdout
         | lines
         | get 0
-        | parse --regex '^curl\s+(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)'
+        | parse --regex '^curl(?:\.exe)?\s+(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?:[^0-9.].*)?$'
     )
     if ($parsed | is-empty) {
         fail-command "Could not determine whether curl supports fileless response metadata"
@@ -28,12 +30,13 @@ export def require-curl-capability [--dry-run] {
     let major = ($version.major | into int)
     let minor = ($version.minor | into int)
     let patch = ($version.patch | into int)
+    let required = ($CURL_MIN_VERSION | split row "." | each {|part| $part | into int })
     let supported = (
-        $major > 7
-        or ($major == 7 and $minor > 83)
-        or ($major == 7 and $minor == 83 and $patch >= 0)
+        $major > $required.0
+        or ($major == $required.0 and $minor > $required.1)
+        or ($major == $required.0 and $minor == $required.1 and $patch >= $required.2)
     )
     if not $supported {
-        fail-command $"Nurl requires curl 7.83.0 or newer for fileless response metadata \(found ($major).($minor).($patch)\)"
+        fail-command $"Nurl requires curl ($CURL_MIN_VERSION) or newer for fileless response metadata \(found ($major).($minor).($patch)\)"
     }
 }

@@ -192,7 +192,12 @@ except ProcessLookupError:
     wait-for-secure-process $pid false
 }
 
-def make-fake-curl [dir: string, version: string, mode: string] {
+def make-fake-curl [
+    dir: string
+    version: string
+    mode: string
+    --version-line: string = ""
+] {
     let log = ($dir | path join "request-invocations.log")
     if $nu.os-info.name == "windows" {
         let fake = ($dir | path join "curl.exe")
@@ -214,31 +219,43 @@ public static class FakeCurl
             {
                 File.AppendAllText(log, "version" + Environment.NewLine);
             }
-            Console.WriteLine("curl " + version + " Windows libcurl/" + version);
+            string versionLine = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_VERSION_LINE");
+            Console.WriteLine(String.IsNullOrEmpty(versionLine)
+                ? "curl " + version + " Windows libcurl/" + version
+                : versionLine);
+            return 0;
+        }
+        string mode = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_MODE") ?? "";
+        string format = "";
+        for (int index = 0; index + 1 < args.Length; index++)
+        {
+            if (args[index] == "--write-out")
+            {
+                format = args[index + 1];
+                break;
+            }
+        }
+        if (mode == "supported-oauth" && String.IsNullOrEmpty(format))
+        {
+            if (!String.IsNullOrEmpty(log))
+            {
+                File.AppendAllText(log, "token" + Environment.NewLine);
+            }
+            Console.Out.Write("{\"access_token\":\"SUPPORTED-ACCESS\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}");
             return 0;
         }
         if (!String.IsNullOrEmpty(log))
         {
             File.AppendAllText(log, "request" + Environment.NewLine);
         }
-        string mode = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_MODE") ?? "";
         if (mode == "malformed")
         {
             Console.Error.WriteLine("FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL");
             Console.Out.Write("UNTRUSTED-BODY-SENTINEL");
             return 0;
         }
-        if (mode == "size-too-large" || mode == "size-too-small" || mode == "malformed-trailer" || mode.StartsWith("invalid-trailer"))
+        if (mode == "supported" || mode == "supported-oauth" || mode == "size-too-large" || mode == "size-too-small" || mode == "malformed-trailer" || mode.StartsWith("invalid-trailer"))
         {
-            string format = "";
-            for (int index = 0; index + 1 < args.Length; index++)
-            {
-                if (args[index] == "--write-out")
-                {
-                    format = args[index + 1];
-                    break;
-                }
-            }
             string header = "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\n";
             string trailer = mode == "malformed-trailer"
                 ? "NOT-A-TRAILER\r\n"
@@ -277,10 +294,11 @@ Add-Type -TypeDefinition $source -OutputAssembly $env:NURL_FAKE_CURL_EXE -Output
     } else {
         let fake = ($dir | path join "curl")
         let request_action = if $mode == "malformed" {
-            'printf "%s\n" "FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL" >&2
+            'echo request >> "$NURL_FAKE_CURL_LOG"
+printf "%s\n" "FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL" >&2
 printf "%s" "UNTRUSTED-BODY-SENTINEL"
 exit 0'
-        } else if $mode in ["size-too-large" "size-too-small" "malformed-trailer"] or ($mode | str starts-with "invalid-trailer") {
+        } else if $mode in ["supported" "supported-oauth" "size-too-large" "size-too-small" "malformed-trailer"] or ($mode | str starts-with "invalid-trailer") {
             let header_size = if $mode == "size-too-large" {
                 "9999"
             } else if $mode == "size-too-small" {
@@ -310,6 +328,12 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
+if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ] && [ -z "$format" ]; then
+  echo token >> "$NURL_FAKE_CURL_LOG"
+  printf "%s" "{\"access_token\":\"SUPPORTED-ACCESS\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}"
+  exit 0
+fi
+echo request >> "$NURL_FAKE_CURL_LOG"
 printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
@@ -322,20 +346,24 @@ metadata=$(printf "%s" "$metadata" | sed "s/HEADER_SIZE/' + $header_size + '/g")
 printf "%s" "$metadata" >&2
 exit 0' | str replace "TRAILER_TEXT" $trailer
         } else {
-            'exit 99'
+            'echo request >> "$NURL_FAKE_CURL_LOG"
+exit 99'
         }
         $"#!/bin/sh
 if [ \"x$1\" = \"x--version\" ]; then
   echo version >> \"$NURL_FAKE_CURL_LOG\"
-  echo \"curl ($version) libcurl/($version)\"
+  if [ -n \"$NURL_FAKE_CURL_VERSION_LINE\" ]; then
+    printf \"%s\\n\" \"$NURL_FAKE_CURL_VERSION_LINE\"
+  else
+    echo \"curl ($version) libcurl/($version)\"
+  fi
   exit 0
 fi
-echo request >> \"$NURL_FAKE_CURL_LOG\"
 ($request_action)
 " | save -f $fake
         ^chmod 700 $fake
     }
-    {path: $dir, log: $log, version: $version, mode: $mode}
+    {path: $dir, log: $log, version: $version, version_line: $version_line, mode: $mode}
 }
 
 def run-with-fake-curl [root: string, fake: record, command: string] {
@@ -346,6 +374,8 @@ def run-with-fake-curl [root: string, fake: record, command: string] {
         + ($fake.log | to nuon)
         + "\n$env.NURL_FAKE_CURL_VERSION = "
         + ($fake.version | to nuon)
+        + "\n$env.NURL_FAKE_CURL_VERSION_LINE = "
+        + ($fake.version_line | to nuon)
         + "\n$env.NURL_FAKE_CURL_MODE = "
         + ($fake.mode | to nuon)
     )
@@ -594,15 +624,94 @@ def test-fileless-failure-retry-and-capability-contracts [] {
 
         let unsupported_dir = ($fake_dir | path join "unsupported")
         mkdir $unsupported_dir
-        let unsupported = (make-fake-curl $unsupported_dir "7.82.0" "unsupported")
+        let unsupported = (
+            make-fake-curl $unsupported_dir "7.74.0" "unsupported"
+                --version-line "curl 7.74.0-vendor (x86_64-pc-linux-gnu) libcurl/7.74.0"
+        )
+        let capability_state = (command-error-snapshot $root)
         let wire_before_unsupported = (command-error-wire-events $server | length)
         let old_curl = (run-with-fake-curl $root $unsupported $"api get (($base + '/must-not-run') | to nuon) --output none --no-history")
         assert ($old_curl.exit_code != 0) "unsupported curl version unexpectedly succeeded"
         assert equal ($old_curl.stdout | str trim) "" "unsupported curl version wrote stdout"
-        assert ($old_curl.stderr | str contains "requires curl 7.83.0 or newer") "unsupported curl diagnostic was not actionable"
+        assert ($old_curl.stderr | str contains "requires curl 7.75.0 or newer") "unsupported curl diagnostic was not actionable"
         assert equal $old_curl.stderr ($old_curl.stderr | ansi strip) "unsupported curl diagnostic contained ANSI"
         assert equal (command-error-wire-events $server | length) $wire_before_unsupported "unsupported curl reached the network"
         assert equal (open $unsupported.log --raw | lines) ["version"] "unsupported curl must run only its version preflight"
+
+        for supported_case in [
+            {
+                name: "minimum-posix-vendor"
+                version: "7.75.0"
+                version_line: "curl 7.75.0-acme1 (x86_64-pc-linux-gnu) libcurl/7.75.0"
+            }
+            {
+                name: "7.82-windows"
+                version: "7.82.5"
+                version_line: "curl.exe 7.82.5 Windows libcurl/7.82.5"
+            }
+            {
+                name: "current"
+                version: "8.13.0"
+                version_line: "curl 8.13.0 (x86_64-pc-linux-gnu) libcurl/8.13.0"
+            }
+        ] {
+            let supported_dir = ($fake_dir | path join $supported_case.name)
+            mkdir $supported_dir
+            let supported = (
+                make-fake-curl $supported_dir $supported_case.version "supported"
+                    --version-line $supported_case.version_line
+            )
+            let command = (
+                "let result = (api get "
+                + (($base + "/supported-" + $supported_case.name) | to nuon)
+                + " --raw --no-history); "
+                + "if $result.response.status != 200 { error make {msg: 'supported curl status was not parsed'} }; "
+                + "if ($result.response.headers | get 'ETag') != '\"fake\"' { error make {msg: 'supported curl headers were not parsed'} }; "
+                + "if $result.response.body != 'BODY' { error make {msg: 'supported curl body was not parsed'} }; "
+                + "print 'supported fileless transfer'"
+            )
+            let accepted = (run-with-fake-curl $root $supported $command)
+            assert equal $accepted.exit_code 0 $"compatible curl was rejected: ($supported_case.name): ($accepted.stderr)"
+            assert ($accepted.stdout | str contains "supported fileless transfer") $"compatible curl did not complete: ($supported_case.name)"
+            assert equal ($accepted.stderr | str trim) "" $"compatible curl wrote stderr: ($supported_case.name)"
+            assert equal (open $supported.log --raw | lines) ["version" "request"] $"compatible curl did not exercise one preflight and every framed write-out variable: ($supported_case.name)"
+        }
+
+        for malformed_case in [
+            {name: "missing-version", line: "curl"}
+            {name: "malformed-version", line: "curl release-seven-seventy-five"}
+            {name: "numeric-tail", line: "curl 7.75.0.1 libcurl/7.75.0"}
+        ] {
+            let malformed_version_dir = ($fake_dir | path join $malformed_case.name)
+            mkdir $malformed_version_dir
+            let malformed_version = (
+                make-fake-curl $malformed_version_dir "7.75.0" "supported"
+                    --version-line $malformed_case.line
+            )
+            let rejected = (run-with-fake-curl $root $malformed_version $"api get (($base + '/must-not-run') | to nuon) --output none --no-history")
+            assert ($rejected.exit_code != 0) $"malformed curl version unexpectedly succeeded: ($malformed_case.name)"
+            assert equal ($rejected.stdout | str trim) "" $"malformed curl version wrote stdout: ($malformed_case.name)"
+            assert ($rejected.stderr | str contains "Could not determine whether curl supports fileless response metadata") $"malformed curl version diagnostic was not actionable: ($malformed_case.name)"
+            assert equal $rejected.stderr ($rejected.stderr | ansi strip) $"malformed curl version diagnostic contained ANSI: ($malformed_case.name)"
+            assert equal (open $malformed_version.log --raw | lines) ["version"] $"malformed curl version advanced beyond the preflight: ($malformed_case.name)"
+        }
+
+        let missing_curl_dir = ($fake_dir | path join "missing-curl")
+        mkdir $missing_curl_dir
+        let missing_curl_command = (
+            "$env.PATH = ["
+            + ($missing_curl_dir | to nuon)
+            + "]\napi get "
+            + (($base + "/must-not-run") | to nuon)
+            + " --output none --no-history"
+        )
+        let missing_curl = (run-command-process $root $missing_curl_command)
+        assert ($missing_curl.exit_code != 0) "missing curl executable unexpectedly succeeded"
+        assert equal ($missing_curl.stdout | str trim) "" "missing curl executable wrote stdout"
+        assert ($missing_curl.stderr | str contains "requires curl 7.75.0 or newer") "missing curl diagnostic was not actionable"
+        assert equal $missing_curl.stderr ($missing_curl.stderr | ansi strip) "missing curl diagnostic contained ANSI"
+        assert equal (command-error-snapshot $root) $capability_state "capability boundary fixtures mutated workspace state"
+        assert equal (command-error-wire-events $server | length) $wire_before_unsupported "capability boundary fixtures reached the real network"
 
         let malformed_dir = ($fake_dir | path join "malformed")
         mkdir $malformed_dir
@@ -687,6 +796,19 @@ def test-unsupported-curl-precedes-oauth-and-state [] {
                 auth: {type: oauth2, ref: refresh}
             }]
         } | to nuon --indent 4 | save -f ($root | path join "chains" "preflight.nuon")
+        let history_id = (api history save {
+            method: GET
+            url: $"($base)/history-protected"
+            headers: {}
+            body: null
+        } {
+            status: 200
+            status_text: OK
+            headers: {}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        })
 
         let output_file = ($root | path join "must-not-exist.bin")
         let save_file = ($root | path join "must-not-save.txt")
@@ -712,7 +834,10 @@ def test-unsupported-curl-precedes-oauth-and-state [] {
 
         let unsupported_dir = ($fake_dir | path join "unsupported")
         mkdir $unsupported_dir
-        let unsupported = (make-fake-curl $unsupported_dir "7.82.0" "unsupported")
+        let unsupported = (
+            make-fake-curl $unsupported_dir "7.74.0" "unsupported"
+                --version-line "curl 7.74.0-vendor (x86_64-pc-linux-gnu) libcurl/7.74.0"
+        )
         let before = (command-error-snapshot $root)
         let invalid_output = (run-with-fake-curl $root $unsupported $"api get (($base + '/invalid-output') | to nuon) --output Pretty --no-history")
         assert ($invalid_output.exit_code != 0) "invalid output mode unexpectedly succeeded"
@@ -725,12 +850,13 @@ def test-unsupported-curl-precedes-oauth-and-state [] {
             $"api chain run ([{method: GET, url: (($base + '/inline-chain-protected') | to nuon), auth: {type: oauth2, ref: obtain}}]) --quiet | ignore"
             "api chain exec preflight --quiet | ignore"
             $"api get (($base + '/binary-protected') | to nuon) -a {type: oauth2, ref: refresh} --binary-save ($output_file | to nuon) --output none --no-history"
+            $"api history resend ($history_id | to nuon) -a {type: oauth2, ref: obtain} --raw | ignore"
         ]
         for command in $commands {
             let rejected = (run-with-fake-curl $root $unsupported $command)
             assert ($rejected.exit_code != 0) $"unsupported curl unexpectedly executed: ($command)"
             assert equal ($rejected.stdout | str trim) "" $"unsupported curl wrote stdout: ($command)"
-            assert ($rejected.stderr | str contains "requires curl 7.83.0 or newer") $"unsupported curl diagnostic was not actionable: ($command)"
+            assert ($rejected.stderr | str contains "requires curl 7.75.0 or newer") $"unsupported curl diagnostic was not actionable: ($command)"
             assert equal $rejected.stderr ($rejected.stderr | ansi strip) $"unsupported curl diagnostic contained ANSI: ($command)"
             for secret in ["obtain-secret" "refresh-secret" "OLD-ACCESS-SENTINEL" "OLD-REFRESH-SENTINEL" "ACCESS-TOKEN-SENTINEL" "REFRESH-TOKEN-SENTINEL"] {
                 assert (not ($rejected.stderr | str contains $secret)) $"unsupported curl leaked OAuth state: ($secret)"
@@ -746,6 +872,53 @@ def test-unsupported-curl-precedes-oauth-and-state [] {
         assert equal ($invocations | length) ($commands | length) "each rejected route must perform exactly one capability probe"
         assert equal ($invocations | where $it != "version" | length) 0 "unsupported curl advanced beyond a version probe"
 
+        for supported_case in [
+            {
+                name: "minimum-obtain"
+                version: "7.75.0"
+                version_line: "curl 7.75.0-acme1 (x86_64-pc-linux-gnu) libcurl/7.75.0"
+                auth_ref: "obtain"
+            }
+            {
+                name: "7.82-refresh"
+                version: "7.82.5"
+                version_line: "curl.exe 7.82.5 Windows libcurl/7.82.5"
+                auth_ref: "refresh"
+            }
+        ] {
+            let supported_dir = ($fake_dir | path join $supported_case.name)
+            mkdir $supported_dir
+            let supported = (
+                make-fake-curl $supported_dir $supported_case.version "supported-oauth"
+                    --version-line $supported_case.version_line
+            )
+            let command = (
+                "let result = (api get "
+                + (($base + "/supported-" + $supported_case.name) | to nuon)
+                + " -a {type: oauth2, ref: "
+                + ($supported_case.auth_ref | to nuon)
+                + "} --raw --no-history); "
+                + "if $result.response.status != 200 { error make {msg: 'supported OAuth status was not parsed'} }; "
+                + "if ($result.response.headers | get 'ETag') != '\"fake\"' { error make {msg: 'supported OAuth headers were not parsed'} }; "
+                + "if $result.response.body != 'BODY' { error make {msg: 'supported OAuth body was not parsed'} }"
+            )
+            let accepted = (run-with-fake-curl $root $supported $command)
+            assert equal $accepted.exit_code 0 $"compatible curl OAuth path failed: ($supported_case.name): ($accepted.stderr)"
+            assert equal ($accepted.stderr | str trim) "" $"compatible curl OAuth path wrote stderr: ($supported_case.name)"
+            assert equal (open $supported.log --raw | lines) ["version" "token" "request"] $"compatible curl OAuth path did not exercise preflight, token, and framed transfer: ($supported_case.name)"
+        }
+        assert equal (open $server.count_file --raw | str trim) "0" "controlled compatible wrappers unexpectedly reached the real token endpoint"
+        assert equal (command-error-wire-events $server | length) 0 "controlled compatible wrappers unexpectedly reached a real protected endpoint"
+
+        api auth oauth2 configure obtain --client-id obtain-client --client-secret obtain-secret --token-url $"($base)/token" | ignore
+        api auth oauth2 configure refresh --client-id refresh-client --client-secret refresh-secret --token-url $"($base)/token" | ignore
+        let reset_refresh = (
+            open $secrets_path
+            | update oauth.refresh.access_token "OLD-ACCESS-SENTINEL"
+            | update oauth.refresh.refresh_token "OLD-REFRESH-SENTINEL"
+            | update oauth.refresh.expires_at "2000-01-01T00:00:00Z"
+        )
+        $reset_refresh | to nuon --indent 4 | save -f $secrets_path
         let valid_obtain = (api request -m GET $"($base)/valid-obtain" -a {type: oauth2, ref: obtain} --raw --no-history)
         let valid_refresh = (api get $"($base)/valid-refresh" -a {type: oauth2, ref: refresh} --raw --no-history)
         assert equal $valid_obtain.response.status 200 "supported curl OAuth obtain counterpart failed"

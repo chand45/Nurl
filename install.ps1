@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $NurlHome = "$env:USERPROFILE\.nurl"
 $RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
 $NushellConfigDir = "$env:APPDATA\nushell"
+$MinimumCurlVersion = [version]"7.75.0"
 
 Write-Host "Installing Nurl - Terminal API Client" -ForegroundColor Blue
 Write-Host ""
@@ -21,7 +22,7 @@ if (-not $nuPath) {
 
 $curlPath = Get-Command curl.exe -ErrorAction SilentlyContinue
 if (-not $curlPath) {
-    Write-Host "Error: curl 7.83.0 or newer is required." -ForegroundColor Red
+    Write-Host "Error: curl $MinimumCurlVersion or newer is required." -ForegroundColor Red
     exit 1
 }
 $curlVersionText = (& $curlPath.Source --version | Select-Object -First 1)
@@ -30,8 +31,8 @@ if ($curlVersionText -notmatch '^curl\s+(\d+)\.(\d+)\.(\d+)') {
     exit 1
 }
 $curlVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
-if ($curlVersion -lt [version]"7.83.0") {
-    Write-Host "Error: curl 7.83.0 or newer is required (found $curlVersion)." -ForegroundColor Red
+if ($curlVersion -lt $MinimumCurlVersion) {
+    Write-Host "Error: curl $MinimumCurlVersion or newer is required (found $curlVersion)." -ForegroundColor Red
     exit 1
 }
 
