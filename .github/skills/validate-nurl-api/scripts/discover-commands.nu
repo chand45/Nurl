@@ -7,11 +7,12 @@
 # Reports:
 #   * uncovered : defined in code but missing from the manifest  -> ADD an entry
 #   * stale     : in the manifest but no longer defined in code   -> REMOVE/RENAME
-#   * duplicates: a command appears more than once in the manifest -> KEEP one entry
+#   * source duplicates: a command is exported more than once       -> KEEP one export
+#   * duplicates: a command appears more than once in the manifest  -> KEEP one entry
 #   * help-drift (with --check-help): a command shown in `api help`
 #                text that is not actually defined                -> fix the help/code
 #
-# Exit code is non-zero when uncovered or stale gaps exist, so this can gate CI.
+# Exit code is non-zero when any coverage, duplicate, or help gap exists.
 #
 # Usage (run with the full path to nu.exe if nu is not on PATH):
 #   nu discover-commands.nu                      # auto-detect repo root
@@ -36,7 +37,6 @@ def parse-defined [root: string] {
         | flatten
     }
     | flatten
-    | uniq-by name
     | sort-by name
 }
 
@@ -76,7 +76,19 @@ def main [
         error make { msg: $"nu_modules not found under repo root: ($repo_root). Pass --root <repo>." }
     }
 
-    let defined = (parse-defined $repo_root)
+    let defined_exports = (parse-defined $repo_root)
+    let source_duplicates = (
+        $defined_exports
+        | group-by name
+        | transpose command entries
+        | where {|row| ($row.entries | length) > 1 }
+        | each {|row| {
+            command: $row.command
+            files: ($row.entries | get file | uniq | sort)
+            count: ($row.entries | length)
+        }}
+    )
+    let defined = ($defined_exports | uniq-by name)
     let defined_names = ($defined | get name)
     let manifest = (open $manifest_path)
     let covered = ($manifest | get command)
@@ -98,16 +110,18 @@ def main [
         }
     } else { [] })
 
-    let gap_count = (($uncovered | length) + ($stale | length) + ($duplicates | length) + ($help_drift | length))
+    let gap_count = (($uncovered | length) + ($stale | length) + ($source_duplicates | length) + ($duplicates | length) + ($help_drift | length))
 
     if $json {
         let payload = {
             repo_root: $repo_root
             manifest: $manifest_path
             defined_count: ($defined | length)
+            defined_export_count: ($defined_exports | length)
             covered_count: ($covered | length)
             uncovered: ($uncovered | each {|u| { command: $u.name, file: $u.file }})
             stale: $stale
+            source_duplicates: $source_duplicates
             duplicates: $duplicates
             help_drift: $help_drift
             ok: ($gap_count == 0)
@@ -120,6 +134,7 @@ def main [
     print $"  repo root : ($repo_root)"
     print $"  manifest  : ($manifest_path)"
     print $"  defined   : ($defined | length) commands in code"
+    print $"  exports   : ($defined_exports | length) command exports before deduplication"
     print $"  covered   : ($covered | length) entries in manifest"
     print ""
 
@@ -138,6 +153,15 @@ def main [
         print $"(ansi red_bold)STALE \(($stale | length)\)(ansi reset)  in coverage.nuon, not defined in code:"
         $stale | each {|s| print $"    - ($s)" }
         print $"  -> remove or rename these entries in coverage.nuon"
+    }
+
+    print ""
+    if ($source_duplicates | is-empty) {
+        print $"(ansi green)OK(ansi reset)  no duplicate command exports in source"
+    } else {
+        print $"(ansi red_bold)SOURCE DUPLICATES \(($source_duplicates | length)\)(ansi reset)  repeated export names:"
+        print ($source_duplicates | table)
+        print $"  -> keep one source export per public command name"
     }
 
     print ""

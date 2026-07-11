@@ -93,17 +93,19 @@ def start-windows-oauth-server [tmp: string] {
     let launcher_script = ($tmp | path join "oauth-launcher.ps1")
     let port_file = ($tmp | path join "oauth-port.txt")
     let count_file = ($tmp | path join "oauth-count.txt")
+    let wire_file = ($tmp | path join "oauth-wire.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
 
-    let server_source = "param($PortFile, $CountFile, $StopFile)
+    let server_source = "param($PortFile, $CountFile, $WireFile, $StopFile)
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 [System.IO.File]::WriteAllText($PortFile, [string]$port)
 [System.IO.File]::WriteAllText($CountFile, '0')
+[System.IO.File]::WriteAllText($WireFile, '')
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-    while (-not (Test-Path -LiteralPath $StopFile) -and $clock.Elapsed.TotalSeconds -lt 60) {
+    while (-not (Test-Path -LiteralPath $StopFile) -and $clock.Elapsed.TotalSeconds -lt 180) {
         if (-not $listener.Pending()) {
             Start-Sleep -Milliseconds 25
             continue
@@ -114,9 +116,13 @@ try {
             $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::ASCII, $false, 1024, $true)
             $requestLine = $reader.ReadLine()
             $contentLength = 0
+            $authorization = ''
             while (($line = $reader.ReadLine()) -ne '') {
                 if ($line -match '(?i)^Content-Length:\\s*(\\d+)') {
                     $contentLength = [int]$Matches[1]
+                }
+                if ($line -match '(?i)^Authorization:\\s*(.*)$') {
+                    $authorization = $Matches[1]
                 }
             }
             $body = ''
@@ -129,7 +135,7 @@ try {
             if ($requestLine -match ' /ready ') {
                 $payload = 'ready'
                 $contentType = 'text/plain'
-            } else {
+            } elseif ($requestLine -match ' /token ') {
                 $count = [int]([System.IO.File]::ReadAllText($CountFile)) + 1
                 [System.IO.File]::WriteAllText($CountFile, [string]$count)
                 if ($body -match 'grant_type=refresh_token') {
@@ -146,6 +152,11 @@ try {
                     }
                 }
                 $payload = $response | ConvertTo-Json -Compress
+                $contentType = 'application/json'
+            } else {
+                $requestPath = ($requestLine -split ' ')[1]
+                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + [Environment]::NewLine)
+                $payload = '{\"ok\":true}'
                 $contentType = 'application/json'
             }
 
@@ -166,7 +177,7 @@ try {
 } finally {
     $listener.Stop()
 }"
-    let launcher_source = "param($ServerScript, $PortFile, $CountFile, $StopFile)
+    let launcher_source = "param($ServerScript, $PortFile, $CountFile, $WireFile, $StopFile)
 $arguments = @(
     '-NoProfile',
     '-NonInteractive',
@@ -176,6 +187,7 @@ $arguments = @(
     ('\"{0}\"' -f $ServerScript),
     ('\"{0}\"' -f $PortFile),
     ('\"{0}\"' -f $CountFile),
+    ('\"{0}\"' -f $WireFile),
     ('\"{0}\"' -f $StopFile)
 )
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden
@@ -183,13 +195,14 @@ $process.Id"
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $stop_file | complete)
+    let launched = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file | complete)
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
         port: 0
         port_file: $port_file
         count_file: $count_file
+        wire_file: $wire_file
         stop_file: $stop_file
     }
 }
@@ -199,6 +212,7 @@ def start-posix-oauth-server [tmp: string] {
     let launcher_script = ($tmp | path join "oauth-launcher.py")
     let port_file = ($tmp | path join "oauth-port.txt")
     let count_file = ($tmp | path join "oauth-count.txt")
+    let wire_file = ($tmp | path join "oauth-wire.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
     let python = if (which python3 | is-not-empty) {
         "python3"
@@ -214,7 +228,7 @@ import os
 import sys
 import time
 
-port_file, count_file, stop_file = sys.argv[1:4]
+port_file, count_file, wire_file, stop_file = sys.argv[1:5]
 count = 0
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -222,12 +236,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'ready')
+        if self.path == '/ready':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'ready')
+        else:
+            self.send_protected()
 
     def do_POST(self):
+        if self.path != '/token':
+            self.send_protected()
+            return
         global count
         length = int(self.headers.get('Content-Length', '0'))
         body = self.rfile.read(length).decode('utf-8')
@@ -253,13 +273,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def send_protected(self):
+        authorization = self.headers.get('Authorization', '')
+        with open(wire_file, 'a', encoding='utf-8') as handle:
+            handle.write(self.path + '\\t' + authorization + '\\n')
+        encoded = json.dumps({'ok': True}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
 server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
 server.timeout = 0.1
 with open(port_file, 'w', encoding='utf-8') as handle:
     handle.write(str(server.server_port))
 with open(count_file, 'w', encoding='utf-8') as handle:
     handle.write('0')
-deadline = time.time() + 60
+with open(wire_file, 'w', encoding='utf-8') as handle:
+    handle.write('')
+deadline = time.time() + 180
 while not os.path.exists(stop_file) and time.time() < deadline:
     server.handle_request()
 server.server_close()
@@ -279,13 +312,14 @@ print(process.pid)
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^$python $launcher_script $python $server_script $port_file $count_file $stop_file | complete)
+    let launched = (^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file | complete)
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
         port: 0
         port_file: $port_file
         count_file: $count_file
+        wire_file: $wire_file
         stop_file: $stop_file
     }
 }
@@ -485,10 +519,218 @@ def test-oauth2-success-streams-and-persistence [] {
     }
 }
 
+def command-error-wire-events [server: record] {
+    if not ($server.wire_file | path exists) {
+        return []
+    }
+    open $server.wire_file --raw
+    | lines
+    | where {|line| not ($line | is-empty) }
+    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>.*)$'
+}
+
+def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {
+    assert equal ($result.stderr | str trim) "" $"($label) wrote unexpected stderr"
+    let combined = $"($result.stdout)\n($result.stderr)"
+    for secret in $secrets {
+        assert (not ($combined | str contains $secret)) $"($label) exposed an authentication value"
+    }
+}
+
+def test-authentication-wire-and-redaction [] {
+    let root = (make-temp-dir "auth-wire")
+    let infra = (make-temp-dir "auth-wire-server")
+    let binary_path = ($root | path join "wire-download.bin")
+    let server_result = try {
+        {server: (start-command-error-server $infra), error: null}
+    } catch {|error|
+        {server: null, error: $error}
+    }
+    if $server_result.error != null {
+        cleanup $root
+        cleanup $infra
+        error make {msg: $server_result.error.msg}
+    }
+    let server = $server_result.server
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base_url = $"http://127.0.0.1:($server.port)"
+        let bearer_token = $"wire-(random uuid)"
+        let prefixed_token = $"prefixed-(random uuid)"
+        let client_secret = $"client-(random uuid)"
+        let basic_password = $"basic-(random uuid)"
+        api auth bearer set wire-bearer $bearer_token | ignore
+        api auth bearer set wire-prefixed $"Bearer ($prefixed_token)" | ignore
+        api auth basic set wire-basic wire-user $basic_password | ignore
+        api collection create wire | ignore
+        api request create wire-saved GET $"($base_url)/saved" --collection wire --auth {type: bearer, token_ref: wire-bearer} | ignore
+        api request create wire-chain-request GET $"($base_url)/chain-named" --collection wire --auth {type: bearer, token_ref: wire-bearer} | ignore
+        api chain create wire-chain | ignore
+        {
+            name: "wire-chain"
+            description: ""
+            steps: [{request: "wire-chain-request"}]
+        } | to nuon --indent 4 | save -f ($root | path join "chains" "wire-chain.nuon")
+        api auth oauth2 configure wire-oauth --client-id wire-client --client-secret $client_secret --token-url $"($base_url)/token" | ignore
+
+        mut secrets = [$bearer_token $prefixed_token $client_secret $basic_password]
+        let direct = (run-command-process $root $"api request -m GET (($base_url + '/direct') | to nuon) -a {type: bearer, token_ref: wire-bearer} --raw --no-history")
+        assert equal $direct.exit_code 0 "direct authenticated request failed"
+        assert-no-auth-leak $direct $secrets "direct authenticated request"
+
+        let prefixed = (run-command-process $root $"api request -m GET (($base_url + '/prefixed') | to nuon) -a {type: bearer, token_ref: wire-prefixed} --raw --no-history")
+        assert equal $prefixed.exit_code 0 "prefixed bearer request failed"
+        assert-no-auth-leak $prefixed $secrets "prefixed bearer request"
+
+        let basic = (run-command-process $root $"api request -m GET (($base_url + '/basic') | to nuon) -a {type: basic, creds_ref: wire-basic} --raw --no-history")
+        assert equal $basic.exit_code 0 "basic-auth regression request failed"
+        assert-no-auth-leak $basic $secrets "basic-auth regression request"
+
+        let debugged = (run-command-process $root $"api request -m GET (($base_url + '/debug') | to nuon) -a {type: bearer, token_ref: wire-bearer} --debug --raw --no-history")
+        assert equal $debugged.exit_code 0 "debug authenticated request failed"
+        assert-no-auth-leak $debugged $secrets "debug diagnostics"
+
+        let output_cases = [
+            {label: "default", options: ""}
+            {label: "raw flag", options: "--raw"}
+            {label: "pretty output", options: "--output pretty"}
+            {label: "body output", options: "--output body"}
+            {label: "raw output", options: "--output raw"}
+            {label: "json output", options: "--output json"}
+            {label: "headers output", options: "--output headers"}
+            {label: "status output", options: "--output status"}
+            {label: "none output", options: "--output none"}
+            {label: "selected output", options: "--select response.status"}
+        ]
+        for case in $output_cases {
+            let sent = (run-command-process $root $"api send wire-saved --collection wire --no-history ($case.options)")
+            assert equal $sent.exit_code 0 $"saved request ($case.label) failed"
+            assert-no-auth-leak $sent $secrets $"saved request ($case.label)"
+        }
+
+        let wire_before_display = (command-error-wire-events $server | length)
+        let dry_run = (run-command-process $root "api send wire-saved --collection wire --dry-run --no-history")
+        assert equal $dry_run.exit_code 0 "saved request dry-run failed"
+        assert-no-auth-leak $dry_run $secrets "saved request dry-run"
+        assert (($dry_run.stdout | ansi strip) | str contains "Authorization: ******") "dry-run must display a redacted Authorization header"
+        assert equal (command-error-wire-events $server | length) $wire_before_display "dry-run must not reach the protected endpoint"
+
+        let exported = (run-command-process $root "api request export wire-saved --collection wire")
+        assert equal $exported.exit_code 0 "request export failed"
+        assert-no-auth-leak $exported $secrets "request export"
+        assert (($exported.stdout | ansi strip) | str contains "Authorization: ******") "request export must display a redacted Authorization header"
+        assert equal (command-error-wire-events $server | length) $wire_before_display "request export must not reach the protected endpoint"
+
+        let inline_steps = ([{
+            method: "GET"
+            url: $"($base_url)/chain-inline"
+            auth: {type: bearer, token_ref: wire-bearer}
+        }] | to nuon)
+        let inline_chain = (run-command-process $root $"api chain run ($inline_steps) --collection wire")
+        assert equal $inline_chain.exit_code 0 "inline authenticated chain failed"
+        assert-no-auth-leak $inline_chain $secrets "inline chain output"
+
+        let named_chain = (run-command-process $root "api chain exec wire-chain")
+        assert equal $named_chain.exit_code 0 "named authenticated chain failed"
+        assert-no-auth-leak $named_chain $secrets "named chain output"
+
+        let binary = (run-command-process $root $"api get (($base_url + '/binary') | to nuon) -a {type: bearer, token_ref: wire-bearer} --binary-save ($binary_path | to nuon) --raw --no-history")
+        assert equal $binary.exit_code 0 "binary authenticated request failed"
+        assert-no-auth-leak $binary $secrets "binary request output"
+        assert ($binary_path | path exists) "binary request did not write its explicit output path"
+        assert ((open $binary_path --raw) | str contains '"ok":true') "binary response body was not written"
+
+        let oauth_obtain = (run-command-process $root $"api request -m GET (($base_url + '/oauth-obtain') | to nuon) -a {type: oauth2, ref: wire-oauth} --raw --no-history")
+        assert equal $oauth_obtain.exit_code 0 "internally obtained OAuth2 request failed"
+        let first_oauth = (open ($root | path join "secrets.nuon"))
+        let first_access = $first_oauth.oauth.wire-oauth.access_token
+        let first_refresh = $first_oauth.oauth.wire-oauth.refresh_token
+        $secrets = ($secrets | append [$first_access $first_refresh])
+        assert-no-auth-leak $oauth_obtain $secrets "internally obtained OAuth2 request"
+
+        let oauth_refresh = (run-command-process $root "api auth oauth2 refresh wire-oauth")
+        assert equal $oauth_refresh.exit_code 0 "OAuth2 refresh failed"
+        let refreshed_oauth = (open ($root | path join "secrets.nuon"))
+        let refreshed_access = $refreshed_oauth.oauth.wire-oauth.access_token
+        let refreshed_refresh = $refreshed_oauth.oauth.wire-oauth.refresh_token
+        $secrets = ($secrets | append [$refreshed_access $refreshed_refresh])
+        assert-no-auth-leak $oauth_refresh $secrets "OAuth2 refresh output"
+
+        let oauth_refreshed_request = (run-command-process $root $"api request -m GET (($base_url + '/oauth-refresh') | to nuon) -a {type: oauth2, ref: wire-oauth} --raw --no-history")
+        assert equal $oauth_refreshed_request.exit_code 0 "refreshed OAuth2 request failed"
+        assert-no-auth-leak $oauth_refreshed_request $secrets "refreshed OAuth2 request"
+        assert equal (open $server.count_file --raw | str trim) "2" "OAuth2 obtain and refresh must each call the token endpoint once"
+
+        let before_malformed = (command-error-wire-events $server | length)
+        let malformed = (run-command-process $root $"api request -m GET (($base_url + '/malformed') | to nuon) -a {type: bearer} --raw --no-history")
+        assert ($malformed.exit_code != 0) "missing bearer token must fail"
+        assert equal ($malformed.stdout | str trim) "" "missing bearer token must keep stdout empty"
+        assert (($malformed.stderr | ansi strip) | str contains "Bearer token is missing") "missing bearer token must have an actionable diagnostic"
+        assert equal $malformed.stderr ($malformed.stderr | ansi strip) "missing bearer token stderr must not contain ANSI"
+        assert-no-auth-leak {stdout: $malformed.stdout, stderr: ""} $secrets "missing bearer token diagnostic"
+        for secret in $secrets {
+            assert (not ($malformed.stderr | str contains $secret)) "missing bearer token diagnostic exposed an authentication value"
+        }
+        assert equal (command-error-wire-events $server | length) $before_malformed "missing bearer token must fail before network access"
+
+        let events = (command-error-wire-events $server)
+        assert equal ($events | length) 19 "protected endpoint request count did not match executed cases"
+        let bearer_header = $"Bearer ($bearer_token)"
+        let prefixed_header = $"Bearer ($prefixed_token)"
+        for path in ["/direct" "/prefixed" "/basic" "/debug" "/chain-inline" "/chain-named" "/binary" "/oauth-obtain" "/oauth-refresh"] {
+            assert equal ($events | where path == $path | length) 1 $"expected exactly one protected request for ($path)"
+        }
+        assert (($events | where path == "/direct" | all {|event| $event.authorization == $bearer_header })) "direct request did not carry the configured bearer value"
+        assert (($events | where path == "/prefixed" | all {|event| $event.authorization == $prefixed_header })) "prefixed bearer value was changed or double-prefixed"
+        assert (($events | where path == "/basic" | all {|event| $event.authorization | str starts-with "Basic " })) "basic authentication regression request did not carry a Basic header"
+        for path in ["/debug" "/saved" "/chain-inline" "/chain-named" "/binary"] {
+            let path_events = ($events | where path == $path)
+            assert (($path_events | length) > 0) $"wire capture for ($path) was vacuous"
+            assert ($path_events | all {|event| $event.authorization == $bearer_header }) $"wire capture for ($path) did not carry the configured bearer value"
+        }
+        assert (($events | where path == "/saved" | length) == ($output_cases | length)) "not every saved-request output mode reached the protected endpoint"
+        assert (($events | where path == "/oauth-obtain" | all {|event| $event.authorization == $"Bearer ($first_access)" })) "obtained OAuth2 token was not used on wire"
+        assert (($events | where path == "/oauth-refresh" | all {|event| $event.authorization == $"Bearer ($refreshed_access)" })) "refreshed OAuth2 token was not used on wire"
+
+        let public_snapshot = (
+            command-error-snapshot $root
+            | where {|entry| not ($entry.path | str ends-with "secrets.nuon") }
+            | get content
+            | compact
+            | str join "\n"
+        )
+        for secret in $secrets {
+            assert (not ($public_snapshot | str contains $secret)) "public workspace records persisted an authentication value"
+        }
+        null
+    } catch {|error|
+        $error
+    }
+
+    let stop_failure = try {
+        stop-command-error-server $server
+        null
+    } catch {|error|
+        $error
+    }
+    cleanup $root
+    cleanup $infra
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+    if $stop_failure != null {
+        error make {msg: $stop_failure.msg}
+    }
+    assert (not ($root | path exists)) "auth wire test leaked its workspace"
+    assert (not ($infra | path exists)) "auth wire test leaked its server files"
+}
+
 def run-suite-command-errors []: nothing -> list<record> {
     print $"\n(ansi yellow)── Public command error contracts ──(ansi reset)"
     [
         (run-test "logical duplicate/not-found failures use stderr and nonzero exit" { test-public-command-error-contracts })
         (run-test "OAuth2 obtain/refresh keep stderr clean and persist tokens safely" { test-oauth2-success-streams-and-persistence })
+        (run-test "execution sends real auth while output, exports, and records stay redacted" { test-authentication-wire-and-redaction })
     ]
 }

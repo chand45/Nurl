@@ -59,6 +59,8 @@ nu .github/skills/validate-nurl-api/scripts/discover-commands.nu --check-help
 - **UNCOVERED** → a command exists in code but not in `coverage.nuon`. **Extend before testing**
   (see "Extending"). 
 - **STALE** → a manifest entry no longer exists in code; remove/rename it.
+- **SOURCE DUPLICATES** → the same public command is exported more than once; resolve the
+  duplicate before comparing the unique command set with the manifest.
 - **HELP DRIFT** → `api help` advertises a command that isn't defined; fix help or code.
 
 ### 2. Build/refresh the test matrix

@@ -142,6 +142,35 @@ def resolve-body [
     }
 }
 
+# Build bearer authentication arguments for execution or redacted display.
+def append-auth-args [
+    args: list
+    auth?: record
+    --redact
+] {
+    if $auth == null {
+        return $args
+    }
+
+    match ($auth.type? | default "none") {
+        "bearer" => {
+            let token = ($auth.token? | default "" | into string)
+            if ($token | str trim | is-empty) {
+                fail-command "Bearer token is missing"
+            }
+            let header_value = if $redact {
+                "******"
+            } else if $token =~ '(?i)^Bearer\s+' {
+                $token
+            } else {
+                $"Bearer ($token)"
+            }
+            $args | append ["-H" $"Authorization: ($header_value)"]
+        }
+        _ => $args
+    }
+}
+
 # Build curl command arguments
 def build-curl-args [
     method: string
@@ -169,12 +198,9 @@ def build-curl-args [
         $args = ($args | append ["-H" $"($header.key): ($header.value)"])
     }
 
-    # Add authentication if provided
+    # Non-bearer authentication retains its existing curl forms.
     if $auth != null {
         match ($auth.type? | default "none") {
-            "bearer" => {
-                $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"])
-            }
             "basic" => {
                 $args = ($args | append ["-u" $"($auth.username):($auth.password)"])
             }
@@ -186,6 +212,11 @@ def build-curl-args [
             }
             _ => {}
         }
+    }
+
+    if $auth != null and ($auth.type? | default "none") == "bearer" {
+        # Bearer headers share one builder so binary and normal execution cannot diverge.
+        $args = (append-auth-args $args $auth)
     }
 
     # Add body if provided
@@ -218,12 +249,9 @@ def build-curl-args-for-display [
         $args = ($args | append ["-H" $"($header.key): ($header.value)"])
     }
 
-    # Add authentication if provided
+    # Non-bearer authentication retains its existing curl forms.
     if $auth != null {
         match ($auth.type? | default "none") {
-            "bearer" => {
-                $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"])
-            }
             "basic" => {
                 $args = ($args | append ["-u" $"($auth.username):($auth.password)"])
             }
@@ -235,6 +263,11 @@ def build-curl-args-for-display [
             }
             _ => {}
         }
+    }
+
+    if $auth != null and ($auth.type? | default "none") == "bearer" {
+        # Display construction never receives the execution token value.
+        $args = (append-auth-args $args $auth --redact)
     }
 
     # Add body if provided
@@ -324,11 +357,15 @@ def build-curl-args-binary [
 
     if $auth != null {
         match ($auth.type? | default "none") {
-            "bearer" => { $args = ($args | append ["-H" $"Authorization: Bearer ($auth.token)"]) }
             "basic" => { $args = ($args | append ["-u" $"($auth.username):($auth.password)"]) }
             "apikey_header" => { $args = ($args | append ["-H" $"($auth.header_name): ($auth.key)"]) }
             _ => {}
         }
+    }
+
+    if $auth != null and ($auth.type? | default "none") == "bearer" {
+        # Keep binary execution on the same bearer builder as normal requests.
+        $args = (append-auth-args $args $auth)
     }
 
     if $body != null and $body != "" {
