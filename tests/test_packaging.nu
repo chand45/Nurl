@@ -198,11 +198,111 @@ def test-command-discovery-source-duplicates [] {
     }
 }
 
+def test-command-discovery-exact-help [] {
+    let repo = $env.NURL_REPO_ROOT
+    let discover = ($repo | path join ".github" "skills" "validate-nurl-api" "scripts" "discover-commands.nu")
+    let fixture = (make-temp-dir "help-drift")
+    let manifest = ($fixture | path join "coverage.nuon")
+    let modfile = ($fixture | path join "nu_modules" "mod.nu")
+    let exports = [
+        'export def "api request" [] {}'
+        'export def "api request create" [] {}'
+        'export def "api request recreate" [] {}'
+        'export def "api tui" [] {}'
+    ]
+    let coverage = [
+        {command: "api help", kind: command, group: setup, test: "api help"}
+        {command: "api request", kind: command, group: requests, test: "api request"}
+        {command: "api request create", kind: command, group: requests, test: "api request create"}
+        {command: "api request recreate", kind: command, group: requests, test: "api request recreate"}
+        {command: "api tui", kind: tui, group: tui, test: "api tui"}
+    ]
+
+    let failure = try {
+        mkdir ($fixture | path join "nu_modules")
+        $coverage | save -f $manifest
+        [
+            ...$exports
+            'export def "api help" [] {'
+            '  print $"'
+            '(ansi yellow)Setup:(ansi reset)'
+            '  api help                         Show help'
+            '(ansi yellow)Requests:(ansi reset)'
+            '  api request -m <method> <url>    Generic request'
+            '    api request   create <n>          Create request'
+            '  api request recreate             Similar valid sibling'
+            '(ansi yellow)TUI:(ansi reset)'
+            '  * api tui                        Launch TUI'
+            '(ansi yellow)Requests:(ansi reset)'
+            '  api request frobnicate <n>       Nonexistent child'
+            '  api request create-extra <n>     Nonexistent prefix sibling'
+            '(ansi yellow)Scripting:(ansi reset)'
+            '  api request -m GET <url>          # example, not a command row'
+            '  api send create-post -c jsonplaceholder  Lowercase example request'
+            '  ```text'
+            '  api request fenced-example       This fenced example is ignored'
+            '  ```'
+            '  "'
+            '}'
+        ] | str join "\n" | save -f $modfile
+
+        let drift = (^$nu.current-exe --no-config-file $discover --root $fixture --manifest $manifest --check-help --json | complete)
+        assert ($drift.exit_code != 0) "nonexistent help children must fail discovery"
+        let drift_data = ($drift.stdout | from json)
+        assert equal $drift_data.help_drift ["api request create-extra" "api request frobnicate"]
+        assert ("api request -m GET <url>" in $drift_data.help_examples) "request example was not classified separately"
+        assert ("api send create-post -c jsonplaceholder" in $drift_data.help_examples) "lowercase scripting example was not classified separately"
+        assert ("api send create-post" not-in $drift_data.help_commands) "lowercase scripting example was parsed as a command"
+        assert ("api request create" in $drift_data.help_commands) "valid exact child was not parsed"
+        assert ("api request recreate" in $drift_data.help_commands) "similar valid sibling was not parsed"
+        assert ("api tui" in $drift_data.help_commands) "list-marked help entry was not parsed"
+        assert equal ($drift_data.source_duplicates | length) 0
+        assert equal ($drift_data.duplicates | length) 0
+
+        [
+            ...$exports
+            'export def "api help" [] {'
+            '  print $"'
+            '(ansi yellow)Setup:(ansi reset)'
+            '  api help                         Show help'
+            '(ansi yellow)Requests:(ansi reset)'
+            '  api request -m <method> <url>    Generic request'
+            '    api request   create <n>          Create request'
+            '  api request recreate             Similar valid sibling'
+            '(ansi yellow)TUI:(ansi reset)'
+            '  - api tui                        Launch TUI'
+            '(ansi yellow)Scripting:(ansi reset)'
+            '  api request -m GET <url>          # example, not a command row'
+            '  api send create-post -c jsonplaceholder  Lowercase example request'
+            '  ```text'
+            '  api request fenced-example       This fenced example is ignored'
+            '  ```'
+            '  "'
+            '}'
+        ] | str join "\n" | save -f $modfile
+
+        let valid = (^$nu.current-exe --no-config-file $discover --root $fixture --manifest $manifest --check-help --json | complete)
+        assert equal $valid.exit_code 0 $"valid exact help fixture failed: ($valid.stderr)"
+        let valid_data = ($valid.stdout | from json)
+        assert equal $valid_data.help_drift []
+        assert $valid_data.ok
+        assert equal $valid_data.defined_count 5
+        assert equal $valid_data.covered_count 5
+        null
+    } catch {|error| $error }
+    cleanup $fixture
+    assert (not ($fixture | path exists)) "help-drift fixture leaked its temporary directory"
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
 def run-suite-packaging []: nothing -> list<record> {
     print $"\n(ansi yellow)── Installer packaging and discovery ──(ansi reset)"
     [
         (run-test "fresh installer payloads include and source every transitive module" { test-installer-module-payloads })
         (run-test "installer scripts remain syntactically valid" { test-installer-script-syntax })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
+        (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })
     ]
 }

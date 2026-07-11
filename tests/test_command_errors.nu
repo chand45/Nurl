@@ -163,6 +163,9 @@ try {
                 if ($requestPath -eq '/timeout') {
                     Start-Sleep -Seconds 3
                 }
+                if ($requestPath -eq '/acl-slow') {
+                    Start-Sleep -Seconds 8
+                }
                 switch ($requestPath) {
                     '/array' {
                         $payload = '[{\"id\":1}]'
@@ -339,6 +342,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             handle.write(self.path + '\\t' + authorization + '\\n')
         if self.path in ('/slow', '/timeout'):
             time.sleep(3)
+        if self.path == '/acl-slow':
+            time.sleep(8)
         if self.path == '/array':
             encoded = b'[{\"id\":1}]'
             content_type = 'application/json'
