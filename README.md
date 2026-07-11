@@ -101,7 +101,7 @@ api collection env use my-api dev
 api collection env set my-api base_url "http://localhost:3000"
 
 # Save a request
-api request create get-users --method GET --url "{{base_url}}/users" -c my-api
+api request create get-users GET "{{base_url}}/users" -c my-api
 
 # Send it
 api send get-users -c my-api
@@ -477,8 +477,8 @@ Save frequently used requests to collections.
 
 ```nushell
 # Create a saved request
-api request create get-users --method GET --url "{{base_url}}/users" -c my-api
-api request create create-user --method POST --url "{{base_url}}/users" -b '{"name": "{{name}}"}' -c my-api
+api request create get-users GET "{{base_url}}/users" -c my-api
+api request create create-user POST "{{base_url}}/users" -b { name: "{{name}}" } -c my-api
 
 # List requests in a collection
 api request list -c my-api
@@ -547,8 +547,12 @@ api history resend 20260111-143208-xK9mPq
 api history rebuild-index
 
 # Clear old history
-api history clear
-api history clear --days 7    # keep last 7 days
+api history clear                         # remove entries older than configured retention
+api history clear --before 2026-01-01     # remove entries before a specific date
+api history clear --all --force           # remove every history entry
+
+# Export history
+api history export --output history.json
 ```
 
 ### Request Chaining

@@ -7,6 +7,7 @@
 # Reports:
 #   * uncovered : defined in code but missing from the manifest  -> ADD an entry
 #   * stale     : in the manifest but no longer defined in code   -> REMOVE/RENAME
+#   * duplicates: a command appears more than once in the manifest -> KEEP one entry
 #   * help-drift (with --check-help): a command shown in `api help`
 #                text that is not actually defined                -> fix the help/code
 #
@@ -79,14 +80,25 @@ def main [
     let defined_names = ($defined | get name)
     let manifest = (open $manifest_path)
     let covered = ($manifest | get command)
+    let duplicates = (
+        $manifest
+        | group-by command
+        | transpose command entries
+        | where {|row| ($row.entries | length) > 1 }
+        | get command
+    )
 
     let uncovered = ($defined | where {|d| $d.name not-in $covered })
     let stale = ($covered | where {|c| $c not-in $defined_names })
     let help_drift = (if $check_help {
-        parse-help-refs $repo_root | where {|c| $c not-in $defined_names }
+        parse-help-refs $repo_root | where {|c|
+            not ($defined_names | any {|defined|
+                $c == $defined or ($c | str starts-with $"($defined) ")
+            })
+        }
     } else { [] })
 
-    let gap_count = (($uncovered | length) + ($stale | length))
+    let gap_count = (($uncovered | length) + ($stale | length) + ($duplicates | length) + ($help_drift | length))
 
     if $json {
         let payload = {
@@ -96,6 +108,7 @@ def main [
             covered_count: ($covered | length)
             uncovered: ($uncovered | each {|u| { command: $u.name, file: $u.file }})
             stale: $stale
+            duplicates: $duplicates
             help_drift: $help_drift
             ok: ($gap_count == 0)
         }
@@ -125,6 +138,15 @@ def main [
         print $"(ansi red_bold)STALE \(($stale | length)\)(ansi reset)  in coverage.nuon, not defined in code:"
         $stale | each {|s| print $"    - ($s)" }
         print $"  -> remove or rename these entries in coverage.nuon"
+    }
+
+    print ""
+    if ($duplicates | is-empty) {
+        print $"(ansi green)OK(ansi reset)  no duplicate manifest entries"
+    } else {
+        print $"(ansi red_bold)DUPLICATES \(($duplicates | length)\)(ansi reset)  repeated in coverage.nuon:"
+        $duplicates | each {|command| print $"    - ($command)" }
+        print $"  -> keep one manifest entry per exported command"
     }
 
     if $check_help {

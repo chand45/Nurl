@@ -66,17 +66,19 @@
   { command: "api auth oauth2 token",    kind: command,  group: auth,            test: "live token fetch; needs a real OAuth2 provider. Smoke: shows config error without one." }
   { command: "api auth oauth2 refresh",  kind: command,  group: auth,            test: "needs a real provider + refresh token. Smoke only." }
   { command: "api auth oauth2 delete",   kind: command,  group: auth,            test: "api auth oauth2 delete tmpcred" }
-  { command: "api auth show",            kind: command,  group: auth,            test: "api auth bearer set tmpcred abc; api auth show tmpcred; api auth bearer delete tmpcred" }
+  { command: "api auth show",            kind: command,  group: auth,            test: "api auth bearer set tmpcred abc; api auth show --full; api auth bearer delete tmpcred  # isolated temp credential only" }
   { command: "api auth list",            kind: command,  group: auth,            test: "api auth list" }
   { command: "api auth get-config",      kind: internal, group: auth,            test: "helper: takes an auth spec record; exercised when a request applies auth" }
 
   # ---- requests (http.nu) --------------------------------------------------
   { command: "api get",                  kind: command,  group: requests,        test: "api get https://jsonplaceholder.typicode.com/posts/1 -r  # .response.status == 200" }
-  { command: "api post",                 kind: command,  group: requests,        test: "api post https://jsonplaceholder.typicode.com/posts {title: t, body: b, userId: 1} -r  # 201" }
-  { command: "api put",                  kind: command,  group: requests,        test: "api put https://jsonplaceholder.typicode.com/posts/1 {title: t} -r  # 200" }
-  { command: "api patch",                kind: command,  group: requests,        test: "api patch https://jsonplaceholder.typicode.com/posts/1 {title: t} -r  # 200" }
+  { command: "api post",                 kind: command,  group: requests,        test: "api post https://jsonplaceholder.typicode.com/posts -b {title: t, body: b, userId: 1} -r  # 201" }
+  { command: "api put",                  kind: command,  group: requests,        test: "api put https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r  # 200" }
+  { command: "api patch",                kind: command,  group: requests,        test: "api patch https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r  # 200" }
   { command: "api delete",               kind: command,  group: requests,        test: "api delete https://jsonplaceholder.typicode.com/posts/1 -r  # 200" }
-  { command: "api request",              kind: command,  group: requests,        test: "api request GET https://jsonplaceholder.typicode.com/posts/1 -r  # generic verb; string bodies pass through (no double-encode)" }
+  { command: "api head",                 kind: command,  group: requests,        test: "api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history  # returns 200; no body/history write" }
+  { command: "api options",              kind: command,  group: requests,        test: "api options https://jsonplaceholder.typicode.com/posts --raw --no-history  # status 204; no history write" }
+  { command: "api request",              kind: command,  group: requests,        test: "api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r  # generic verb; string bodies pass through (no double-encode)" }
   { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -c jsonplaceholder -r  # name positional, -c collection; interpolates {{base_url}}" }
 
   # ---- saved requests (http.nu) --------------------------------------------
@@ -85,6 +87,7 @@
   { command: "api request show",         kind: command,  group: saved-requests,  test: "api request show tmp-req -c jsonplaceholder" }
   { command: "api request update",       kind: command,  group: saved-requests,  test: "api request update tmp-req --method POST -c jsonplaceholder" }
   { command: "api request delete",       kind: command,  group: saved-requests,  test: "api request delete tmp-req -c jsonplaceholder --force" }
+  { command: "api request export",       kind: command,  group: saved-requests,  test: "api request export get-post -c jsonplaceholder  # prints curl dry-run; no network/history mutation" }
 
   # ---- history (history.nu) ------------------------------------------------
   { command: "api history list",         kind: command,  group: history,         test: "api history list" }
@@ -92,7 +95,8 @@
   { command: "api history resend",       kind: command,  group: history,         test: "api history resend <id>  # POST bodies re-sent as-is (no double-encode). -e flag is inert (warns)." }
   { command: "api history search",       kind: command,  group: history,         test: "api history search posts" }
   { command: "api history clear",        kind: command,  group: history,         test: "DESTRUCTIVE: back up history/ first, or run in a throwaway API_ROOT. api history clear --force" }
-  { command: "api history export",       kind: command,  group: history,         test: "api history export --format json -o ($nu.temp-path | path join nurl-hist.json)" }
+  { command: "api history export",       kind: command,  group: history,         test: "let out = ($nu.temp-dir | path join $'nurl-hist-(random uuid).json'); api history export --format json --output $out; rm -f $out" }
+  { command: "api history rebuild-index",kind: command,  group: history,         test: "let tmp = ($nu.temp-dir | path join $'nurl-rebuild-(random uuid)'); mkdir $tmp; with-env {API_ROOT: $tmp} { api init | ignore; api history save {method: GET, url: 'https://example.invalid', headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} | ignore; rm ($tmp | path join history index.nuon); api history rebuild-index }; rm -rf $tmp" }
   { command: "api history save",         kind: internal, group: history,         test: "helper: called by execute-request to record each call; exercised by any live request" }
   { command: "api history get",          kind: internal, group: history,         test: "helper: fetch one entry by id; covered via `api history show`/`resend`" }
 
@@ -117,5 +121,5 @@
   { command: "api table",                kind: internal, group: display,         test: "helper: tabular view of a result record" }
   { command: "api explore",              kind: internal, group: display,         test: "helper: interactive explorer over a result record" }
   { command: "api pretty",               kind: internal, group: display,         test: "helper: pretty JSON view of a result record" }
-  { command: "api summary",              kind: internal, group: display,         test: "helper: one-line summary of a result record" }
+  { command: "api summary",              kind: internal, group: display,         test: "helper: multi-line summary of a result record" }
 ]

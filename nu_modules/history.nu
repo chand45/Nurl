@@ -1,6 +1,8 @@
 # History Module
 # Saves and manages request/response history
 
+use command-error.nu [fail-command]
+
 # Get history directory
 def get-history-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -229,8 +231,7 @@ export def "api history show" [
     let entry = (find-history-entry $id)
 
     if $entry == null {
-        print $"(ansi red)History entry '($id)' not found(ansi reset)"
-        return null
+        fail-command $"History entry '($id)' not found"
     }
 
     $entry
@@ -276,8 +277,7 @@ export def "api history resend" [
     let entry = (find-history-entry $id)
 
     if $entry == null {
-        print $"(ansi red)History entry '($id)' not found(ansi reset)"
-        return null
+        fail-command $"History entry '($id)' not found"
     }
 
     # Switch environment if specified

@@ -5,6 +5,7 @@ use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars ex
 use auth.nu ["api auth get-config"]
 use http.nu ["api request"]
 use resource-path.nu [validate-resource-name resolve-under-base]
+use command-error.nu [fail-command]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -210,8 +211,7 @@ export def "api chain exec" [
         let chains_dir = (get-chains-dir)
         let named_file = (resolve-chain-file $chains_dir $file)
         if not ($named_file | path exists) {
-            print $"(ansi red)Chain file not found: ($file)(ansi reset)"
-            return null
+            fail-command $"Chain file not found: ($file)"
         }
         $named_file
     } else {
@@ -233,8 +233,7 @@ export def "api chain exec" [
         } else if ($chains_relative_with_suffix_type | is-not-empty) and $chains_relative_with_suffix_type != "dir" {
             $chains_relative_with_suffix
         } else {
-            print $"(ansi red)Chain file not found: ($file)(ansi reset)"
-            return null
+            fail-command $"Chain file not found: ($file)"
         }
     }
 
@@ -302,8 +301,7 @@ export def "api chain create" [
     }
 
     if ($file_path | path exists) {
-        print $"(ansi red)Chain '($name)' already exists(ansi reset)"
-        return
+        fail-command $"Chain '($name)' already exists"
     }
 
     {
@@ -370,8 +368,7 @@ export def "api chain show" [name: string] {
     let file_path = (resolve-chain-file $chains_dir $name)
 
     if not ($file_path | path exists) {
-        print $"(ansi red)Chain '($name)' not found(ansi reset)"
-        return null
+        fail-command $"Chain '($name)' not found"
     }
 
     open $file_path
@@ -387,8 +384,7 @@ export def "api chain delete" [
     let file_path = (resolve-chain-file $chains_dir $name)
 
     if not ($file_path | path exists) {
-        print $"(ansi red)Chain '($name)' not found(ansi reset)"
-        return
+        fail-command $"Chain '($name)' not found"
     }
 
     if not $force {

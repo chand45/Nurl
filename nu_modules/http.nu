@@ -5,6 +5,7 @@ use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use auth.nu ["api auth get-config"]
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+use command-error.nu [fail-command]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -1106,18 +1107,16 @@ export def "api send" [
         }
 
         if $found_file == null {
-            log error $"Request '($name)' not found"
             if $debug { $env.API_DEBUG = false }
-            return null
+            fail-command $"Request '($name)' not found"
         }
 
         $found_file
     }
 
     if not ($request_path | path exists) {
-        log error $"Request '($name)' not found"
         if $debug { $env.API_DEBUG = false }
-        return null
+        fail-command $"Request '($name)' not found"
     }
 
     # Load request
@@ -1365,8 +1364,7 @@ export def "api request show" [
 
     if $request_file == null or not ($request_file | path exists) {
         let scope = if $collection != "" { $"collection '($collection)'" } else { "any collection" }
-        print $"(ansi red)Request '($name)' not found in ($scope)(ansi reset)"
-        return
+        fail-command $"Request '($name)' not found in ($scope)"
     }
 
     open $request_file
@@ -1391,8 +1389,7 @@ export def "api request update" [
     let request_file = (resolve-request-file $requests_dir $name)
 
     if not ($request_file | path exists) {
-        print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Request '($name)' not found in collection '($collection)'"
     }
 
     mut req = (open $request_file)
@@ -1450,8 +1447,7 @@ export def "api request delete" [
     let request_file = (resolve-request-file $requests_dir $name)
 
     if not ($request_file | path exists) {
-        print $"(ansi red)Request '($name)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Request '($name)' not found in collection '($collection)'"
     }
 
     if not $force {

@@ -515,9 +515,8 @@ def test-collection-surface [] {
     api collection delete $copied --force | ignore
     assert (not (($root | path join "collections" $copied) | path exists))
 
-    # Preserve duplicate and not-found behavior (no validation error).
-    api collection create $valid | ignore
-    assert equal (api collection show "missing-valid-name") null
+    expect-resource-error { api collection create $valid } "already exists"
+    expect-resource-error { api collection show "missing-valid-name" } "not found"
     cleanup $tmp
 }
 

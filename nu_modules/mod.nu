@@ -2,6 +2,7 @@
 # A Postman-like API testing tool built on curl and nushell
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+use command-error.nu [fail-command]
 
 # Get the directory where this module is located
 def get-api-root [] {
@@ -210,7 +211,7 @@ export def "api help" [] {
   api delete <url>                 DELETE request
   api head <url>                   HEAD request — returns headers only, no body
   api options <url>                OPTIONS request
-  api request <method> <url>       Generic request \(any HTTP method\)
+  api request -m <method> <url>    Generic request \(any HTTP method\)
   api send <name> -c <coll>        Send saved request; runs response assertions if defined
 
 (ansi yellow)Common Request Flags:(ansi reset)
@@ -271,8 +272,10 @@ export def "api help" [] {
   api history resend <id>       Resend a past request
   api history search <query>    Full-text search across history
   api history rebuild-index     Rebuild the history index from raw files
-  api history clear             Delete all history entries
-  api history export <file>     Export history entries to a file
+  api history clear             Delete entries older than configured retention
+  api history clear --before <date>  Delete entries before YYYY-MM-DD
+  api history clear --all --force    Delete all history entries
+  api history export --output <file> Export history entries to a file
 
 (ansi yellow)Collections:(ansi reset)
   api collection list              List collections
@@ -287,11 +290,11 @@ export def "api help" [] {
   api chain list                List all saved chains
   api chain show <name>         Show chain details and steps
   api chain delete <name>       Delete a chain
-  api chain run <file>          Run a chain from a NUON definition file
-  api chain exec <file>         Execute chain steps with context propagation
+  api chain run <steps>         Run an inline list of chain steps
+  api chain exec <name|path>    Execute a named chain or explicit chain file
 
 (ansi yellow)Response Helpers \(pass a --raw result record\):(ansi reset)
-  api summary <result>          Compact one-line summary of a --raw result
+  api summary <result>          Compact multi-line summary of a --raw result
   api explore <result>          Browse a --raw response interactively
   api pretty <result>           Pretty-print a stored --raw result
 
@@ -305,7 +308,7 @@ export def "api help" [] {
   api get URL -o body             # returns parsed body, prints nothing
   api get URL -s body.id          # returns one field value
   api get URL -o status           # returns HTTP status int
-  api send create-user -c users -v {name: alice}
+  api send create-post -c jsonplaceholder
   let r = api get URL --raw
   \$r.response.status             # inspect status int
   \$r.response.body               # inspect full body
@@ -371,8 +374,7 @@ export def "api collection create" [
     let collection_dir = (resolve-collection-dir $name)
 
     if ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' already exists(ansi reset)"
-        return
+        fail-command $"Collection '($name)' already exists"
     }
 
     mkdir $collection_dir
@@ -401,8 +403,7 @@ export def "api collection delete" [
     let collection_dir = (resolve-collection-dir $name)
 
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' not found(ansi reset)"
-        return
+        fail-command $"Collection '($name)' not found"
     }
 
     if not $force {
@@ -423,8 +424,7 @@ export def "api collection show" [name: string] {
     let collection_dir = (resolve-collection-dir $name)
 
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' not found(ansi reset)"
-        return null
+        fail-command $"Collection '($name)' not found"
     }
 
     let coll_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($name)'" --base-is-canonical)
@@ -464,13 +464,11 @@ export def "api collection copy" [
     let target_dir = (resolve-under-base $collections_dir $target "collection" --scope "API workspace collections" --base-is-canonical)
 
     if not ($source_dir | path exists) {
-        print $"(ansi red)Source collection '($source)' not found(ansi reset)"
-        return
+        fail-command $"Source collection '($source)' not found"
     }
 
     if ($target_dir | path exists) {
-        print $"(ansi red)Target collection '($target)' already exists(ansi reset)"
-        return
+        fail-command $"Target collection '($target)' already exists"
     }
 
     cp -r $source_dir $target_dir
@@ -521,12 +519,11 @@ def get-coll-env-path [collection_dir: string, collection: string, env_name: str
     resolve-under-base $envs_dir $env_name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical
 }
 
-# Helper: Resolve a collection and preserve existing not-found behavior.
+# Helper: Resolve an existing collection.
 def get-existing-collection-dir [collection: string] {
     let collection_dir = (resolve-collection-dir $collection)
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($collection)' not found(ansi reset)"
-        return null
+        fail-command $"Collection '($collection)' not found"
     }
     $collection_dir
 }
@@ -590,8 +587,7 @@ export def "api collection env create" [
     }
 
     if ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' already exists in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($name)' already exists in collection '($collection)'"
     }
 
     {
@@ -621,10 +617,7 @@ export def "api collection env use" [
     let env_path = (get-coll-env-path $collection_dir $collection $name)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
-        print "Available environments:"
-        api collection env list $collection
-        return
+        fail-command $"Environment '($name)' not found in collection '($collection)'"
     }
 
     mut meta = (load-coll-meta $collection_dir)
@@ -663,8 +656,7 @@ export def "api collection env show" [
     let env_path = (get-coll-env-path $collection_dir $collection $target)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target)' not found in collection '($collection)'(ansi reset)"
-        return null
+        fail-command $"Environment '($target)' not found in collection '($collection)'"
     }
 
     let env_data = (open $env_path)
@@ -708,8 +700,7 @@ export def "api collection env set" [
     let env_path = (get-coll-env-path $collection_dir $collection $target_env)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
     mut env_data = (open $env_path)
@@ -749,8 +740,7 @@ export def "api collection env unset" [
     let env_path = (get-coll-env-path $collection_dir $collection $target_env)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
     mut env_data = (open $env_path)
@@ -780,8 +770,7 @@ export def "api collection env delete" [
     let env_path = (get-coll-env-path $collection_dir $collection $name)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($name)' not found in collection '($collection)'"
     }
 
     if not $force {

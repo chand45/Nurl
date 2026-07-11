@@ -28,6 +28,7 @@ source test_features.nu
 source test_vars.nu
 source test_chain.nu
 source test_resource_paths.nu
+source test_command_errors.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ let all_results = (
         ...(run-suite-features $net_ok)
         ...(run-suite-chain $net_ok)
         ...(run-suite-resource-paths)
+        ...(run-suite-command-errors)
     ]
 )
 
