@@ -1,6 +1,8 @@
 # Authentication Module
 # Handles Bearer, Basic, API Key, and OAuth2 authentication
 
+use command-error.nu [fail-command]
+
 # Truncate a string to max length with ellipsis
 def truncate-value [value: any, max_len: int = 40] {
     let str_val = if $value == null { "" } else { $value | into string }
@@ -178,17 +180,16 @@ export def "api auth oauth2 configure" [
     print $"(ansi green)OAuth2 '($name)' configured(ansi reset)"
 }
 
-# Get OAuth2 access token (client credentials flow)
-export def "api auth oauth2 token" [
-    name: string  # OAuth2 configuration name
-    --force (-f)  # Force refresh even if not expired
+# Get an OAuth2 access token without exposing it through the public command.
+def acquire-oauth2-token [
+    name: string
+    --force
 ] {
     let secrets = (load-secrets)
     let config = ($secrets.oauth | get -o $name)
 
     if $config == null {
-        print $"(ansi red)OAuth2 '($name)' not configured(ansi reset)"
-        return null
+        fail-command $"OAuth2 '($name)' not configured"
     }
 
     # Check if we have a valid token
@@ -197,7 +198,10 @@ export def "api auth oauth2 token" [
         if $expires_at != null {
             let expiry = ($expires_at | into datetime)
             if (date now) < $expiry {
-                return $config.access_token
+                return {
+                    token: $config.access_token
+                    expires_at: $expires_at
+                }
             }
         }
     }
@@ -214,20 +218,17 @@ export def "api auth oauth2 token" [
         | complete)
 
     if $output.exit_code != 0 {
-        print $"(ansi red)OAuth2 token request failed(ansi reset)"
-        return null
+        fail-command "OAuth2 token request failed"
     }
 
     let response = try {
         $output.stdout | from json
     } catch {
-        print $"(ansi red)Failed to parse OAuth2 response(ansi reset)"
-        return null
+        fail-command "Failed to parse OAuth2 response"
     }
 
     if ($response.error? | default null) != null {
-        print $"(ansi red)OAuth2 error: ($response.error) - ($response.error_description? | default '')(ansi reset)"
-        return null
+        fail-command $"OAuth2 error: ($response.error) - ($response.error_description? | default '')"
     }
 
     # Save token
@@ -244,24 +245,32 @@ export def "api auth oauth2 token" [
     $new_secrets = ($new_secrets | upsert oauth ($new_secrets.oauth | upsert $name $oauth_config))
     save-secrets $new_secrets
 
-    print -e $"(ansi green)OAuth2 token obtained, expires: ($expires_at)(ansi reset)"
-    $response.access_token
+    {
+        token: $response.access_token
+        expires_at: $expires_at
+    }
 }
 
-# Refresh OAuth2 token
-export def "api auth oauth2 refresh" [name: string] {
+# Get OAuth2 access token (client credentials flow)
+export def "api auth oauth2 token" [
+    name: string  # OAuth2 configuration name
+    --force (-f)  # Force refresh even if not expired
+] {
+    let result = (acquire-oauth2-token $name --force=$force)
+    print $"(ansi green)OAuth2 token obtained, expires: ($result.expires_at)(ansi reset)"
+}
+
+def refresh-oauth2-token [name: string] {
     let secrets = (load-secrets)
     let config = ($secrets.oauth | get -o $name)
 
     if $config == null {
-        print $"(ansi red)OAuth2 '($name)' not configured(ansi reset)"
-        return null
+        fail-command $"OAuth2 '($name)' not configured"
     }
 
     let refresh_token = ($config.refresh_token? | default null)
     if $refresh_token == null {
-        print $"(ansi yellow)No refresh token available, getting new token...(ansi reset)"
-        return (api auth oauth2 token $name --force)
+        return (acquire-oauth2-token $name --force)
     }
 
     let body = $"grant_type=refresh_token&refresh_token=($refresh_token)&client_id=($config.client_id)&client_secret=($config.client_secret)"
@@ -272,20 +281,17 @@ export def "api auth oauth2 refresh" [name: string] {
         | complete)
 
     if $output.exit_code != 0 {
-        print $"(ansi red)OAuth2 refresh failed(ansi reset)"
-        return null
+        fail-command "OAuth2 refresh failed"
     }
 
     let response = try {
         $output.stdout | from json
     } catch {
-        print $"(ansi red)Failed to parse OAuth2 response(ansi reset)"
-        return null
+        fail-command "Failed to parse OAuth2 response"
     }
 
     if ($response.error? | default null) != null {
-        print $"(ansi yellow)Refresh failed, getting new token...(ansi reset)"
-        return (api auth oauth2 token $name --force)
+        return (acquire-oauth2-token $name --force)
     }
 
     # Save new token
@@ -302,8 +308,16 @@ export def "api auth oauth2 refresh" [name: string] {
     $new_secrets = ($new_secrets | upsert oauth ($new_secrets.oauth | upsert $name $oauth_config))
     save-secrets $new_secrets
 
-    print $"(ansi green)OAuth2 token refreshed, expires: ($expires_at)(ansi reset)"
-    $response.access_token
+    {
+        token: $response.access_token
+        expires_at: $expires_at
+    }
+}
+
+# Refresh OAuth2 token
+export def "api auth oauth2 refresh" [name: string] {
+    let result = (refresh-oauth2-token $name)
+    print $"(ansi green)OAuth2 token refreshed, expires: ($result.expires_at)(ansi reset)"
 }
 
 # Delete OAuth2 configuration
@@ -314,7 +328,7 @@ export def "api auth oauth2 delete" [name: string] {
         save-secrets $secrets
         print $"(ansi green)OAuth2 '($name)' deleted(ansi reset)"
     } else {
-        print $"(ansi yellow)OAuth2 '($name)' not found(ansi reset)"
+        fail-command $"OAuth2 '($name)' not found"
     }
 }
 
@@ -360,8 +374,8 @@ export def "api auth get-config" [auth_spec: record] {
             }
         }
         "oauth2" => {
-            let token = (api auth oauth2 token $ref)
-            { type: "bearer", token: $token }
+            let result = (acquire-oauth2-token $ref)
+            { type: "bearer", token: $result.token }
         }
         _ => {}
     }

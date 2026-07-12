@@ -1,6 +1,13 @@
 # Terminal UI Module
 # Interactive interface for browsing and managing API requests
 
+use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files run-tui-resource-action]
+
+def get-collections-dir [] {
+    let root = ($env.API_ROOT? | default (pwd))
+    resolve-under-base $root "collections" "collections directory" --scope "API workspace"
+}
+
 # Main TUI entry point
 export def "api tui" [] {
     print $"
@@ -22,11 +29,11 @@ export def "api tui" [] {
         let choice = (input "(ansi green)>(ansi reset) " | str trim)
 
         match $choice {
-            "1" | "c" | "collections" => { api tui collections }
-            "2" | "h" | "history" => { api tui history }
-            "3" | "e" | "environments" => { api tui environments }
-            "4" | "r" | "request" => { api tui request }
-            "5" | "chain" => { api tui chains }
+            "1" | "c" | "collections" => { run-tui-resource-action { api tui collections } }
+            "2" | "h" | "history" => { run-tui-resource-action { api tui history } }
+            "3" | "e" | "environments" => { run-tui-resource-action { api tui environments } }
+            "4" | "r" | "request" => { run-tui-resource-action { api tui request } }
+            "5" | "chain" => { run-tui-resource-action { api tui chains } }
             "q" | "quit" | "exit" => {
                 print "(ansi blue)Goodbye!(ansi reset)"
                 break
@@ -43,8 +50,7 @@ export def "api tui" [] {
 
 # Collections browser
 export def "api tui collections" [] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_dir = ($root | path join "collections")
+    let collections_dir = (get-collections-dir)
 
     print $"(ansi blue)═══ Collections ═══(ansi reset)"
 
@@ -87,8 +93,10 @@ export def "api tui collections" [] {
 
 # Browse requests in a collection
 def "api tui collection-requests" [collection: string] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let requests_dir = ($root | path join "collections" $collection "requests")
+    validate-resource-name "collection" $collection | ignore
+    let collections_dir = (get-collections-dir)
+    let collection_dir = (resolve-under-base $collections_dir $collection "collection" --scope "API workspace collections" --base-is-canonical)
+    let requests_dir = (resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($collection)'" --base-is-canonical)
 
     print $"(ansi blue)═══ ($collection) Requests ═══(ansi reset)"
 
@@ -97,16 +105,18 @@ def "api tui collection-requests" [collection: string] {
         return
     }
 
-    let request_files = try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] }
-    let requests = $request_files | each {|f|
-        let req = (open $f)
+    let requests = (
+        list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
+        | each {|request_file|
+        let req = (open $request_file.path)
         {
-            file: $f
-            name: ($req.name? | default ($f | path basename | str replace ".nuon" ""))
+            file: $request_file.path
+            lookup: ($request_file.path | path relative-to $requests_dir | str replace --all "\\" "/")
+            name: ($req.name? | default $request_file.name)
             method: ($req.method? | default "GET")
             url: ($req.url? | default "")
         }
-    }
+    })
 
     if ($requests | is-empty) {
         print "(ansi yellow)No requests found(ansi reset)"
@@ -143,7 +153,7 @@ def "api tui collection-requests" [collection: string] {
         print $"(ansi dark_gray)Sending: ($selected.method) ($selected.url)(ansi reset)"
         print ""
 
-        api send $selected.name -c $collection
+        run-tui-resource-action { api send $selected.lookup -c $collection }
 
         print ""
         input "Press Enter to continue..."
@@ -193,8 +203,7 @@ export def "api tui environments" [] {
     print ""
 
     # First: pick a collection
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_dir = ($root | path join "collections")
+    let collections_dir = (get-collections-dir)
 
     if not ($collections_dir | path exists) {
         print "(ansi yellow)No collections found. Create one with: api collection create <name>(ansi reset)"
@@ -250,15 +259,15 @@ export def "api tui environments" [] {
 
     if ($choice | str starts-with "u ") {
         let name = ($choice | str replace "u " "")
-        api collection env use $collection $name
+        run-tui-resource-action { api collection env use $collection $name }
     } else if ($choice | str starts-with "s ") {
         let name = ($choice | str replace "s " "")
-        api collection env show $collection $name
+        run-tui-resource-action { api collection env show $collection $name }
         print ""
         input "Press Enter to continue..."
     } else if ($choice | str starts-with "c ") {
         let name = ($choice | str replace "c " "")
-        api collection env create $collection $name
+        run-tui-resource-action { api collection env create $collection $name }
     }
 }
 
@@ -318,17 +327,17 @@ export def "api tui chains" [] {
 
     if ($choice | str starts-with "r ") {
         let name = ($choice | str replace "r " "")
-        api chain exec $name
+        run-tui-resource-action { api chain exec $name }
         print ""
         input "Press Enter to continue..."
     } else if ($choice | str starts-with "s ") {
         let name = ($choice | str replace "s " "")
-        api chain show $name
+        run-tui-resource-action { api chain show $name }
         print ""
         input "Press Enter to continue..."
     } else if ($choice | str starts-with "c ") {
         let name = ($choice | str replace "c " "")
-        api chain create $name
+        run-tui-resource-action { api chain create $name }
     }
 }
 
@@ -341,7 +350,7 @@ export def "api explore" [result: record] {
 export def "api pretty" [result: record] {
     if ($result.response.body? | default null) != null {
         let body = $result.response.body
-        if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") {
+        if ($body | describe | str starts-with "record") or ($body | describe | str starts-with "list") or ($body | describe | str starts-with "table") {
             $body | to json --indent 2
         } else {
             $body

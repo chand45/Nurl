@@ -5,16 +5,25 @@
 set -e
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 # Configuration
 NURL_HOME="$HOME/.nurl"
 REPO_URL="https://raw.githubusercontent.com/chand45/Nurl/main"
 NUSHELL_CONFIG_DIR="$HOME/.config/nushell"
+MINIMUM_CURL_VERSION="7.75.0"
 
 echo -e "${BLUE}Installing Nurl - Terminal API Client${NC}"
 echo ""
@@ -30,6 +39,27 @@ fi
 if ! command -v curl &> /dev/null; then
     echo -e "${RED}Error: curl is not installed.${NC}"
     echo "Please install curl first."
+    exit 1
+fi
+
+if ! CURL_VERSION_OUTPUT="$(curl --version 2>/dev/null)"; then
+    echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
+    exit 1
+fi
+CURL_VERSION_LINE="${CURL_VERSION_OUTPUT%%$'\n'*}"
+if [[ ! "$CURL_VERSION_LINE" =~ ^curl(\.exe)?[[:space:]]+([0-9]+)\.([0-9]+)\.([0-9]+)([^0-9.].*)?$ ]]; then
+    echo -e "${RED}Error: Could not determine the installed curl version.${NC}"
+    exit 1
+fi
+CURL_MAJOR="${BASH_REMATCH[2]}"
+CURL_MINOR="${BASH_REMATCH[3]}"
+CURL_PATCH="${BASH_REMATCH[4]}"
+CURL_VERSION="$CURL_MAJOR.$CURL_MINOR.$CURL_PATCH"
+IFS=. read -r MINIMUM_CURL_MAJOR MINIMUM_CURL_MINOR MINIMUM_CURL_PATCH <<< "$MINIMUM_CURL_VERSION"
+if (( CURL_MAJOR < MINIMUM_CURL_MAJOR ||
+      (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR < MINIMUM_CURL_MINOR) ||
+      (CURL_MAJOR == MINIMUM_CURL_MAJOR && CURL_MINOR == MINIMUM_CURL_MINOR && CURL_PATCH < MINIMUM_CURL_PATCH) )); then
+    echo -e "${RED}Error: curl $MINIMUM_CURL_VERSION or newer is required (found $CURL_VERSION).${NC}"
     exit 1
 fi
 
@@ -55,7 +85,7 @@ echo -e "[2/4] Downloading nurl files..."
 curl -sSL "$REPO_URL/api.nu" -o "$NURL_HOME/api.nu"
 
 # Download nu_modules
-MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu")
+MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu" "curl-capability.nu")
 for module in "${MODULES[@]}"; do
     curl -sSL "$REPO_URL/nu_modules/$module" -o "$NURL_HOME/nu_modules/$module"
 done

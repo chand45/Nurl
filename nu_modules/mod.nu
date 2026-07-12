@@ -1,9 +1,20 @@
 # API Client Module - Main Entry Point
 # A Postman-like API testing tool built on curl and nushell
 
+use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+use command-error.nu [fail-command]
+
 # Get the directory where this module is located
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
+}
+
+def get-collections-dir [] {
+    resolve-under-base (get-api-root) "collections" "collections directory" --scope "API workspace"
+}
+
+def resolve-collection-dir [name: string] {
+    resolve-under-base (get-collections-dir) $name "collection" --scope "API workspace collections" --base-is-canonical
 }
 
 # Export submodules
@@ -200,7 +211,7 @@ export def "api help" [] {
   api delete <url>                 DELETE request
   api head <url>                   HEAD request — returns headers only, no body
   api options <url>                OPTIONS request
-  api request <method> <url>       Generic request \(any HTTP method\)
+  api request -m <method> <url>    Generic request \(any HTTP method\)
   api send <name> -c <coll>        Send saved request; runs response assertions if defined
 
 (ansi yellow)Common Request Flags:(ansi reset)
@@ -210,6 +221,7 @@ export def "api help" [] {
                                   pretty    print colored status+body, return null  [interactive]
                                   status    return HTTP status int, no print        [scripting]
                                   body      return parsed body value, no print      [scripting]
+                                  raw       return undecorated response body text   [scripting]
                                   headers   return response headers record, no print [scripting]
                                   json      return full result as JSON string, no print [scripting]
                                   none      return null, print nothing               [silent]
@@ -241,6 +253,7 @@ export def "api help" [] {
   api request update <name>          Update request fields
   api request delete <name>          Delete saved request
   api request export <name>          Print curl equivalent for saved request
+  Names may be nested relative paths such as auth/login; dot-only navigation segments are invalid.
 
 (ansi yellow)Response Assertions \(in saved requests\):(ansi reset)
   A saved request may carry a `tests` record evaluated when run via `api send`.
@@ -260,26 +273,29 @@ export def "api help" [] {
   api history resend <id>       Resend a past request
   api history search <query>    Full-text search across history
   api history rebuild-index     Rebuild the history index from raw files
-  api history clear             Delete all history entries
-  api history export <file>     Export history entries to a file
+  api history clear             Delete entries older than configured retention
+  api history clear --before <date>  Delete entries before YYYY-MM-DD
+  api history clear --all --force    Delete all history entries
+  api history export --format <json|csv> --output <file>  Export history entries
 
 (ansi yellow)Collections:(ansi reset)
   api collection list              List collections
   api collection create <name>     Create collection
-  api collection show <name>       Show collection details
+  api collection show <name>       Return metadata, request, and environment summaries
   api collection delete <name>     Delete collection and all its requests
   api collection copy <src> <dst>  Copy collection to a new name
+  Collection, environment, and chain names are one relative segment \(spaces/dots/Unicode allowed\).
 
 (ansi yellow)Chaining:(ansi reset)
   api chain create <name>       Create a new request chain
   api chain list                List all saved chains
   api chain show <name>         Show chain details and steps
   api chain delete <name>       Delete a chain
-  api chain run <file>          Run a chain from a NUON definition file
-  api chain exec <file>         Execute chain steps with context propagation
+  api chain run <steps>         Run an inline list of chain steps
+  api chain exec <name|path>    Execute a named chain or explicit chain file
 
 (ansi yellow)Response Helpers \(pass a --raw result record\):(ansi reset)
-  api summary <result>          Compact one-line summary of a --raw result
+  api summary <result>          Compact multi-line summary of a --raw result
   api explore <result>          Browse a --raw response interactively
   api pretty <result>           Pretty-print a stored --raw result
 
@@ -287,13 +303,15 @@ export def "api help" [] {
   api tui                       Launch the terminal UI
 
 (ansi yellow)Scripting:(ansi reset)
-  --raw / --output / --select modes RETURN typed values and print nothing — pipe cleanly.
+  --output values are case-sensitive: pretty, raw, body, json, headers, status, none.
+  --raw returns the full result; --output raw returns only the undecorated response body.
+  --raw / --output / --select data modes RETURN values and print nothing — pipe cleanly.
   Default `pretty` mode prints to terminal and returns null \(interactive use\).
 
   api get URL -o body             # returns parsed body, prints nothing
   api get URL -s body.id          # returns one field value
   api get URL -o status           # returns HTTP status int
-  api send create-user -c users -v {name: alice}
+  api send create-post -c jsonplaceholder
   let r = api get URL --raw
   \$r.response.status             # inspect status int
   \$r.response.body               # inspect full body
@@ -313,8 +331,7 @@ Run `api <command> --help` for full flags on any command.
 
 # List all collections
 export def "api collection list" [] {
-    let root = (get-api-root)
-    let collections_dir = ($root | path join "collections")
+    let collections_dir = (get-collections-dir)
 
     if not ($collections_dir | path exists) {
         print $"(ansi yellow)No collections found(ansi reset)"
@@ -322,16 +339,18 @@ export def "api collection list" [] {
     }
 
     let collections = ls $collections_dir | where type == dir | each {|d|
-        let coll_file = ($d.name | path join "collection.nuon")
+        let collection_name = ($d.name | path basename)
+        let collection_dir = (resolve-under-base $collections_dir $collection_name "collection" --scope "API workspace collections" --base-is-canonical)
+        let coll_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($collection_name)'" --base-is-canonical)
         let meta = if ($coll_file | path exists) {
             open $coll_file
         } else {
-            { name: ($d.name | path basename), description: "" }
+            { name: $collection_name, description: "" }
         }
 
-        let requests_dir = ($d.name | path join "requests")
+        let requests_dir = (resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($collection_name)'" --base-is-canonical)
         let request_count = if ($requests_dir | path exists) {
-            try { ls $requests_dir | where name =~ '\.nuon$' | length } catch { 0 }
+            list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests" | length
         } else { 0 }
 
         {
@@ -354,24 +373,26 @@ export def "api collection create" [
     name: string                     # Collection name
     --description (-d): string = ""  # Collection description
 ] {
-    let root = (get-api-root)
-    let collection_dir = ($root | path join "collections" $name)
+    validate-resource-name "collection" $name | ignore
+    let collection_dir = (resolve-collection-dir $name)
 
     if ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' already exists(ansi reset)"
-        return
+        fail-command $"Collection '($name)' already exists"
     }
 
     mkdir $collection_dir
-    mkdir ($collection_dir | path join "requests")
-    mkdir ($collection_dir | path join "environments")
+    let requests_dir = (resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($name)'" --base-is-canonical)
+    let environments_dir = (resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($name)'" --base-is-canonical)
+    let collection_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($name)'" --base-is-canonical)
+    mkdir $requests_dir
+    mkdir $environments_dir
 
     {
         name: $name
         description: $description
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
         version: "1.0"
-    } | to nuon --indent 4 | save ($collection_dir | path join "collection.nuon")
+    } | to nuon --indent 4 | save $collection_file
 
     print $"(ansi green)Collection '($name)' created(ansi reset)"
 }
@@ -381,12 +402,11 @@ export def "api collection delete" [
     name: string  # Collection name
     --force (-f)  # Skip confirmation
 ] {
-    let root = (get-api-root)
-    let collection_dir = ($root | path join "collections" $name)
+    validate-resource-name "collection" $name | ignore
+    let collection_dir = (resolve-collection-dir $name)
 
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' not found(ansi reset)"
-        return
+        fail-command $"Collection '($name)' not found"
     }
 
     if not $force {
@@ -403,15 +423,14 @@ export def "api collection delete" [
 
 # Show collection details
 export def "api collection show" [name: string] {
-    let root = (get-api-root)
-    let collection_dir = ($root | path join "collections" $name)
+    validate-resource-name "collection" $name | ignore
+    let collection_dir = (resolve-collection-dir $name)
 
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($name)' not found(ansi reset)"
-        return null
+        fail-command $"Collection '($name)' not found"
     }
 
-    let coll_file = ($collection_dir | path join "collection.nuon")
+    let coll_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($name)'" --base-is-canonical)
     let meta = if ($coll_file | path exists) {
         open $coll_file
     } else {
@@ -419,22 +438,49 @@ export def "api collection show" [name: string] {
     }
 
     # List requests
-    let requests_dir = ($collection_dir | path join "requests")
+    let requests_dir = (resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($name)'" --base-is-canonical)
     let requests = if ($requests_dir | path exists) {
-        let request_files = try { ls $requests_dir | where name =~ '\.nuon$' | get name } catch { [] }
-        $request_files | each {|f|
-            let req = (open $f)
+        list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests" | each {|request_file|
+            let req = (open $request_file.path)
             {
-                name: ($req.name? | default ($f | path basename | str replace ".nuon" ""))
+                name: ($req.name? | default $request_file.name)
                 method: ($req.method? | default "GET")
-                url: ($req.url? | default "" | str substring 0..50)
+                url: ($req.url? | default "")
             }
-        }
+        } | sort-by name
     } else {
         []
     }
 
-    $requests
+    let collection_meta_file = (resolve-under-base $collection_dir "meta.nuon" "collection runtime metadata" --scope $"collection '($name)'" --base-is-canonical)
+    let collection_meta = if ($collection_meta_file | path exists) {
+        open $collection_meta_file
+    } else {
+        {active_environment: null}
+    }
+    let active_environment = ($collection_meta.active_environment? | default null)
+    let environments_dir = (resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($name)'" --base-is-canonical)
+    let environments = if ($environments_dir | path exists) {
+        list-contained-resource-files $environments_dir "environment" --suffix ".nuon" --scope $"collection '($name)'/environments" | each {|environment_file|
+            let environment = (open $environment_file.path)
+            let environment_name = ($environment.name? | default $environment_file.name)
+            {
+                name: $environment_name
+                active: ($environment_name == $active_environment)
+                variables: ($environment.variables? | default {} | columns | length)
+                description: ($environment.description? | default "")
+            }
+        } | sort-by name
+    } else {
+        []
+    }
+
+    {
+        metadata: $meta
+        active_environment: $active_environment
+        requests: $requests
+        environments: $environments
+    }
 }
 
 # Copy a collection
@@ -442,24 +488,24 @@ export def "api collection copy" [
     source: string  # Source collection name
     target: string  # Target collection name
 ] {
-    let root = (get-api-root)
-    let source_dir = ($root | path join "collections" $source)
-    let target_dir = ($root | path join "collections" $target)
+    validate-resource-name "collection" $source | ignore
+    validate-resource-name "collection" $target | ignore
+    let collections_dir = (get-collections-dir)
+    let source_dir = (resolve-under-base $collections_dir $source "collection" --scope "API workspace collections" --base-is-canonical)
+    let target_dir = (resolve-under-base $collections_dir $target "collection" --scope "API workspace collections" --base-is-canonical)
 
     if not ($source_dir | path exists) {
-        print $"(ansi red)Source collection '($source)' not found(ansi reset)"
-        return
+        fail-command $"Source collection '($source)' not found"
     }
 
     if ($target_dir | path exists) {
-        print $"(ansi red)Target collection '($target)' already exists(ansi reset)"
-        return
+        fail-command $"Target collection '($target)' already exists"
     }
 
     cp -r $source_dir $target_dir
 
     # Update collection metadata
-    let coll_file = ($target_dir | path join "collection.nuon")
+    let coll_file = (resolve-under-base $target_dir "collection.nuon" "collection metadata" --scope $"collection '($target)'" --base-is-canonical)
     if ($coll_file | path exists) {
         mut meta = (open $coll_file)
         $meta = ($meta | upsert name $target)
@@ -473,14 +519,13 @@ export def "api collection copy" [
 # --- Collection Environment Management ---
 
 # Helper: Get collection meta path
-def get-coll-meta-path [collection: string] {
-    let root = (get-api-root)
-    $root | path join "collections" $collection "meta.nuon"
+def get-coll-meta-path [collection_dir: string] {
+    resolve-under-base $collection_dir "meta.nuon" "collection metadata" --scope "collection directory" --base-is-canonical
 }
 
 # Helper: Load collection meta
-def load-coll-meta [collection: string] {
-    let path = (get-coll-meta-path $collection)
+def load-coll-meta [collection_dir: string] {
+    let path = (get-coll-meta-path $collection_dir)
     if ($path | path exists) {
         open $path
     } else {
@@ -489,36 +534,40 @@ def load-coll-meta [collection: string] {
 }
 
 # Helper: Save collection meta
-def save-coll-meta [collection: string, meta: record] {
-    let path = (get-coll-meta-path $collection)
+def save-coll-meta [collection_dir: string, meta: record] {
+    let path = (get-coll-meta-path $collection_dir)
     $meta | to nuon --indent 4 | save -f $path
 }
 
-# Helper: Get collection environment file path
-def get-coll-env-path [collection: string, env_name: string] {
-    let root = (get-api-root)
-    $root | path join "collections" $collection "environments" $"($env_name).nuon"
+# Helper: Get the contained environments directory.
+def get-coll-envs-dir [collection_dir: string, collection: string] {
+    resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($collection)'" --base-is-canonical
 }
 
-# Helper: Check if collection exists
-def check-collection-exists [collection: string] {
-    let root = (get-api-root)
-    let collection_dir = ($root | path join "collections" $collection)
+# Helper: Get a contained environment file path.
+def get-coll-env-path [collection_dir: string, collection: string, env_name: string] {
+    let envs_dir = (get-coll-envs-dir $collection_dir $collection)
+    resolve-under-base $envs_dir $env_name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical
+}
+
+# Helper: Resolve an existing collection.
+def get-existing-collection-dir [collection: string] {
+    let collection_dir = (resolve-collection-dir $collection)
     if not ($collection_dir | path exists) {
-        print $"(ansi red)Collection '($collection)' not found(ansi reset)"
-        return false
+        fail-command $"Collection '($collection)' not found"
     }
-    true
+    $collection_dir
 }
 
 # List environments for a collection
 export def "api collection env list" [
     collection: string  # Collection name
 ] {
-    if not (check-collection-exists $collection) { return [] }
+    validate-resource-name "collection" $collection | ignore
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return [] }
 
-    let root = (get-api-root)
-    let envs_dir = ($root | path join "collections" $collection "environments")
+    let envs_dir = (get-coll-envs-dir $collection_dir $collection)
 
     if not ($envs_dir | path exists) {
         print $"(ansi yellow)No environments found for collection '($collection)'(ansi reset)"
@@ -526,7 +575,7 @@ export def "api collection env list" [
         return []
     }
 
-    let meta = (load-coll-meta $collection)
+    let meta = (load-coll-meta $collection_dir)
     let active = ($meta.active_environment? | default "")
 
     let env_files = try { ls $envs_dir | where name =~ '\.nuon$' | get name } catch { [] }
@@ -538,8 +587,10 @@ export def "api collection env list" [
     }
 
     $env_files | each {|f|
-        let data = (open $f)
-        let name = ($data.name? | default ($f | path basename | str replace ".nuon" ""))
+        let logical_name = ($f | path basename | str replace -r '\.nuon$' '')
+        let env_path = (resolve-under-base $envs_dir $logical_name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical)
+        let data = (open $env_path)
+        let name = ($data.name? | default $logical_name)
         {
             name: $name
             active: (if $name == $active { "✓" } else { "" })
@@ -555,20 +606,19 @@ export def "api collection env create" [
     name: string        # Environment name
     --activate (-a)     # Activate after creation
 ] {
-    if not (check-collection-exists $collection) { return }
+    validate-resource-name "collection" $collection | ignore
+    validate-resource-name "environment" $name | ignore
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return }
 
-    let root = (get-api-root)
-    let envs_dir = ($root | path join "collections" $collection "environments")
-
+    let envs_dir = (get-coll-envs-dir $collection_dir $collection)
+    let env_path = (resolve-under-base $envs_dir $name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical)
     if not ($envs_dir | path exists) {
         mkdir $envs_dir
     }
 
-    let env_path = ($envs_dir | path join $"($name).nuon")
-
     if ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' already exists in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($name)' already exists in collection '($collection)'"
     }
 
     {
@@ -590,20 +640,20 @@ export def "api collection env use" [
     collection: string  # Collection name
     name: string        # Environment name
 ] {
-    if not (check-collection-exists $collection) { return }
+    validate-resource-name "collection" $collection | ignore
+    validate-resource-name "environment" $name | ignore
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return }
 
-    let env_path = (get-coll-env-path $collection $name)
+    let env_path = (get-coll-env-path $collection_dir $collection $name)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
-        print "Available environments:"
-        api collection env list $collection
-        return
+        fail-command $"Environment '($name)' not found in collection '($collection)'"
     }
 
-    mut meta = (load-coll-meta $collection)
+    mut meta = (load-coll-meta $collection_dir)
     $meta = ($meta | upsert active_environment $name)
-    save-coll-meta $collection $meta
+    save-coll-meta $collection_dir $meta
 
     print $"(ansi green)Switched to environment '($name)' for collection '($collection)'(ansi reset)"
 }
@@ -613,9 +663,14 @@ export def "api collection env show" [
     collection: string  # Collection name
     name?: string       # Environment name (defaults to active)
 ] {
-    if not (check-collection-exists $collection) { return null }
+    validate-resource-name "collection" $collection | ignore
+    if $name != null {
+        validate-resource-name "environment" $name | ignore
+    }
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return null }
 
-    let meta = (load-coll-meta $collection)
+    let meta = (load-coll-meta $collection_dir)
 
     let target = if $name != null {
         $name
@@ -629,11 +684,10 @@ export def "api collection env show" [
         return null
     }
 
-    let env_path = (get-coll-env-path $collection $target)
+    let env_path = (get-coll-env-path $collection_dir $collection $target)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target)' not found in collection '($collection)'(ansi reset)"
-        return null
+        fail-command $"Environment '($target)' not found in collection '($collection)'"
     }
 
     let env_data = (open $env_path)
@@ -653,9 +707,14 @@ export def "api collection env set" [
     value: string       # Variable value
     --target (-t): string  # Target environment (defaults to active)
 ] {
-    if not (check-collection-exists $collection) { return }
+    validate-resource-name "collection" $collection | ignore
+    if $target != null {
+        validate-resource-name "environment" $target | ignore
+    }
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return }
 
-    let meta = (load-coll-meta $collection)
+    let meta = (load-coll-meta $collection_dir)
 
     let target_env = if $target != null {
         $target
@@ -669,11 +728,10 @@ export def "api collection env set" [
         return
     }
 
-    let env_path = (get-coll-env-path $collection $target_env)
+    let env_path = (get-coll-env-path $collection_dir $collection $target_env)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
     mut env_data = (open $env_path)
@@ -689,9 +747,14 @@ export def "api collection env unset" [
     key: string         # Variable name to remove
     --target (-t): string  # Target environment (defaults to active)
 ] {
-    if not (check-collection-exists $collection) { return }
+    validate-resource-name "collection" $collection | ignore
+    if $target != null {
+        validate-resource-name "environment" $target | ignore
+    }
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return }
 
-    let meta = (load-coll-meta $collection)
+    let meta = (load-coll-meta $collection_dir)
 
     let target_env = if $target != null {
         $target
@@ -705,11 +768,10 @@ export def "api collection env unset" [
         return
     }
 
-    let env_path = (get-coll-env-path $collection $target_env)
+    let env_path = (get-coll-env-path $collection_dir $collection $target_env)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($target_env)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
     mut env_data = (open $env_path)
@@ -731,13 +793,15 @@ export def "api collection env delete" [
     name: string        # Environment name to delete
     --force (-f)        # Skip confirmation
 ] {
-    if not (check-collection-exists $collection) { return }
+    validate-resource-name "collection" $collection | ignore
+    validate-resource-name "environment" $name | ignore
+    let collection_dir = (get-existing-collection-dir $collection)
+    if $collection_dir == null { return }
 
-    let env_path = (get-coll-env-path $collection $name)
+    let env_path = (get-coll-env-path $collection_dir $collection $name)
 
     if not ($env_path | path exists) {
-        print $"(ansi red)Environment '($name)' not found in collection '($collection)'(ansi reset)"
-        return
+        fail-command $"Environment '($name)' not found in collection '($collection)'"
     }
 
     if not $force {
@@ -751,10 +815,10 @@ export def "api collection env delete" [
     rm $env_path
 
     # Clear active environment if this was it
-    mut meta = (load-coll-meta $collection)
+    mut meta = (load-coll-meta $collection_dir)
     if ($meta.active_environment? == $name) {
         $meta = ($meta | upsert active_environment null)
-        save-coll-meta $collection $meta
+        save-coll-meta $collection_dir $meta
     }
 
     print $"(ansi green)Environment '($name)' deleted from collection '($collection)'(ansi reset)"

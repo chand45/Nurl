@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $NurlHome = "$env:USERPROFILE\.nurl"
 $RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
 $NushellConfigDir = "$env:APPDATA\nushell"
+$MinimumCurlVersion = [version]"7.75.0"
 
 Write-Host "Installing Nurl - Terminal API Client" -ForegroundColor Blue
 Write-Host ""
@@ -16,6 +17,40 @@ $nuPath = Get-Command nu -ErrorAction SilentlyContinue
 if (-not $nuPath) {
     Write-Host "Error: Nushell is not installed." -ForegroundColor Red
     Write-Host "Please install Nushell first: https://www.nushell.sh/book/installation.html"
+    exit 1
+}
+
+$curlPath = Get-Command curl.exe -ErrorAction SilentlyContinue
+if (-not $curlPath) {
+    Write-Host "Error: curl $MinimumCurlVersion or newer is required." -ForegroundColor Red
+    exit 1
+}
+$curlVersionStart = New-Object System.Diagnostics.ProcessStartInfo
+$curlVersionStart.FileName = $curlPath.Source
+$curlVersionStart.Arguments = "--version"
+$curlVersionStart.UseShellExecute = $false
+$curlVersionStart.CreateNoWindow = $true
+$curlVersionStart.RedirectStandardOutput = $true
+$curlVersionStart.RedirectStandardError = $true
+$curlVersionProcess = [System.Diagnostics.Process]::Start($curlVersionStart)
+$curlVersionStdout = $curlVersionProcess.StandardOutput.ReadToEndAsync()
+$curlVersionStderr = $curlVersionProcess.StandardError.ReadToEndAsync()
+$curlVersionProcess.WaitForExit()
+$curlVersionExit = $curlVersionProcess.ExitCode
+$curlVersionOutput = $curlVersionStdout.Result
+$null = $curlVersionStderr.Result
+if ($curlVersionExit -ne 0) {
+    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
+    exit 1
+}
+$curlVersionText = [string](($curlVersionOutput -split "\r?\n") | Select-Object -First 1)
+if ($curlVersionText -cnotmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
+    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
+    exit 1
+}
+$curlVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
+if ($curlVersion -lt $MinimumCurlVersion) {
+    Write-Host "Error: curl $MinimumCurlVersion or newer is required (found $curlVersion)." -ForegroundColor Red
     exit 1
 }
 
@@ -41,7 +76,7 @@ Write-Host "[2/4] Downloading nurl files..."
 Invoke-WebRequest -Uri "$RepoUrl/api.nu" -OutFile "$NurlHome\api.nu" -UseBasicParsing
 
 # Download nu_modules
-$Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu")
+$Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu", "curl-capability.nu")
 foreach ($module in $Modules) {
     Invoke-WebRequest -Uri "$RepoUrl/nu_modules/$module" -OutFile "$NurlHome\nu_modules\$module" -UseBasicParsing
 }

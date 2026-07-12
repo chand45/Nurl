@@ -1,6 +1,9 @@
 # History Module
 # Saves and manages request/response history
 
+use command-error.nu [fail-command]
+use curl-capability.nu [require-curl-capability]
+
 # Get history directory
 def get-history-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -229,8 +232,7 @@ export def "api history show" [
     let entry = (find-history-entry $id)
 
     if $entry == null {
-        print $"(ansi red)History entry '($id)' not found(ansi reset)"
-        return null
+        fail-command $"History entry '($id)' not found"
     }
 
     $entry
@@ -273,11 +275,11 @@ export def "api history resend" [
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {
+    require-curl-capability --dry-run=$dry_run
     let entry = (find-history-entry $id)
 
     if $entry == null {
-        print $"(ansi red)History entry '($id)' not found(ansi reset)"
-        return null
+        fail-command $"History entry '($id)' not found"
     }
 
     # Switch environment if specified
@@ -466,6 +468,10 @@ export def "api history export" [
     --output (-o): string = ""      # Output file path
     --limit (-l): int = 100         # Max entries
 ] {
+    let supported_formats = ["json" "csv"]
+    if $format not-in $supported_formats {
+        fail-command $"Unsupported history export format '($format)'. Expected one of: ($supported_formats | str join ', ')."
+    }
     let dir = (get-history-dir)
 
     if not ($dir | path exists) {
@@ -500,10 +506,7 @@ export def "api history export" [
                 }
             } | to csv
         }
-        _ => {
-            print $"(ansi red)Unknown format: ($format)(ansi reset)"
-            return
-        }
+        _ => { fail-command $"Unsupported history export format '($format)'" }
     }
 
     if $output != "" {

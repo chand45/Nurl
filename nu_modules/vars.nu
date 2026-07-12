@@ -1,6 +1,8 @@
 # Variable Interpolation Module
 # Handles {{variable}} replacement and built-in dynamic variables
 
+use resource-path.nu [validate-resource-name resolve-under-base]
+
 # ============================================================================
 # Global Variables Management
 # ============================================================================
@@ -28,14 +30,22 @@ def save-global-vars [vars: record] {
 }
 
 # Get collection meta path
-def get-collection-meta-path [collection: string] {
+def get-collections-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
-    $root | path join "collections" $collection "meta.nuon"
+    resolve-under-base $root "collections" "collections directory" --scope "API workspace"
+}
+
+def resolve-collection-dir [collections_dir: string, collection: string] {
+    resolve-under-base $collections_dir $collection "collection" --scope "API workspace collections" --base-is-canonical
+}
+
+def get-collection-meta-path [collection_dir: string, collection: string] {
+    resolve-under-base $collection_dir "meta.nuon" "collection metadata" --scope $"collection '($collection)'" --base-is-canonical
 }
 
 # Load collection meta
-def load-collection-meta [collection: string] {
-    let path = (get-collection-meta-path $collection)
+def load-collection-meta [collection_dir: string, collection: string] {
+    let path = (get-collection-meta-path $collection_dir $collection)
     if ($path | path exists) {
         open $path
     } else {
@@ -44,17 +54,22 @@ def load-collection-meta [collection: string] {
 }
 
 # Get collection environment path
-def get-collection-env-path [collection: string, env_name: string] {
-    let root = ($env.API_ROOT? | default (pwd))
-    $root | path join "collections" $collection "environments" $"($env_name).nuon"
+def get-collection-env-path [collection_dir: string, collection: string, env_name: string] {
+    let envs_dir = (resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($collection)'" --base-is-canonical)
+    resolve-under-base $envs_dir $env_name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical
 }
 
 # List all collections in the workspace
 def list-collections [] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let collections_path = ($root | path join "collections")
+    let collections_path = (get-collections-dir)
     if ($collections_path | path exists) {
-        ls $collections_path | where type == dir | get name | path basename
+        ls $collections_path | where type == dir | get name | each {|discovered_path|
+            let name = ($discovered_path | path basename)
+            {
+                name: $name
+                path: (resolve-collection-dir $collections_path $name)
+            }
+        }
     } else {
         []
     }
@@ -79,16 +94,22 @@ export def "api vars get-merged" [
     --collection (-c): string = ""  # Collection for context
     --extra-vars (-v): record = {}  # Request-level overrides
 ] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+
     # Layer 1: Start with global variables (lowest priority)
     mut merged = (load-global-vars)
 
     # Layer 2: Overlay collection's active environment
     if $collection != "" {
-        let meta = (load-collection-meta $collection)
+        let collections_dir = (get-collections-dir)
+        let collection_dir = (resolve-collection-dir $collections_dir $collection)
+        let meta = (load-collection-meta $collection_dir $collection)
         let active_env = ($meta.active_environment? | default null)
 
         if $active_env != null {
-            let env_path = (get-collection-env-path $collection $active_env)
+            let env_path = (get-collection-env-path $collection_dir $collection $active_env)
             if ($env_path | path exists) {
                 let env_data = (open $env_path)
                 let env_vars = ($env_data.variables? | default {})
@@ -148,6 +169,10 @@ export def "api vars interpolate" [
     --collection (-c): string = ""   # Collection context for variable resolution
     --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
 ] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+
     # Get merged variables with proper layering
     let all_vars = if not ($env_vars | is-empty) {
         # Backward compatibility: if env_vars provided, use them merged with extra_vars
@@ -206,6 +231,10 @@ export def "api vars interpolate-record" [
     --collection (-c): string = ""   # Collection context for variable resolution
     --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
 ] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+
     # Return empty record if input is empty
     if ($data | is-empty) {
         return {}
@@ -273,12 +302,14 @@ export def "api vars list" [
 
     # Collection environment variables (from active environment of each collection)
     let collections = (list-collections)
-    for collection in $collections {
-        let meta = (load-collection-meta $collection)
+    for collection_entry in $collections {
+        let collection = $collection_entry.name
+        let collection_dir = $collection_entry.path
+        let meta = (load-collection-meta $collection_dir $collection)
         let active_env = ($meta.active_environment? | default null)
 
         if $active_env != null {
-            let env_path = (get-collection-env-path $collection $active_env)
+            let env_path = (get-collection-env-path $collection_dir $collection $active_env)
             if ($env_path | path exists) {
                 let env_data = (open $env_path)
                 let env_vars = ($env_data.variables? | default {})

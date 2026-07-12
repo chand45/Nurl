@@ -27,6 +27,11 @@ source test_output.nu
 source test_features.nu
 source test_vars.nu
 source test_chain.nu
+source test_resource_paths.nu
+source test_command_errors.nu
+source test_surface_contracts.nu
+source test_secure_header_capture.nu
+source test_packaging.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +60,11 @@ let all_results = (
         ...(run-suite-output $net_ok)
         ...(run-suite-features $net_ok)
         ...(run-suite-chain $net_ok)
+        ...(run-suite-resource-paths)
+        ...(run-suite-command-errors)
+        ...(run-suite-surface-contracts)
+        ...(run-suite-secure-header-capture)
+        ...(run-suite-packaging)
     ]
 )
 

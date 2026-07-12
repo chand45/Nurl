@@ -31,7 +31,7 @@
 ## Requirements
 
 - [Nushell](https://www.nushell.sh/) >= 0.89
-- curl (system installed)
+- curl >= 7.75.0 (required for fileless framed response metadata)
 
 ---
 
@@ -101,7 +101,7 @@ api collection env use my-api dev
 api collection env set my-api base_url "http://localhost:3000"
 
 # Save a request
-api request create get-users --method GET --url "{{base_url}}/users" -c my-api
+api request create get-users GET "{{base_url}}/users" -c my-api
 
 # Send it
 api send get-users -c my-api
@@ -363,6 +363,10 @@ $code | describe        # → int
 # Capture the parsed body value
 let body = (api get "https://api.example.com/users" --output body)
 
+# Capture only the undecorated response body text.
+# JSON quoting/whitespace is preserved; empty bodies return nothing.
+let rawBody = (api get "https://api.example.com/users" --output raw)
+
 # Capture the full result as a JSON string
 let json = (api get "https://api.example.com/users" --output json)
 
@@ -379,6 +383,13 @@ let id = (api post "https://api.example.com/users" --body {name: "Alice"} --sele
 # Full dot-path also works
 let ct = (api get "https://api.example.com/" --select headers.Content-Type)
 ```
+
+Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`.
+`--output raw` preserves the response payload text exactly, including JSON scalar syntax and
+whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
+takes precedence over `--output`. With `--dry-run`, the curl preview is returned instead of an
+HTTP response. `--save` may be combined with data modes, and `--binary-save` writes the response
+bytes while returning a safe saved-file marker for `--output raw`.
 
 **Verbose / inspect flags** (always combine with pretty mode):
 ```nushell
@@ -447,6 +458,15 @@ api collection show my-api
 api collection delete my-api
 ```
 
+`api collection show` returns a stable record with:
+- `metadata`: the stored collection metadata record.
+- `active_environment`: the active environment name or `null`.
+- `requests`: request summaries with `name`, `method`, and `url`.
+- `environments`: environment summaries with `name`, boolean `active`, variable count, and
+  `description`.
+
+Request bodies, authentication values, and environment variable values are not included.
+
 ### Environments
 
 Each collection can have multiple environments (dev, staging, prod, etc.).
@@ -477,8 +497,8 @@ Save frequently used requests to collections.
 
 ```nushell
 # Create a saved request
-api request create get-users --method GET --url "{{base_url}}/users" -c my-api
-api request create create-user --method POST --url "{{base_url}}/users" -b '{"name": "{{name}}"}' -c my-api
+api request create get-users GET "{{base_url}}/users" -c my-api
+api request create create-user POST "{{base_url}}/users" -b { name: "{{name}}" } -c my-api
 
 # List requests in a collection
 api request list -c my-api
@@ -491,7 +511,15 @@ api send create-user -c my-api --vars { name: "Alice" }
 
 # Send with auth override
 api send get-users -c my-api -a { type: bearer, token_ref: mytoken }
+
+# Nested request names are supported
+api request create auth/login POST "{{base_url}}/auth/login" -c my-api
+api send auth/login -c my-api
 ```
+
+Collection, environment, and saved-chain names must each be one non-empty relative path segment. Spaces, embedded dots, hyphens, case, and Unicode are preserved, but rooted names, dot-only navigation names (`.`, `..`, `...`, and so on), trailing dots or spaces, `:` stream syntax, and `/` or `\` separators are rejected. Saved-request names may use nested relative paths such as `auth/login`; every segment must be non-empty and cannot be dot-only, end in a dot or space, or contain `:`. Request lookups that already accept a `.nuon` suffix continue to do so.
+
+These rules apply only to resource identifiers. Explicit path options such as `--body-file`, `--save`, `--binary-save`, history export output, and explicit chain files remain unrestricted path-taking features.
 
 ### Authentication
 
@@ -539,8 +567,12 @@ api history resend 20260111-143208-xK9mPq
 api history rebuild-index
 
 # Clear old history
-api history clear
-api history clear --days 7    # keep last 7 days
+api history clear                         # remove entries older than configured retention
+api history clear --before 2026-01-01     # remove entries before a specific date
+api history clear --all --force           # remove every history entry
+
+# Export history
+api history export --output history.json
 ```
 
 ### Request Chaining

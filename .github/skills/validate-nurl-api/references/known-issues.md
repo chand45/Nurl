@@ -5,8 +5,8 @@ Each entry: **symptom → root cause → fix/status → how to re-check**. Use t
 when validating new or changed commands — several of these recur whenever a command builds a
 request, interpolates variables, or touches `.nuon` files.
 
-> Items 1–3 are **fixed** in this repo. The rest are environment/behavior notes to avoid
-> false bug reports.
+> Items marked **FIXED** are regression checks. The rest are environment/behavior notes to
+> avoid false bug reports.
 
 ---
 
@@ -77,3 +77,20 @@ request, interpolates variables, or touches `.nuon` files.
 - **Symptom:** `nu: command not found`.
 - **Fix:** locate the binary (commonly
   `C:\Users\<you>\AppData\Local\Programs\nu\bin\nu.exe`) and invoke it by full path; see SKILL.md.
+
+## 10. OAuth2 success written to stderr  (FIXED)
+- **Symptom:** a successful `api auth oauth2 token <name>` exited 0 but wrote its normal success
+  diagnostic to stderr, making clean automation indistinguishable from a warning.
+- **Fix:** public token/refresh commands print only secret-free success text on stdout; internal
+  request auth uses a private token-returning helper, so access and refresh tokens are never
+  rendered by the public commands.
+- **Re-check:** use the deterministic local endpoint test in `tests/test_command_errors.nu`;
+  obtain and refresh must exit 0 with empty stderr, persist the expected tokens, and emit no
+  client secret or token value.
+
+## 11. Duplicate/not-found commands exited successfully  (FIXED)
+- **Symptom:** representative collection, environment, saved-request, chain, history, and OAuth2
+  duplicate/not-found conditions printed an error on stdout and exited 0.
+- **Fix:** these public logical failures now raise one shared Nushell error contract: nonzero exit,
+  empty stdout, actionable non-ANSI stderr, and no mutation or network request.
+- **Re-check:** run the table-driven subprocess cases in `tests/test_command_errors.nu`.
