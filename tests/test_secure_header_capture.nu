@@ -229,6 +229,7 @@ public static class FakeCurl
         string format = "";
         string outputPath = "";
         string sensitiveArguments = "";
+        string expectedSecret = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_EXPECTED_SECRET") ?? "";
         for (int index = 0; index + 1 < args.Length; index++)
         {
             if (args[index] == "--write-out")
@@ -285,9 +286,10 @@ public static class FakeCurl
         }
         if (mode == "transport-unframed" || (mode == "transport-unframed-eventual-success" && requestNumber == 1))
         {
-            if (!String.IsNullOrEmpty(sensitiveArguments))
+            if (!String.IsNullOrEmpty(expectedSecret)
+                && sensitiveArguments.IndexOf(expectedSecret, StringComparison.Ordinal) >= 0)
             {
-                File.AppendAllText(log, "sensitive" + Environment.NewLine);
+                File.AppendAllText(log, "exact-sensitive-match" + Environment.NewLine);
             }
             Console.Error.WriteLine("\u001b[31mcurl: (7) deterministic transport failure" + sensitiveArguments + "\u001b[0m");
             return 7;
@@ -295,9 +297,10 @@ public static class FakeCurl
         if (mode == "transport-failure" || mode == "partial-timeout" || (mode == "transport-eventual-success" && requestNumber == 1))
         {
             int exitCode = mode == "partial-timeout" ? 28 : 7;
-            if (!String.IsNullOrEmpty(sensitiveArguments))
+            if (!String.IsNullOrEmpty(expectedSecret)
+                && sensitiveArguments.IndexOf(expectedSecret, StringComparison.Ordinal) >= 0)
             {
-                File.AppendAllText(log, "sensitive" + Environment.NewLine);
+                File.AppendAllText(log, "exact-sensitive-match" + Environment.NewLine);
             }
             Console.Error.WriteLine("\u001b[31mcurl: (" + exitCode + ") deterministic transport failure" + sensitiveArguments + "\u001b[0m");
             if (!String.IsNullOrEmpty(outputPath))
@@ -395,8 +398,12 @@ done
 echo request >> "$NURL_FAKE_CURL_LOG"
 request_number=$(grep -c "^request$" "$NURL_FAKE_CURL_LOG")
 if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-unframed" ] || [ "$request_number" -eq 1 ]; then
-  if [ -n "$sensitive_arguments" ]; then
-    echo sensitive >> "$NURL_FAKE_CURL_LOG"
+  if [ -n "$NURL_FAKE_CURL_EXPECTED_SECRET" ]; then
+    case "$sensitive_arguments" in
+      *"$NURL_FAKE_CURL_EXPECTED_SECRET"*)
+        echo exact-sensitive-match >> "$NURL_FAKE_CURL_LOG"
+        ;;
+    esac
   fi
   printf "\033[31mcurl: (7) deterministic transport failure%s\033[0m\n" "$sensitive_arguments" >&2
   exit 7
@@ -447,8 +454,12 @@ if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-failure" ] || [ "x$NURL_FAKE_CURL_MOD
     printf "\001\002" > "$output_path"
     download_size=2
   fi
-  if [ -n "$sensitive_arguments" ]; then
-    echo sensitive >> "$NURL_FAKE_CURL_LOG"
+  if [ -n "$NURL_FAKE_CURL_EXPECTED_SECRET" ]; then
+    case "$sensitive_arguments" in
+      *"$NURL_FAKE_CURL_EXPECTED_SECRET"*)
+        echo exact-sensitive-match >> "$NURL_FAKE_CURL_LOG"
+        ;;
+    esac
   fi
   printf "\033[31mcurl: (%s) deterministic transport failure%s\033[0m\n" "$exit_code" "$sensitive_arguments" >&2
   printf "\033[31mcurl: (%s) deterministic transport failure Authorization: Bearer TRANSPORT-TOKEN-SENTINEL\033[0m\n" "$exit_code" >&2
@@ -566,6 +577,8 @@ def run-with-fake-curl [root: string, fake: record, command: string] {
         + ($fake.mode | to nuon)
         + "\n$env.NURL_FAKE_CURL_OAUTH_TOKEN = "
         + (($fake.oauth_token? | default "") | to nuon)
+        + "\n$env.NURL_FAKE_CURL_EXPECTED_SECRET = "
+        + (($fake.expected_secret? | default "") | to nuon)
     )
     run-command-process $root ($setup + "\n" + $command)
 }

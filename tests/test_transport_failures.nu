@@ -210,12 +210,15 @@ def test-real-auth-secret-redaction [] {
         ]
 
         for case in $cases {
-            let fake = (transport-fake-mode $fake_base "transport-failure" (($case.label | str replace --all " " "-") + ".log"))
+            let fake = (
+                transport-fake-mode $fake_base "transport-failure" (($case.label | str replace --all " " "-") + ".log")
+                | insert expected_secret $case.secret
+            )
             let before = (command-error-snapshot $root)
             let result = (run-with-fake-curl $root $fake $case.command)
-            assert-safe-transport-error $result 7 1 $case.label [$case.secret]
             assert equal (fake-request-count $fake) 1 $"($case.label) did not execute exactly one transfer"
-            assert ("sensitive" in (open $fake.log --raw | lines)) $"($case.label) fake curl did not receive a raw sensitive argument"
+            assert ("exact-sensitive-match" in (open $fake.log --raw | lines)) $"($case.label) fake curl did not receive the exact expected raw secret"
+            assert-safe-transport-error $result 7 1 $case.label [$case.secret]
             assert equal (command-error-snapshot $root) $before $"($case.label) mutated config, auth, history, or output state"
             assert (not ($save_path | path exists)) $"($case.label) created --save output"
         }
