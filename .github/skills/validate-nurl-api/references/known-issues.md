@@ -36,7 +36,7 @@ request, interpolates variables, or touches `.nuon` files.
 - **Root cause:** environment commands are namespaced under `api collection env`.
 - **Fix:** `api tui environments` reworked to pick a collection then call `api collection env *`;
   `api history resend -e` no longer calls the missing command — historical URLs are already fully
-  resolved, so an env override is inert; it now warns instead. (`nu_modules/tui.nu`, `history.nu`.)
+  resolved, so the backward-compatible env override flag is inert. (`nu_modules/tui.nu`, `history.nu`.)
 - **Re-check:** `nu .github/skills/validate-nurl-api/scripts/discover-commands.nu --check-help`
   reports no `api env *` reference; open the TUI environments view.
 
@@ -94,3 +94,14 @@ request, interpolates variables, or touches `.nuon` files.
 - **Fix:** these public logical failures now raise one shared Nushell error contract: nonzero exit,
   empty stdout, actionable non-ANSI stderr, and no mutation or network request.
 - **Re-check:** run the table-driven subprocess cases in `tests/test_command_errors.nu`.
+
+## 12. Curl transport failures exited successfully and binary retries were destructive  (FIXED)
+- **Symptom:** exhausted DNS/connect/TLS/timeout/truncated transfers printed ANSI errors on stdout,
+  exited 0, and could create result-shaped fallbacks. `--binary-save` bypassed retries and wrote
+  partial bytes directly over an existing destination.
+- **Fix:** all transferring surfaces now raise the shared command-error contract after exhausted curl
+  failures. Normal and binary paths share `N+1` retry behavior; binary attempts use unique sibling
+  files and commit only a complete accepted transfer. Failed attempts create no history or save
+  output. HTTP 4xx and final 5xx remain typed exit-0 responses.
+- **Re-check:** run `tests/test_transport_failures.nu`; it covers direct, saved, resend, binary, and
+  chain surfaces, negative preflight, exact attempts, redaction, and destination preservation.

@@ -298,10 +298,6 @@ export def "api history resend" [
         {}
     }
 
-    if not $dry_run and not $raw {
-        print $"(ansi dark_gray)Resending: ($entry.request.method) ($entry.request.url)(ansi reset)"
-    }
-
     # Execute request — pass body as record (api request handles to-json internally)
     api request -m $entry.request.method $entry.request.url -b $body_record -H $entry.request.headers -a $auth --raw=$raw --dry-run=$dry_run
 }

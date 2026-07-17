@@ -24,7 +24,7 @@
 
 **Nurl** gives you the power of Postman's collections, environments, and workflows — right in your terminal, with beautiful Nushell table output, and everything stored in git-friendly plain text.
 
-**Never lose a request again:** Every request you make is automatically saved to history with full request/response details. Search through past requests, inspect responses, and resend any request with a single command — no need to remember or retype complex curl commands.
+**Never lose a completed request again:** Every completed HTTP response is automatically saved to history with full request/response details. Search through past requests, inspect responses, and resend any request with a single command — no need to remember or retype complex curl commands.
 
 ---
 
@@ -285,9 +285,9 @@ Requests: 3 successful, 0 failed
 - **Output Control** — `--output status/body/json/headers`, `--select dot.path` for scripting
 - **Form Encoding** — `--form` for `application/x-www-form-urlencoded` POST bodies
 - **Redirect Handling** — `--follow-redirects` to follow HTTP 3xx responses
-- **Retry Logic** — `--retries` and `--retry-delay` for resilient requests
+- **Retry Logic** — nonnegative `--retries N` makes at most `N+1` attempts, with `--retry-delay` between attempts
 - **HEAD & OPTIONS** — `api head` and `api options` commands
-- **File Saving** — `--save` for text, `--binary-save` for binary downloads
+- **File Saving** — `--save` for text, transactional `--binary-save` for binary downloads
 
 ---
 
@@ -329,7 +329,7 @@ api post "https://api.example.com/login" --form { username: "alice", password: "
 # Follow redirects automatically (C6)
 api get "https://api.example.com/old-url" --follow-redirects
 
-# Retry on failure — 3 times, 2s delay between retries (C8)
+# Retry after failure — up to 4 total attempts, 2s delay between attempts (C8)
 api get "https://api.example.com/flaky" --retries 3 --retry-delay 2
 
 # Don't save this request to history (A7)
@@ -389,7 +389,13 @@ Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `st
 whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
 takes precedence over `--output`. With `--dry-run`, the curl preview is returned instead of an
 HTTP response. `--save` may be combined with data modes, and `--binary-save` writes the response
-bytes while returning a safe saved-file marker for `--output raw`.
+bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
+unique sibling temporary files and replace the destination only after a complete transfer; exhausted
+transport failures preserve an existing destination and leave an absent destination absent.
+
+HTTP 4xx and final 5xx responses remain typed, inspectable responses with exit code 0. Exhausted curl
+transport failures instead exit nonzero with empty stdout and a secret-redacted, non-ANSI diagnostic
+on stderr. Failed transfers create neither history nor `--save` output.
 
 **Verbose / inspect flags** (always combine with pretty mode):
 ```nushell
@@ -590,6 +596,10 @@ api chain run [
     { request: "users/posts", extract: { post_count: "body.total" } }
 ]
 ```
+
+Without `--stop-on-error`, a transport failure is recorded as a failed step, later steps continue,
+and the returned summary has `success: false`. With `--stop-on-error`, the transport failure exits
+nonzero. `--quiet` suppresses chain progress and caught-failure diagnostics.
 
 ### TUI (Terminal UI)
 

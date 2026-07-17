@@ -100,6 +100,13 @@ work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--outpu
 the exact undecorated payload text (including JSON scalar syntax and whitespace; nothing for an empty body), while the
 separate `--raw` flag returns the full result record and takes precedence over `--output`.
 
+For every transferring surface, a framed curl transport failure exits nonzero with empty stdout and
+secret-free, non-ANSI stderr; it creates no history or `--save` output. HTTP 4xx and final 5xx remain
+typed exit-0 responses. `--retries N` means exactly `N+1` maximum attempts, and negative retry count
+or delay fails before capability, auth, body-file, network, history, or output-file work.
+`--binary-save` uses sibling attempt files and replaces the destination only after a complete accepted
+transfer; failed attempts leave no temporary file and preserve destination state.
+
 ## saved-requests
 Full lifecycle on a temp request, cleaned up at the end.
 | Command | Invocation | Expected |
@@ -116,7 +123,7 @@ Full lifecycle on a temp request, cleaned up at the end.
 |---|---|---|
 | api history list | `api get .../posts/1; api history list` | New entry at the top. |
 | api history show | `api history show (api history list \| first \| get id)` | Prints full request/response. |
-| api history resend | `api history resend <id>` | Re-executes; POST bodies re-sent as a string (no double-encode). `-e` is **inert** (warns). |
+| api history resend | `api history resend <id>` | Re-executes; POST bodies re-sent as a string (no double-encode). Transport failure has empty stdout and propagates nonzero. `-e` is **inert**. |
 | api history search | `api history search posts` | Matching entries. |
 | api history clear | `api history clear` | Removes only date directories older than `history_retention_days`; use `--before YYYY-MM-DD` for an explicit cutoff or `--all --force` to remove everything. Run destructive variants in a throwaway `API_ROOT`. |
 | api history export | `let out = ($nu.temp-dir \| path join $"nurl-hist-(random uuid).json"); api history export --format json --output $out; rm -f $out` | `--format` accepts case-sensitive `json` or `csv`; other values fail before output creation. This writes the isolated JSON export and then removes it. |
@@ -125,8 +132,8 @@ Full lifecycle on a temp request, cleaned up at the end.
 ## chaining
 | Command | Invocation | Expected |
 |---|---|---|
-| api chain exec | `api chain exec example-workflow` | Runs the file's steps. Step 1 POSTs; **step 2 GET /posts/101 → 404 by design** (jsonplaceholder doesn't persist). Not a bug. |
-| api chain run | `api chain run (open chains/example-workflow.nuon \| get steps)` | Same steps via the **list** form (`chain run` takes a list, not a file path). |
+| api chain exec | `api chain exec example-workflow` | Runs the file's steps. Step 1 POSTs; **step 2 GET /posts/101 → 404 by design** (jsonplaceholder doesn't persist). A caught transport failure continues without `--stop-on-error` and returns `success:false`; with it, the command exits nonzero. |
+| api chain run | `api chain run (open chains/example-workflow.nuon \| get steps)` | Same steps via the **list** form (`chain run` takes a list, not a file path). `--quiet` suppresses progress and caught-failure diagnostics. |
 | api chain create | `api chain create tmp-chain` | Creates `chains/tmp-chain.nuon`. |
 | api chain list | `api chain list` | Lists chains incl. `example-workflow`. |
 | api chain show | `api chain show example-workflow` | Prints the chain definition. |
