@@ -13,16 +13,25 @@ def fake-request-count [fake: record] {
     open $fake.log --raw | lines | where $it == "request" | length
 }
 
-def assert-safe-transport-error [result: record, exit_code: int, attempts: int, label: string] {
+def assert-safe-transport-error [
+    result: record
+    exit_code: int
+    attempts: int
+    label: string
+    secrets: list<string> = []
+] {
     surface-error $result $"Curl transport failed with exit code ($exit_code)" $label
     assert ($result.stderr | str contains $"after ($attempts) of ($attempts) attempts") $"($label) omitted the attempt count"
+    assert ($result.stderr | str contains "deterministic transport failure") $"($label) dropped safe curl diagnostics"
     for forbidden in [
-        "TRANSPORT-TOKEN-SENTINEL"
         "NURL_RESPONSE_META_"
-        "deterministic transport failure Authorization: Bearer"
         "curl -"
     ] {
         assert (not ($result.stderr | str contains $forbidden)) $"($label) leaked '($forbidden)'"
+    }
+    for secret in $secrets {
+        assert (not ($result.stderr | str contains $secret)) $"($label) leaked a raw injected secret"
+        assert (not ($result.stdout | str contains $secret)) $"($label) leaked a raw injected secret to stdout"
     }
 }
 
@@ -124,6 +133,100 @@ def test-transport-failure-surfaces [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def test-real-auth-secret-redaction [] {
+    let root = (make-temp-dir "transport-auth-redaction")
+    let fake_dir = (make-temp-dir "transport-auth-fake")
+    let fake_base = (make-fake-curl $fake_dir "8.13.0" "supported")
+    let bearer_secret = ("bearer-" + (random uuid))
+    let basic_secret = ("basic-" + (random uuid))
+    let apikey_secret = ("apikey-" + (random uuid))
+    let oauth_secret = ("oauth-" + (random uuid))
+    let save_path = ($root | path join "must-not-save.txt")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        api collection create transport | ignore
+        api auth bearer set transport-bearer $bearer_secret | ignore
+        api auth basic set transport-basic transport-user $basic_secret | ignore
+        api auth apikey set transport-apikey $apikey_secret | ignore
+        api auth oauth2 configure transport-oauth --client-id transport-client --client-secret ("client-" + (random uuid)) --token-url "http://transport.invalid/token" | ignore
+
+        let oauth_seed = (
+            transport-fake-mode $fake_base "supported-oauth" "oauth-seed.log"
+            | insert oauth_token $oauth_secret
+        )
+        let seeded = (run-with-fake-curl $root $oauth_seed "api auth oauth2 token transport-oauth")
+        assert equal $seeded.exit_code 0 $"OAuth test token setup failed: ($seeded.stderr)"
+
+        api request create saved-auth GET "http://transport.invalid/saved-auth" --collection transport --auth {
+            type: bearer
+            token_ref: transport-bearer
+        } | ignore
+        let history_id = (api history save {
+            method: GET
+            url: "http://transport.invalid/history-auth"
+            headers: {}
+            body: null
+        } {
+            status: 200
+            status_text: OK
+            headers: {}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        })
+
+        let cases = [
+            {
+                label: "direct bearer reference"
+                secret: $bearer_secret
+                command: ("api get 'http://transport.invalid/bearer' -a {type: bearer, token_ref: transport-bearer} --output none --no-history --save " + ($save_path | to nuon))
+            }
+            {
+                label: "direct basic reference"
+                secret: $basic_secret
+                command: "api get 'http://transport.invalid/basic' -a {type: basic, creds_ref: transport-basic} --output none --no-history"
+            }
+            {
+                label: "direct API-key reference"
+                secret: $apikey_secret
+                command: "api get 'http://transport.invalid/apikey' -a {type: api_key, key_ref: transport-apikey} --output none --no-history"
+            }
+            {
+                label: "direct cached OAuth token"
+                secret: $oauth_secret
+                command: "api get 'http://transport.invalid/oauth' -a {type: oauth2, ref: transport-oauth} --output none --no-history"
+            }
+            {
+                label: "saved bearer request"
+                secret: $bearer_secret
+                command: ("api send saved-auth --collection transport --output none --no-history --save " + ($save_path | to nuon))
+            }
+            {
+                label: "history resend bearer override"
+                secret: $bearer_secret
+                command: ("api history resend " + ($history_id | to nuon) + " -a {type: bearer, token_ref: transport-bearer} --raw")
+            }
+        ]
+
+        for case in $cases {
+            let fake = (transport-fake-mode $fake_base "transport-failure" (($case.label | str replace --all " " "-") + ".log"))
+            let before = (command-error-snapshot $root)
+            let result = (run-with-fake-curl $root $fake $case.command)
+            assert-safe-transport-error $result 7 1 $case.label [$case.secret]
+            assert equal (fake-request-count $fake) 1 $"($case.label) did not execute exactly one transfer"
+            assert ("sensitive" in (open $fake.log --raw | lines)) $"($case.label) fake curl did not receive a raw sensitive argument"
+            assert equal (command-error-snapshot $root) $before $"($case.label) mutated config, auth, history, or output state"
+            assert (not ($save_path | path exists)) $"($case.label) created --save output"
+        }
+        null
+    } catch {|error| $error }
+
+    cleanup $root
+    cleanup $fake_dir
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def test-retry-policy-and-preflight [] {
     let root = (make-temp-dir "transport-retries")
     let fake_dir = (make-temp-dir "transport-retry-fake")
@@ -131,6 +234,7 @@ def test-retry-policy-and-preflight [] {
     let fake_base = (make-fake-curl $fake_dir "8.13.0" "supported")
     let failure_fake = (transport-fake-mode $fake_base "transport-failure" "failure.log")
     let eventual_fake = (transport-fake-mode $fake_base "transport-eventual-success" "eventual.log")
+    let unframed_fake = (transport-fake-mode $fake_base "transport-unframed" "unframed.log")
     let unsupported_fake = (transport-fake-mode ($fake_base | update version "7.74.0") "unsupported" "preflight.log")
     let server = (surface-server $infra)
     let failure = try {
@@ -151,6 +255,14 @@ def test-retry-policy-and-preflight [] {
         assert equal ($eventual.stdout | str trim) "200" "eventual retry success returned the wrong status"
         assert equal ($eventual.stderr | str trim) "" "eventual retry success wrote stderr"
         assert equal (fake-request-count $eventual_fake) 2 "eventual retry success did not stop after the successful attempt"
+
+        let unframed_save = ($root | path join "unframed-must-not-save.txt")
+        let unframed_before = (command-error-snapshot $root)
+        let unframed = (run-with-fake-curl $root $unframed_fake $"api get ($url | to nuon) --retries 1 --output raw --save ($unframed_save | to nuon)")
+        assert-safe-transport-error $unframed 7 2 "unframed curl nonzero"
+        assert equal (fake-request-count $unframed_fake) 2 "unframed curl nonzero did not use N+1 attempts"
+        assert equal (command-error-snapshot $root) $unframed_before "unframed curl nonzero mutated history or output state"
+        assert (not ($unframed_save | path exists)) "unframed curl nonzero created --save output"
 
         let before = (command-error-snapshot $root)
         let missing_body = ($root | path join "missing-body.json")
@@ -200,6 +312,8 @@ def test-retry-policy-and-preflight [] {
 def test-binary-retry-transactions [] {
     let root = (make-temp-dir "binary-transactions")
     let fake_dir = (make-temp-dir "binary-transaction-fake")
+    let infra = (make-temp-dir "binary-transaction-server")
+    let server = (surface-server $infra)
     let fake_base = (make-fake-curl $fake_dir "8.13.0" "supported")
     let supported = (transport-fake-mode $fake_base "supported" "success.log")
     let eventual = (transport-fake-mode $fake_base "transport-eventual-success" "eventual.log")
@@ -209,6 +323,14 @@ def test-binary-retry-transactions [] {
         setup-transport-workspace $root | ignore
         let url = "http://transport.invalid/binary"
         let initial_history = (history-entry-count $root)
+
+        let exact_path = ($root | path join "exact.bin")
+        let exact_url = $"http://127.0.0.1:($server.port)/binary-body"
+        let exact = (run-command-process $root $"api get ($exact_url | to nuon) --binary-save ($exact_path | to nuon) --output none --no-history")
+        assert equal $exact.exit_code 0 $"exact binary transfer failed: ($exact.stderr)"
+        assert equal (open $exact_path --raw) 0x[00ff01804142] "binary-save changed successful response bytes"
+        assert equal (binary-attempt-files $exact_path | length) 0 "exact binary transfer left an attempt file"
+        assert equal (history-entry-count $root) $initial_history "no-history exact binary transfer created history"
 
         let success_path = ($root | path join "success.bin")
         let success = (run-with-fake-curl $root $supported $"api get ($url | to nuon) --binary-save ($success_path | to nuon) --output none --no-history")
@@ -243,9 +365,12 @@ def test-binary-retry-transactions [] {
         null
     } catch {|error| $error }
 
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
     cleanup $root
     cleanup $fake_dir
+    cleanup $infra
     if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
 def chain-command [command_name: string] {
@@ -261,9 +386,9 @@ def test-chain-transport-policy [] {
     let root = (make-temp-dir "transport-chain")
     let fake_dir = (make-temp-dir "transport-chain-fake")
     let fake_base = (make-fake-curl $fake_dir "8.13.0" "supported")
-    let run_fake = (transport-fake-mode $fake_base "transport-eventual-success" "run.log")
-    let exec_fake = (transport-fake-mode $fake_base "transport-eventual-success" "exec.log")
-    let stop_fake = (transport-fake-mode $fake_base "transport-failure" "stop.log")
+    let run_fake = (transport-fake-mode $fake_base "transport-unframed-eventual-success" "run.log")
+    let exec_fake = (transport-fake-mode $fake_base "transport-unframed-eventual-success" "exec.log")
+    let stop_fake = (transport-fake-mode $fake_base "transport-unframed" "stop.log")
     let failure = try {
         $env.API_ROOT = $root
         api init | ignore
@@ -307,6 +432,7 @@ export def run-suite-transport-failures [] {
     print $"\n(ansi yellow)── Transport failures and binary transactions ──(ansi reset)"
     [
         (run-test "transport failures are safe command errors on direct and composed surfaces" { test-transport-failure-surfaces })
+        (run-test "framed transport diagnostics redact real bearer, basic, API-key, and OAuth secrets" { test-real-auth-secret-redaction })
         (run-test "retry counts, eventual success, HTTP 503, and negative preflight are explicit" { test-retry-policy-and-preflight })
         (run-test "binary retries commit complete bytes and preserve destinations on failure" { test-binary-retry-transactions })
         (run-test "chains continue or stop explicitly after transport failures" { test-chain-transport-policy })

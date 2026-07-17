@@ -640,6 +640,13 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     }
 }
 
+def unframed-curl-diagnostics [stderr: string] {
+    $stderr
+    | split row --regex 'NURL_RESPONSE_META_[A-Za-z0-9]+_(?:BEGIN|END)'
+    | first
+    | str trim
+}
+
 def curl-with-fileless-metadata [curl_args: list, url: string, --include-response] {
     let token = (random uuid | str replace --all "-" "")
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
@@ -659,9 +666,32 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
     let final_args = ($transfer_args | append ["--write-out" $write_out])
     let output = (curl ...$final_args $url | complete)
     if (($output.stderr | describe) | str starts-with "binary") {
+        if $output.exit_code != 0 {
+            return {
+                output: ($output | update stderr "")
+                metadata: null
+            }
+        }
         fail-command "Curl returned malformed structured response metadata"
     }
-    let parsed = (parse-fileless-curl-stderr $output.stderr $token $output.exit_code)
+    let parsed_result = try {
+        {
+            value: (parse-fileless-curl-stderr $output.stderr $token $output.exit_code)
+            error: null
+        }
+    } catch {|error|
+        {value: null, error: $error}
+    }
+    if $parsed_result.error != null {
+        if $output.exit_code != 0 {
+            return {
+                output: ($output | update stderr (unframed-curl-diagnostics $output.stderr))
+                metadata: null
+            }
+        }
+        error make {msg: $parsed_result.error.msg}
+    }
+    let parsed = $parsed_result.value
     {
         output: ($output | update stderr $parsed.diagnostics)
         metadata: $parsed.metadata
