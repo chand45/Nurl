@@ -40,6 +40,10 @@ def validate-chain-steps [steps: list] {
     }
 }
 
+def is-transport-failure [error: record] {
+    ($error.msg? | default "") | str starts-with "Curl transport failed"
+}
+
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
@@ -56,6 +60,8 @@ export def "api chain run" [
     mut context = {}  # Variables extracted from responses
     mut results = []
     mut step_num = 0
+    mut chain_success = true
+    mut chain_error = ""
 
     for step in $steps {
         $step_num = $step_num + 1
@@ -79,9 +85,14 @@ export def "api chain run" [
         }
 
         if $request_config == null {
-            print $"(ansi red)Request not found: ($step.request)(ansi reset)"
+            let message = $"Request not found: ($step.request)"
+            if not $quiet {
+                print -e $message
+            }
+            $chain_success = false
+            $chain_error = $message
             if $stop_on_error {
-                return { success: false, results: $results, context: $context, error: $"Request not found: ($step.request)" }
+                return { success: false, results: $results, context: $context, error: $message }
             }
             continue
         }
@@ -122,19 +133,49 @@ export def "api chain run" [
             print $"  (ansi dark_gray)($method) ($url)(ansi reset)"
         }
 
-        let result = (api request -m $method $url -b $body -H $headers -a $auth --raw)
+        let attempted = if $stop_on_error {
+            {
+                result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                error: null
+            }
+        } else {
+            try {
+                {
+                    result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                    error: null
+                }
+            } catch {|error|
+                if not (is-transport-failure $error) {
+                    error make {msg: $error.msg}
+                }
+                {result: null, error: $error}
+            }
+        }
 
-        if $result == null {
-            print $"(ansi red)Request failed(ansi reset)"
-            if $stop_on_error {
-                return { success: false, results: $results, context: $context, error: "Request failed" }
+        if $attempted.error != null {
+            let message = $attempted.error.msg
+            $chain_success = false
+            $chain_error = $message
+            $results = ($results | append {
+                step: $step_num
+                request: ($step.request? | default "inline")
+                status: null
+                time_ms: 0
+                response: null
+                error: $message
+            })
+            if not $quiet {
+                print -e $message
             }
             continue
         }
+        let result = $attempted.result
 
         # Check for HTTP errors if stop-on-error is set
         if $stop_on_error and ($result.response.status >= 400) {
-            print $"(ansi red)HTTP Error: ($result.response.status)(ansi reset)"
+            if not $quiet {
+                print $"(ansi red)HTTP Error: ($result.response.status)(ansi reset)"
+            }
             return { success: false, results: $results, context: $context, error: $"HTTP ($result.response.status)" }
         }
 
@@ -179,13 +220,22 @@ export def "api chain run" [
 
     if not $quiet {
         print ""
-        print $"(ansi green)Chain completed: ($results | length) requests(ansi reset)"
+        if $chain_success {
+            print $"(ansi green)Chain completed: ($results | length) requests(ansi reset)"
+        } else {
+            print $"(ansi yellow)Chain completed with failures: ($results | length) steps recorded(ansi reset)"
+        }
     }
 
-    {
-        success: true
+    let summary = {
+        success: $chain_success
         results: $results
         context: $context
+    }
+    if ($chain_error | is-empty) {
+        $summary
+    } else {
+        $summary | insert error $chain_error
     }
 }
 

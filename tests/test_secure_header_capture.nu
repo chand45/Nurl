@@ -227,12 +227,32 @@ public static class FakeCurl
         }
         string mode = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_MODE") ?? "";
         string format = "";
+        string outputPath = "";
+        string sensitiveArguments = "";
+        string expectedSecret = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_EXPECTED_SECRET") ?? "";
         for (int index = 0; index + 1 < args.Length; index++)
         {
             if (args[index] == "--write-out")
             {
                 format = args[index + 1];
-                break;
+            }
+            if (args[index] == "-o")
+            {
+                outputPath = args[index + 1];
+            }
+            if (args[index] == "-H")
+            {
+                string header = args[index + 1];
+                if (header.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase)
+                    || header.StartsWith("Proxy-Authorization:", StringComparison.OrdinalIgnoreCase)
+                    || header.StartsWith("X-API-Key:", StringComparison.OrdinalIgnoreCase))
+                {
+                    sensitiveArguments += " " + header;
+                }
+            }
+            if (args[index] == "-u")
+            {
+                sensitiveArguments += " Basic " + args[index + 1];
             }
         }
         if (mode == "supported-oauth" && String.IsNullOrEmpty(format))
@@ -241,12 +261,62 @@ public static class FakeCurl
             {
                 File.AppendAllText(log, "token" + Environment.NewLine);
             }
-            Console.Out.Write("{\"access_token\":\"SUPPORTED-ACCESS\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}");
+            string token = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_OAUTH_TOKEN");
+            if (String.IsNullOrEmpty(token))
+            {
+                token = "SUPPORTED-ACCESS";
+            }
+            Console.Out.Write("{\"access_token\":\"" + token + "\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}");
             return 0;
         }
         if (!String.IsNullOrEmpty(log))
         {
             File.AppendAllText(log, "request" + Environment.NewLine);
+        }
+        int requestNumber = 0;
+        if (!String.IsNullOrEmpty(log) && File.Exists(log))
+        {
+            foreach (string line in File.ReadAllLines(log))
+            {
+                if (line == "request")
+                {
+                    requestNumber++;
+                }
+            }
+        }
+        if (mode == "transport-unframed" || (mode == "transport-unframed-eventual-success" && requestNumber == 1))
+        {
+            if (!String.IsNullOrEmpty(expectedSecret)
+                && sensitiveArguments.IndexOf(expectedSecret, StringComparison.Ordinal) >= 0)
+            {
+                File.AppendAllText(log, "exact-sensitive-match" + Environment.NewLine);
+            }
+            Console.Error.WriteLine("\u001b[31mcurl: (7) deterministic transport failure" + sensitiveArguments + "\u001b[0m");
+            return 7;
+        }
+        if (mode == "transport-failure" || mode == "partial-timeout" || (mode == "transport-eventual-success" && requestNumber == 1))
+        {
+            int exitCode = mode == "partial-timeout" ? 28 : 7;
+            if (!String.IsNullOrEmpty(expectedSecret)
+                && sensitiveArguments.IndexOf(expectedSecret, StringComparison.Ordinal) >= 0)
+            {
+                File.AppendAllText(log, "exact-sensitive-match" + Environment.NewLine);
+            }
+            Console.Error.WriteLine("\u001b[31mcurl: (" + exitCode + ") deterministic transport failure" + sensitiveArguments + "\u001b[0m");
+            if (!String.IsNullOrEmpty(outputPath))
+            {
+                File.WriteAllBytes(outputPath, new byte[] { 1, 2 });
+            }
+            Console.Error.WriteLine("\u001b[31mcurl: (" + exitCode + ") deterministic transport failure Authorization: Bearer TRANSPORT-TOKEN-SENTINEL\u001b[0m");
+            string metadata = format
+                .Replace("%{stderr}", "")
+                .Replace("%{http_code}", "000")
+                .Replace("%{time_total}", "0.001")
+                .Replace("%{size_download}", String.IsNullOrEmpty(outputPath) ? "0" : "2")
+                .Replace("%{size_header}", "0")
+                .Replace("%{exitcode}", exitCode.ToString());
+            Console.Error.Write(metadata);
+            return exitCode;
         }
         if (mode == "malformed")
         {
@@ -254,7 +324,7 @@ public static class FakeCurl
             Console.Out.Write("UNTRUSTED-BODY-SENTINEL");
             return 0;
         }
-        if (mode == "supported" || mode == "supported-oauth" || mode == "size-too-large" || mode == "size-too-small" || mode == "malformed-trailer" || mode.StartsWith("invalid-trailer"))
+        if (mode == "supported" || mode == "supported-oauth" || mode == "transport-eventual-success" || mode == "transport-unframed-eventual-success" || mode == "size-too-large" || mode == "size-too-small" || mode == "malformed-trailer" || mode.StartsWith("invalid-trailer"))
         {
             string header = "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\n";
             string trailer = mode == "malformed-trailer"
@@ -267,7 +337,14 @@ public static class FakeCurl
                             ? "Bad : value\r\n"
                             : (mode == "invalid-trailer-tab-before-colon" ? "Bad\t: value\r\n" : ""))));
             string output = header + "BODY" + trailer;
-            Console.Out.Write(output);
+            if (String.IsNullOrEmpty(outputPath))
+            {
+                Console.Out.Write(output);
+            }
+            else
+            {
+                File.WriteAllBytes(outputPath, System.Text.Encoding.ASCII.GetBytes("BODY"));
+            }
             string headerSize = mode == "size-too-large"
                 ? "9999"
                 : (mode == "size-too-small" ? "10" : System.Text.Encoding.ASCII.GetByteCount(header).ToString());
@@ -298,6 +375,118 @@ Add-Type -TypeDefinition $source -OutputAssembly $env:NURL_FAKE_CURL_EXE -Output
 printf "%s\n" "FAKE-CURL-DIAGNOSTIC NURL_RESPONSE_META_static_BEGIN INTERNAL-METADATA-SENTINEL" >&2
 printf "%s" "UNTRUSTED-BODY-SENTINEL"
 exit 0'
+        } else if $mode in ["transport-unframed" "transport-unframed-eventual-success"] {
+            'format=""
+sensitive_arguments=""
+previous=""
+for argument in "$@"; do
+  if [ "x$previous" = "x--write-out" ]; then
+    format="$argument"
+  fi
+  if [ "x$previous" = "x-H" ]; then
+    case "$argument" in
+      [Aa]uthorization:*|[Pp]roxy-[Aa]uthorization:*|[Xx]-[Aa][Pp][Ii]-[Kk]ey:*)
+        sensitive_arguments="$sensitive_arguments $argument"
+        ;;
+    esac
+  fi
+  if [ "x$previous" = "x-u" ]; then
+    sensitive_arguments="$sensitive_arguments Basic $argument"
+  fi
+  previous="$argument"
+done
+echo request >> "$NURL_FAKE_CURL_LOG"
+request_number=$(grep -c "^request$" "$NURL_FAKE_CURL_LOG")
+if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-unframed" ] || [ "$request_number" -eq 1 ]; then
+  if [ -n "$NURL_FAKE_CURL_EXPECTED_SECRET" ]; then
+    case "$sensitive_arguments" in
+      *"$NURL_FAKE_CURL_EXPECTED_SECRET"*)
+        echo exact-sensitive-match >> "$NURL_FAKE_CURL_LOG"
+        ;;
+    esac
+  fi
+  printf "\033[31mcurl: (7) deterministic transport failure%s\033[0m\n" "$sensitive_arguments" >&2
+  exit 7
+fi
+printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+metadata=$(printf "%s" "$format" | sed \
+  -e "s/%{stderr}//g" \
+  -e "s/%{http_code}/200/g" \
+  -e "s/%{time_total}/0.001/g" \
+  -e "s/%{size_download}/4/g" \
+  -e "s/%{size_header}/52/g" \
+  -e "s/%{exitcode}/0/g")
+printf "%s" "$metadata" >&2
+exit 0'
+        } else if $mode in ["transport-failure" "transport-eventual-success" "partial-timeout"] {
+            'format=""
+output_path=""
+sensitive_arguments=""
+previous=""
+for argument in "$@"; do
+  if [ "x$previous" = "x--write-out" ]; then
+    format="$argument"
+  fi
+  if [ "x$previous" = "x-o" ]; then
+    output_path="$argument"
+  fi
+  if [ "x$previous" = "x-H" ]; then
+    case "$argument" in
+      [Aa]uthorization:*|[Pp]roxy-[Aa]uthorization:*|[Xx]-[Aa][Pp][Ii]-[Kk]ey:*)
+        sensitive_arguments="$sensitive_arguments $argument"
+        ;;
+    esac
+  fi
+  if [ "x$previous" = "x-u" ]; then
+    sensitive_arguments="$sensitive_arguments Basic $argument"
+  fi
+  previous="$argument"
+done
+echo request >> "$NURL_FAKE_CURL_LOG"
+request_number=$(grep -c "^request$" "$NURL_FAKE_CURL_LOG")
+if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-failure" ] || [ "x$NURL_FAKE_CURL_MODE" = "xpartial-timeout" ] || [ "$request_number" -eq 1 ]; then
+  exit_code=7
+  download_size=0
+  if [ "x$NURL_FAKE_CURL_MODE" = "xpartial-timeout" ]; then
+    exit_code=28
+  fi
+  if [ -n "$output_path" ]; then
+    printf "\001\002" > "$output_path"
+    download_size=2
+  fi
+  if [ -n "$NURL_FAKE_CURL_EXPECTED_SECRET" ]; then
+    case "$sensitive_arguments" in
+      *"$NURL_FAKE_CURL_EXPECTED_SECRET"*)
+        echo exact-sensitive-match >> "$NURL_FAKE_CURL_LOG"
+        ;;
+    esac
+  fi
+  printf "\033[31mcurl: (%s) deterministic transport failure%s\033[0m\n" "$exit_code" "$sensitive_arguments" >&2
+  printf "\033[31mcurl: (%s) deterministic transport failure Authorization: Bearer TRANSPORT-TOKEN-SENTINEL\033[0m\n" "$exit_code" >&2
+  metadata=$(printf "%s" "$format" | sed \
+    -e "s/%{stderr}//g" \
+    -e "s/%{http_code}/000/g" \
+    -e "s/%{time_total}/0.001/g" \
+    -e "s/%{size_download}/$download_size/g" \
+    -e "s/%{size_header}/0/g" \
+    -e "s/%{exitcode}/$exit_code/g")
+  printf "%s" "$metadata" >&2
+  exit "$exit_code"
+fi
+if [ -n "$output_path" ]; then
+  printf "BODY" > "$output_path"
+else
+  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+fi
+metadata=$(printf "%s" "$format" | sed \
+  -e "s/%{stderr}//g" \
+  -e "s/%{http_code}/200/g" \
+  -e "s/%{time_total}/0.001/g" \
+  -e "s/%{size_download}/4/g" \
+  -e "s/%{size_header}/52/g" \
+  -e "s/%{exitcode}/0/g")
+printf "%s" "$metadata" >&2
+exit 0'
         } else if $mode in ["supported" "supported-oauth" "size-too-large" "size-too-small" "malformed-trailer"] or ($mode | str starts-with "invalid-trailer") {
             let header_size = if $mode == "size-too-large" {
                 "9999"
@@ -320,21 +509,29 @@ exit 0'
                 ""
             }
             'format=""
+output_path=""
 previous=""
 for argument in "$@"; do
   if [ "x$previous" = "x--write-out" ]; then
     format="$argument"
-    break
+  fi
+  if [ "x$previous" = "x-o" ]; then
+    output_path="$argument"
   fi
   previous="$argument"
 done
 if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ] && [ -z "$format" ]; then
   echo token >> "$NURL_FAKE_CURL_LOG"
-  printf "%s" "{\"access_token\":\"SUPPORTED-ACCESS\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}"
+  token=${NURL_FAKE_CURL_OAUTH_TOKEN:-SUPPORTED-ACCESS}
+  printf "%s" "{\"access_token\":\"$token\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}"
   exit 0
 fi
 echo request >> "$NURL_FAKE_CURL_LOG"
-printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
+if [ -n "$output_path" ]; then
+  printf "BODY" > "$output_path"
+else
+  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
+fi
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
   -e "s/%{http_code}/200/g" \
@@ -378,6 +575,10 @@ def run-with-fake-curl [root: string, fake: record, command: string] {
         + ($fake.version_line | to nuon)
         + "\n$env.NURL_FAKE_CURL_MODE = "
         + ($fake.mode | to nuon)
+        + "\n$env.NURL_FAKE_CURL_OAUTH_TOKEN = "
+        + (($fake.oauth_token? | default "") | to nuon)
+        + "\n$env.NURL_FAKE_CURL_EXPECTED_SECRET = "
+        + (($fake.expected_secret? | default "") | to nuon)
     )
     run-command-process $root ($setup + "\n" + $command)
 }
@@ -716,7 +917,7 @@ def test-fileless-failure-retry-and-capability-contracts [] {
         let malformed_dir = ($fake_dir | path join "malformed")
         mkdir $malformed_dir
         let malformed = (make-fake-curl $malformed_dir "8.13.0" "malformed")
-        let malformed_frame = (run-with-fake-curl $root $malformed $"api get (($base + '/fake-transfer') | to nuon) --output none --no-history")
+        let malformed_frame = (run-with-fake-curl $root $malformed $"api get (($base + '/fake-transfer') | to nuon) --retries 2 --output none --no-history")
         assert ($malformed_frame.exit_code != 0) "missing trusted metadata frame unexpectedly succeeded"
         assert equal ($malformed_frame.stdout | str trim) "" "malformed metadata frame exposed response body"
         assert ($malformed_frame.stderr | str contains "trusted response metadata") $"malformed metadata diagnostic was not actionable: ($malformed_frame.stderr)"
@@ -724,6 +925,7 @@ def test-fileless-failure-retry-and-capability-contracts [] {
             assert (not ($malformed_frame.stdout | str contains $forbidden)) $"malformed metadata leaked to stdout: ($forbidden)"
             assert (not ($malformed_frame.stderr | str contains $forbidden)) $"malformed metadata leaked to stderr: ($forbidden)"
         }
+        assert equal (open $malformed.log --raw | lines | where $it == "request" | length) 1 "successful curl with malformed metadata was retried"
 
         for mode in ["size-too-large" "size-too-small"] {
             let mismatch_dir = ($fake_dir | path join $mode)
