@@ -435,8 +435,8 @@ def print-body [body: any, output_mode: string = "pretty"] {
         }
     } else {
         let body_str = try { $body | into string } catch { "" }
-        let peek = ($body_str | str trim | str downcase | str substring 0..20)
-        if ($peek | str starts-with "<!doctype") or ($peek | str starts-with "<html") {
+        let peek = ($body_str | str trim | str substring 0..20)
+        if ($peek =~ '(?i)^<!doctype') or ($peek =~ '(?i)^<html') {
             let len = ($body_str | str length)
             print $"(ansi dark_gray)[HTML response — ($len) bytes](ansi reset)"
             let html_lines = ($body_str | lines)
@@ -452,7 +452,7 @@ def print-body [body: any, output_mode: string = "pretty"] {
             } else {
                 print $body_str
             }
-        } else if ($peek | str starts-with "<?xml") {
+        } else if ($peek =~ '(?i)^<\?xml') {
             let len = ($body_str | str length)
             print $"(ansi dark_gray)[XML response — ($len) bytes](ansi reset)"
             let xml_lines = ($body_str | lines)
@@ -721,11 +721,12 @@ def last-header-block [header_output: string] {
 }
 
 def upsert-wire-header [headers: record, key: string, value: string] {
-    let normalized = ($key | str downcase)
+    let normalized = ($key | str escape-regex)
+    let key_pattern = ('(?i)^' + $normalized + '$')
     let retained = (
         $headers
         | transpose key value
-        | where {|header| ($header.key | str downcase) != $normalized }
+        | where {|header| not ($header.key =~ $key_pattern) }
         | reduce -f {} {|header, result| $result | upsert $header.key $header.value }
     )
     $retained | upsert $key $value
@@ -910,8 +911,8 @@ export def parse-curl-response [output: string] {
 def redact-sensitive-response-headers [headers: record] {
     $headers | transpose key value | reduce -f {} {|header, redacted|
         let sensitive = (
-            (($header.key | str downcase) =~ '(authorization|cookie|token|secret|api-key|session)')
-            or (($header.value | into string | str downcase) | str starts-with "bearer ")
+            ($header.key =~ '(?i)(authorization|cookie|token|secret|api-key|session)')
+            or (($header.value | into string) =~ '(?i)^bearer ')
         )
         $redacted | upsert $header.key (if $sensitive { "******" } else { $header.value })
     }

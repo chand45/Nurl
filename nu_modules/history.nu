@@ -199,8 +199,9 @@ export def "api history list" [
             let want = ($filter | str replace "status:" "" | into int)
             ($entry.status? | default 0) == $want
         } else if ($filter | str starts-with "method:") {
-            let want = ($filter | str replace "method:" "" | str upcase)
-            ($entry.method? | default "") == $want
+            let want = ($filter | str replace "method:" "" | str escape-regex)
+            let pattern = ('(?i)^' + $want + '$')
+            ($entry.method? | default "") =~ $pattern
         } else {
             ($entry.url? | default "") | str contains $filter
         }

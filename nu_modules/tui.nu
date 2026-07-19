@@ -3,6 +3,36 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files run-tui-resource-action]
 
+def uppercase-ascii [] {
+    $in
+    | str replace --all "a" "A"
+    | str replace --all "b" "B"
+    | str replace --all "c" "C"
+    | str replace --all "d" "D"
+    | str replace --all "e" "E"
+    | str replace --all "f" "F"
+    | str replace --all "g" "G"
+    | str replace --all "h" "H"
+    | str replace --all "i" "I"
+    | str replace --all "j" "J"
+    | str replace --all "k" "K"
+    | str replace --all "l" "L"
+    | str replace --all "m" "M"
+    | str replace --all "n" "N"
+    | str replace --all "o" "O"
+    | str replace --all "p" "P"
+    | str replace --all "q" "Q"
+    | str replace --all "r" "R"
+    | str replace --all "s" "S"
+    | str replace --all "t" "T"
+    | str replace --all "u" "U"
+    | str replace --all "v" "V"
+    | str replace --all "w" "W"
+    | str replace --all "x" "X"
+    | str replace --all "y" "Y"
+    | str replace --all "z" "Z"
+}
+
 def get-collections-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
     resolve-under-base $root "collections" "collections directory" --scope "API workspace"
@@ -276,7 +306,7 @@ export def "api tui request" [] {
     print $"(ansi blue)═══ Quick Request ═══(ansi reset)"
     print ""
 
-    let method = (input "Method [GET]: " | str trim | str upcase)
+    let method = (input "Method [GET]: " | str trim | uppercase-ascii)
     let method = if $method == "" { "GET" } else { $method }
 
     let url = (input "URL: " | str trim)
