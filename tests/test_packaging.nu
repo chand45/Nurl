@@ -1,5 +1,7 @@
 # Fresh-install payload and command-discovery regressions.
 
+use ../nu_modules/string-compat.nu [ascii-equal-ignore-case ascii-upcase]
+
 def installer-modules [path: string, prefix: string] {
     let declaration = (
         open $path --raw
@@ -586,6 +588,24 @@ def test-installer-module-payloads [] {
     }
 }
 
+def test-nushell-command-compatibility-floor [] {
+    let forbidden = ["str downcase" "str upcase" "str escape-regex"]
+    let modules = (
+        ls ($env.NURL_REPO_ROOT | path join "nu_modules")
+        | where type == file
+        | where {|entry| $entry.name | str ends-with ".nu" }
+    )
+    for module in $modules {
+        let source = (open $module.name --raw)
+        for command in $forbidden {
+            assert (not ($source | str contains $command)) $"($module.name | path basename) uses unsupported or deprecated command '($command)'"
+        }
+    }
+    assert (ascii-equal-ignore-case "M+SEARCH" "m+search") "ASCII protocol-token comparison should ignore letter case"
+    assert (not (ascii-equal-ignore-case "M+SEARCH" "MSEARCH")) "ASCII protocol-token comparison should treat metacharacters literally"
+    assert equal ("m-search" | ascii-upcase) "M-SEARCH" "TUI method normalization should uppercase ASCII letters"
+}
+
 def test-installer-script-syntax [] {
     let repo = $env.NURL_REPO_ROOT
     let ps_path = ($repo | path join "install.ps1")
@@ -760,6 +780,7 @@ def run-suite-packaging []: nothing -> list<record> {
     print $"\n(ansi yellow)── Installer packaging and discovery ──(ansi reset)"
     [
         (run-test "fresh installer payloads include and source every transitive module" { test-installer-module-payloads })
+        (run-test "runtime modules keep the documented Nushell command floor" { test-nushell-command-compatibility-floor })
         (run-test "installer scripts remain syntactically valid" { test-installer-script-syntax })
         (run-test "PowerShell installer rejects unsafe curl probes before mutation" { test-powershell-installer-curl-preflight })
         (run-test "shell installer rejects unsafe curl probes before mutation" { test-shell-installer-curl-preflight })

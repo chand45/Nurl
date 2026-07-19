@@ -83,6 +83,18 @@ def test-b1-history-search-by-url [] {
     cleanup $tmp
 }
 
+def test-b1-history-method-filter-treats-token-literally [] {
+    let tmp = (make-temp-dir "b1-method-token")
+    $env.API_ROOT = $tmp
+    init-workspace
+    api history save (synth-req "https://example.com/literal" "M+SEARCH") (synth-res 200)
+    api history save (synth-req "https://example.com/near-match" "MSEARCH") (synth-res 200)
+    let results = (api history list --filter "method:m+search")
+    assert equal ($results | length) 1 "method filter must not interpret token metacharacters as regex"
+    assert equal ($results | first | get method) "M+SEARCH" "method filter should remain ASCII case-insensitive"
+    cleanup $tmp
+}
+
 def test-b1-rebuild-index [] {
     let tmp = (make-temp-dir "b1-rebuild")
     $env.API_ROOT = $tmp
@@ -126,6 +138,7 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: history list newest-first"                   { test-b1-history-list-newest-first })
         (run-test "B1: history list respects --limit"               { test-b1-history-list-limit })
         (run-test "B1: history search by URL fragment"              { test-b1-history-search-by-url })
+        (run-test "B1: method token filtering is literal and case-insensitive" { test-b1-history-method-filter-treats-token-literally })
         (run-test "B1: rebuild-index recreates index.nuon"          { test-b1-rebuild-index })
         (run-test "B1: rebuilt index preserves newest-first order"  { test-b1-index-sorted-after-rebuild })
     ]

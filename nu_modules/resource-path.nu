@@ -1,5 +1,9 @@
 # Internal resource identifier validation and path containment.
 
+export def path-type-safe [path: string] {
+    [$path] | path type | first | default ""
+}
+
 def invalid-resource-name [kind: string, name: string, detail: string] {
     error make {
         msg: $"Invalid ($kind) name '($name)': ($detail)."
@@ -50,7 +54,7 @@ def resolve-existing-component [
 ] {
     let resolved = ($path | path expand)
 
-    if $path_type == "symlink" and (($resolved | path type) == "symlink") {
+    if $path_type == "symlink" and ((path-type-safe $resolved) == "symlink") {
         invalid-resource-name $kind $logical_name $"path must remain under ($location); unresolved or dangling links are not allowed"
     }
 
@@ -64,7 +68,7 @@ def canonicalize-base [
     location: string
 ] {
     mut probe = ($base | path expand --no-symlink)
-    mut probe_type = ($probe | path type)
+    mut probe_type = (path-type-safe $probe)
     mut missing = []
 
     loop {
@@ -79,7 +83,7 @@ def canonicalize-base [
 
         $missing = ($missing | append ($probe | path basename))
         $probe = $parent
-        $probe_type = ($probe | path type)
+        $probe_type = (path-type-safe $probe)
     }
 
     mut resolved = (resolve-existing-component $probe $probe_type $kind $logical_name $location)
@@ -147,7 +151,7 @@ export def resolve-under-base [
         $candidate = ($candidate | path join $segment)
 
         if $parent_exists {
-            let candidate_type = ($candidate | path type)
+            let candidate_type = (path-type-safe $candidate)
             if not ($candidate_type | is-empty) {
                 $candidate = (resolve-existing-component $candidate $candidate_type $kind $logical_name $location)
                 if not (is-strict-descendant $candidate $canonical_base) {

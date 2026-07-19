@@ -3,6 +3,7 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
+use string-compat.nu [ascii-equal-ignore-case]
 
 # Get history directory
 def get-history-dir [] {
@@ -199,9 +200,8 @@ export def "api history list" [
             let want = ($filter | str replace "status:" "" | into int)
             ($entry.status? | default 0) == $want
         } else if ($filter | str starts-with "method:") {
-            let want = ($filter | str replace "method:" "" | str escape-regex)
-            let pattern = ('(?i)^' + $want + '$')
-            ($entry.method? | default "") =~ $pattern
+            let want = ($filter | str replace "method:" "")
+            ascii-equal-ignore-case ($entry.method? | default "") $want
         } else {
             ($entry.url? | default "") | str contains $filter
         }

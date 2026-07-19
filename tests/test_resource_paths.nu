@@ -1,6 +1,6 @@
 # Resource identifier path-containment regressions.
 
-use ../nu_modules/resource-path.nu [validate-resource-name resolve-under-base]
+use ../nu_modules/resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 
 def expect-resource-error [action: closure, expected: string] {
     let caught = try {
@@ -336,6 +336,8 @@ def test-resource-helper-boundaries [] {
     let tmp = (make-temp-dir "resource-helper")
     let base = ($tmp | path join "base")
     mkdir $base
+    assert equal (path-type-safe $base) "dir"
+    assert equal (path-type-safe ($base | path join "missing")) ""
     let resolved = (resolve-under-base $base "auth/login.nuon" "request" --nested --suffix ".nuon" --scope "<collection>/requests")
     assert ($resolved | str ends-with (["auth" "login.nuon"] | path join))
     expect-resource-error {

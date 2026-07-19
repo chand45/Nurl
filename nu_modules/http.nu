@@ -4,9 +4,10 @@
 use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use auth.nu ["api auth get-config"]
-use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+use resource-path.nu [path-type-safe validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
+use string-compat.nu [ascii-equal-ignore-case]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -136,7 +137,7 @@ def read-body-file [body_file: string] {
     if not ($body_file | path exists) {
         fail-command $"Body file '($body_file)' not found"
     }
-    if ($body_file | path type) == "dir" {
+    if (path-type-safe $body_file) == "dir" {
         fail-command $"Body file '($body_file)' must be a readable file"
     }
     try {
@@ -721,12 +722,10 @@ def last-header-block [header_output: string] {
 }
 
 def upsert-wire-header [headers: record, key: string, value: string] {
-    let normalized = ($key | str escape-regex)
-    let key_pattern = ('(?i)^' + $normalized + '$')
     let retained = (
         $headers
         | transpose key value
-        | where {|header| not ($header.key =~ $key_pattern) }
+        | where {|header| not (ascii-equal-ignore-case $header.key $key) }
         | reduce -f {} {|header, result| $result | upsert $header.key $header.value }
     )
     $retained | upsert $key $value
@@ -1009,7 +1008,7 @@ def parse-binary-response [metadata: record, attempt_path: string, destination: 
     } catch {
         fail-command "Curl returned an invalid binary response size"
     }
-    if $expected_size < 0 or not ($attempt_path | path exists) or ($attempt_path | path type) != "file" {
+    if $expected_size < 0 or (path-type-safe $attempt_path) != "file" {
         fail-command "Curl did not produce a complete binary response file"
     }
     let actual_size = (ls $attempt_path | first | get size | into int)
