@@ -2,7 +2,7 @@
 # These tests are OFFLINE: they exercise the pure interpolation/extraction
 # logic without making HTTP requests.
 
-use std assert
+use test-assert.nu [assert "assert equal" "assert not"]
 
 # ── api vars interpolate ──────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@
 # Exercises the internal --raw caller path: chain.nu calls api request --raw
 # so the result is a record. These tests need network.
 
-use std assert
+use test-assert.nu [assert "assert equal" "assert not"]
 
 # ── Chain: sequential requests with body and extraction ───────────────────────
 

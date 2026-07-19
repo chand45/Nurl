@@ -1,7 +1,7 @@
 # Shared test helpers for the Nurl test suite.
 # Sourced by run.nu before individual test files.
 
-use std assert
+use test-assert.nu [assert "assert equal" "assert not"]
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 

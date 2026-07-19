@@ -222,6 +222,9 @@ try {
                 'X-Duplicate: second' + $crlf +
                 'X-Mixed-Dupe: first' + $crlf +
                 'x-mIxEd-DuPe: second' + $crlf +
+                'X.Trace+ID: first' + $crlf +
+                'XxTraceeID: distinct' + $crlf +
+                'x.tRACE+id: second' + $crlf +
                 'X-Marker-Like: NURL_RESPONSE_META_static_BEGIN' + $crlf
             } elseif ($requestPath -eq '/redirect') {
                 'Location: /sensitive-headers' + $crlf
@@ -463,6 +466,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('X-Duplicate', 'second')
             self.send_header('X-Mixed-Dupe', 'first')
             self.send_header('x-mIxEd-DuPe', 'second')
+            self.send_header('X.Trace+ID', 'first')
+            self.send_header('XxTraceeID', 'distinct')
+            self.send_header('x.tRACE+id', 'second')
             self.send_header('X-Marker-Like', 'NURL_RESPONSE_META_static_BEGIN')
         elif self.path == '/redirect':
             self.send_header('Location', '/sensitive-headers')

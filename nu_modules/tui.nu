@@ -2,6 +2,7 @@
 # Interactive interface for browsing and managing API requests
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files run-tui-resource-action]
+use string-compat.nu [ascii-upcase]
 
 def get-collections-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -276,7 +277,7 @@ export def "api tui request" [] {
     print $"(ansi blue)═══ Quick Request ═══(ansi reset)"
     print ""
 
-    let method = (input "Method [GET]: " | str trim | str upcase)
+    let method = (input "Method [GET]: " | str trim | ascii-upcase)
     let method = if $method == "" { "GET" } else { $method }
 
     let url = (input "URL: " | str trim)

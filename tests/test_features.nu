@@ -1,6 +1,6 @@
 # Feature tests — C4 through C11
 
-use std assert
+use test-assert.nu [assert "assert equal" "assert not"]
 
 # ── C4: --form encodes as application/x-www-form-urlencoded ──────────────────
 

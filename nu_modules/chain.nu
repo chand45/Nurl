@@ -3,7 +3,7 @@
 
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use http.nu ["api request"]
-use resource-path.nu [validate-resource-name resolve-under-base]
+use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 
@@ -264,13 +264,13 @@ export def "api chain exec" [
         $named_file
     } else {
         # Explicit path syntax remains path-taking input and is not confined to the workspace.
-        let direct_type = ($file | path type)
+        let direct_type = (path-type-safe $file)
         let root_relative = ($root | path join $file)
-        let root_relative_type = ($root_relative | path type)
+        let root_relative_type = (path-type-safe $root_relative)
         let chains_relative = ($root | path join "chains" $file)
-        let chains_relative_type = ($chains_relative | path type)
+        let chains_relative_type = (path-type-safe $chains_relative)
         let chains_relative_with_suffix = ($root | path join "chains" $"($file).nuon")
-        let chains_relative_with_suffix_type = ($chains_relative_with_suffix | path type)
+        let chains_relative_with_suffix_type = (path-type-safe $chains_relative_with_suffix)
 
         if ($direct_type | is-not-empty) and $direct_type != "dir" {
             $file
