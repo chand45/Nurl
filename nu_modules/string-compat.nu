@@ -1,6 +1,6 @@
 # ASCII-only case helpers for protocol tokens.
 
-export def ascii-upcase [] {
+export def ascii-upcase []: string -> string {
     $in
     | str replace --all "a" "A"
     | str replace --all "b" "B"
@@ -30,6 +30,6 @@ export def ascii-upcase [] {
     | str replace --all "z" "Z"
 }
 
-export def ascii-equal-ignore-case [left: string, right: string] {
+export def ascii-equal-ignore-case [left: string, right: string]: nothing -> bool {
     ($left | ascii-upcase) == ($right | ascii-upcase)
 }

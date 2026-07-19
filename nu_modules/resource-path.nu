@@ -1,6 +1,6 @@
 # Internal resource identifier validation and path containment.
 
-export def path-type-safe [path: string] {
+export def path-type-safe [path: string]: nothing -> string {
     [$path] | path type | first | default ""
 }
 
