@@ -117,12 +117,16 @@ try {
             $requestLine = $reader.ReadLine()
             $contentLength = 0
             $authorization = ''
+            $apiKey = ''
             while (($line = $reader.ReadLine()) -ne '') {
                 if ($line -match '(?i)^Content-Length:\\s*(\\d+)') {
                     $contentLength = [int]$Matches[1]
                 }
                 if ($line -match '(?i)^Authorization:\\s*(.*)$') {
                     $authorization = $Matches[1]
+                }
+                if ($line -match '(?i)^(?:X-API-Key|X[.]Nurl[+]Key):\\s*(.*)$') {
+                    $apiKey = $Matches[1]
                 }
             }
             $body = ''
@@ -156,7 +160,7 @@ try {
                 $contentType = 'application/json'
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
-                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + [Environment]::NewLine)
+                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + [Environment]::NewLine)
                 if ($requestPath -eq '/slow') {
                     Start-Sleep -Seconds 3
                 }
@@ -392,8 +396,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_protected(self):
         authorization = self.headers.get('Authorization', '')
+        api_key = self.headers.get('X.Nurl+Key', self.headers.get('X-API-Key', ''))
         with open(wire_file, 'a', encoding='utf-8') as handle:
-            handle.write(self.path + '\\t' + authorization + '\\n')
+            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\n')
         if self.path in ('/slow', '/timeout'):
             time.sleep(3)
         if self.path == '/acl-slow':
@@ -740,7 +745,7 @@ def command-error-wire-events [server: record] {
     open $server.wire_file --raw
     | lines
     | where {|line| not ($line | is-empty) }
-    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>.*)$'
+    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>.*)$'
 }
 
 def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {

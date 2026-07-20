@@ -2,6 +2,7 @@
 # Handles Bearer, Basic, API Key, and OAuth2 authentication
 
 use command-error.nu [fail-command]
+use string-compat.nu [ascii-upcase]
 
 # Truncate a string to max length with ellipsis
 def truncate-value [value: any, max_len: int = 40] {
@@ -334,51 +335,261 @@ export def "api auth oauth2 delete" [name: string] {
 
 # --- Utility Functions ---
 
-# Get auth configuration for request
-export def "api auth get-config" [auth_spec: record] {
-    let auth_type = ($auth_spec.type? | default "none")
-    let ref = ($auth_spec.token_ref? | default ($auth_spec.ref? | default ""))
+def auth-field [auth_spec: record, names: list<string>] {
+    for name in $names {
+        if $name in ($auth_spec | columns) {
+            return {present: true, name: $name, value: ($auth_spec | get -o $name)}
+        }
+    }
+    {present: false, name: "", value: null}
+}
+
+def auth-reference [auth_spec: record, names: list<string>, label: string] {
+    let field = (auth-field $auth_spec $names)
+    if not $field.present {
+        return ""
+    }
+    if ($field.value | describe) != "string" or ($field.value | str trim | is-empty) {
+        fail-command $"($label) reference must be a non-empty string"
+    }
+    $field.value
+}
+
+def get-saved-auth-record [bucket: string, name: string, label: string] {
+    let secrets = (load-secrets)
+    let saved = ($secrets | get -o $bucket)
+    let config = if $saved == null { null } else { $saved | get -o $name }
+    if $config == null {
+        fail-command $"($label) '($name)' not found"
+    }
+    if not (($config | describe) | str starts-with "record") {
+        fail-command $"($label) '($name)' is malformed"
+    }
+    $config
+}
+
+def require-auth-string [
+    config: record
+    field: string
+    label: string
+    --allow-empty
+] {
+    let value = ($config | get -o $field)
+    if $value == null or ($value | describe) != "string" {
+        fail-command $"($label) is malformed"
+    }
+    if not $allow_empty and ($value | str trim | is-empty) {
+        fail-command $"($label) is malformed"
+    }
+    $value
+}
+
+def resolve-bearer-reference [name: string, --metadata-only] {
+    let label = $"Bearer token '($name)'"
+    let config = (get-saved-auth-record "tokens" $name "Bearer token")
+    let token = (require-auth-string $config "bearer" $label)
+    if $metadata_only { null } else { $token }
+}
+
+def resolve-basic-reference [name: string, --metadata-only] {
+    let label = $"Basic credentials '($name)'"
+    let config = (get-saved-auth-record "basic_auth" $name "Basic credentials")
+    let credentials = {
+        username: (require-auth-string $config "username" $label --allow-empty)
+        password: (require-auth-string $config "password" $label --allow-empty)
+    }
+    if $metadata_only { null } else { $credentials }
+}
+
+def resolve-apikey-reference [name: string, --metadata-only] {
+    let label = $"API key '($name)'"
+    let config = (get-saved-auth-record "api_keys" $name "API key")
+    let location = (require-auth-string $config "type" $label | ascii-upcase)
+    let key = if $metadata_only {
+        require-auth-string $config "key" $label | ignore
+        null
+    } else {
+        require-auth-string $config "key" $label
+    }
+
+    match $location {
+        "HEADER" => {
+            {
+                type: "apikey_header"
+                key: $key
+                header_name: (require-auth-string $config "header_name" $label)
+            }
+        }
+        "QUERY" => {
+            {
+                type: "apikey_query"
+                key: $key
+                param_name: (require-auth-string $config "param_name" $label)
+            }
+        }
+        _ => { fail-command $"($label) is malformed" }
+    }
+}
+
+def resolve-inline-apikey-shape [auth_spec: record] {
+    let param = (auth-field $auth_spec ["param_name" "query"])
+    let location = ($auth_spec.location? | default "" | into string | ascii-upcase)
+    let query_mode = $param.present or $location == "QUERY"
+
+    if $query_mode {
+        if not $param.present or ($param.value | describe) != "string" or ($param.value | str trim | is-empty) {
+            fail-command "Inline API key query authentication requires a non-empty parameter name"
+        }
+        {type: "apikey_query", param_name: $param.value}
+    } else {
+        let header = (auth-field $auth_spec ["header_name" "header"])
+        let header_name = if $header.present { $header.value } else { "X-API-Key" }
+        if ($header_name | describe) != "string" or ($header_name | str trim | is-empty) {
+            fail-command "Inline API key header authentication requires a non-empty header name"
+        }
+        {type: "apikey_header", header_name: $header_name}
+    }
+}
+
+def validate-oauth-reference [name: string] {
+    let label = $"OAuth2 '($name)'"
+    let config = (get-saved-auth-record "oauth" $name "OAuth2")
+    require-auth-string $config "client_id" $label | ignore
+    require-auth-string $config "client_secret" $label | ignore
+    require-auth-string $config "token_url" $label | ignore
+}
+
+# Prepare separate safe display/history projections and a secret-bearing wire projection.
+# Display-only preparation validates references but never acquires or refreshes OAuth tokens.
+export def prepare-auth-context [
+    auth_spec: record
+    --display-only
+] {
+    if ($auth_spec | is-empty) {
+        return {display: {}, history: null, wire: null}
+    }
+
+    let raw_type = ($auth_spec.type? | default null)
+    if $raw_type == null or ($raw_type | describe) != "string" or ($raw_type | str trim | is-empty) {
+        fail-command "Authentication type must be a non-empty string"
+    }
+    let auth_type = ($raw_type | ascii-upcase)
 
     match $auth_type {
-        "bearer" => {
-            let token = if $ref != "" {
-                api auth bearer get $ref
+        "NONE" => { {display: {}, history: null, wire: null} }
+        "BEARER" => {
+            let ref = (auth-reference $auth_spec ["token_ref" "ref"] "Bearer token")
+            let named = not ($ref | is-empty)
+            let token = if $named {
+                resolve-bearer-reference $ref --metadata-only=$display_only
             } else {
-                $auth_spec.token? | default ""
+                let inline_token = ($auth_spec.token? | default null)
+                if $inline_token == null or ($inline_token | describe) != "string" or ($inline_token | str trim | is-empty) {
+                    fail-command "Bearer token is missing"
+                }
+                $inline_token
             }
-            { type: "bearer", token: $token }
-        }
-        "basic" => {
-            # Accept creds_ref (documented) or generic ref as fallback
-            let basic_ref = ($auth_spec.creds_ref? | default ($auth_spec.ref? | default ""))
-            let creds = if $basic_ref != "" {
-                api auth basic get $basic_ref
-            } else {
-                { username: ($auth_spec.username? | default ""), password: ($auth_spec.password? | default "") }
-            }
-            { type: "basic", username: $creds.username, password: $creds.password }
-        }
-        "api_key" | "apikey" => {
-            # Accept key_ref (documented) or generic ref as fallback
-            let apikey_ref = ($auth_spec.key_ref? | default ($auth_spec.ref? | default $ref))
-            let key_config = if $apikey_ref != "" {
-                api auth apikey get $apikey_ref
-            } else {
-                { key: ($auth_spec.key? | default ""), type: "header", header_name: ($auth_spec.header? | default "X-API-Key") }
-            }
-
-            if ($key_config.type? | default "header") == "query" {
-                { type: "apikey_query", key: $key_config.key, param_name: $key_config.param_name }
-            } else {
-                { type: "apikey_header", key: $key_config.key, header_name: $key_config.header_name }
+            {
+                display: {type: "bearer", token: "******"}
+                history: (if $named {
+                    {type: "bearer", ref: $ref, replayable: true}
+                } else {
+                    {type: "bearer", replayable: false}
+                })
+                wire: (if $display_only { null } else { {type: "bearer", token: $token} })
             }
         }
-        "oauth2" => {
-            let result = (acquire-oauth2-token $ref)
-            { type: "bearer", token: $result.token }
+        "BASIC" => {
+            let ref = (auth-reference $auth_spec ["creds_ref" "ref"] "Basic credentials")
+            let named = not ($ref | is-empty)
+            let credentials = if $named {
+                resolve-basic-reference $ref --metadata-only=$display_only
+            } else {
+                {
+                    username: (require-auth-string $auth_spec "username" "Inline basic authentication" --allow-empty)
+                    password: (require-auth-string $auth_spec "password" "Inline basic authentication" --allow-empty)
+                }
+            }
+            {
+                display: {type: "basic", username: "******", password: "******"}
+                history: (if $named {
+                    {type: "basic", ref: $ref, replayable: true}
+                } else {
+                    {type: "basic", replayable: false}
+                })
+                wire: (if $display_only {
+                    null
+                } else {
+                    {type: "basic", username: $credentials.username, password: $credentials.password}
+                })
+            }
         }
-        _ => {}
+        "API_KEY" | "APIKEY" => {
+            let ref = (auth-reference $auth_spec ["key_ref" "ref"] "API key")
+            let named = not ($ref | is-empty)
+            let shape = if $named {
+                resolve-apikey-reference $ref --metadata-only=$display_only
+            } else {
+                resolve-inline-apikey-shape $auth_spec
+            }
+            let key = if $named {
+                $shape.key
+            } else {
+                require-auth-string $auth_spec "key" "Inline API key authentication"
+            }
+            let display = if $shape.type == "apikey_query" {
+                {type: "apikey_query", key: "******", param_name: $shape.param_name}
+            } else {
+                {type: "apikey_header", key: "******", header_name: $shape.header_name}
+            }
+            let inline_history = if $shape.type == "apikey_query" {
+                {type: "api_key", location: "query", param_name: $shape.param_name, replayable: false}
+            } else {
+                {type: "api_key", location: "header", header_name: $shape.header_name, replayable: false}
+            }
+            let wire = if $display_only {
+                null
+            } else if $shape.type == "apikey_query" {
+                {type: "apikey_query", key: $key, param_name: $shape.param_name}
+            } else {
+                {type: "apikey_header", key: $key, header_name: $shape.header_name}
+            }
+            {
+                display: $display
+                history: (if $named {
+                    {type: "api_key", ref: $ref, replayable: true}
+                } else {
+                    $inline_history
+                })
+                wire: $wire
+            }
+        }
+        "OAUTH2" => {
+            let ref = (auth-reference $auth_spec ["ref"] "OAuth2")
+            if ($ref | is-empty) {
+                fail-command "OAuth2 authentication requires a non-empty ref"
+            }
+            validate-oauth-reference $ref
+            let wire = if $display_only {
+                null
+            } else {
+                let result = (acquire-oauth2-token $ref)
+                {type: "bearer", token: $result.token}
+            }
+            {
+                display: {type: "bearer", token: "******"}
+                history: {type: "oauth2", ref: $ref, replayable: true}
+                wire: $wire
+            }
+        }
+        _ => { fail-command $"Unsupported authentication type '($raw_type)'" }
     }
+}
+
+# Get secret-bearing auth configuration for real request execution.
+export def "api auth get-config" [auth_spec: record] {
+    let context = (prepare-auth-context $auth_spec)
+    $context.wire? | default {}
 }
 
 # Show all authentication configurations

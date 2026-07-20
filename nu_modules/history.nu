@@ -273,10 +273,10 @@ export def "api history resend" [
     id: string               # History entry ID
     --environment (-e): string = ""  # Override environment
     --auth (-a): record = {} # Authentication config (e.g., {type: bearer, token_ref: mytoken})
+    --headers (-H): record # Replace stored headers (required when sensitive headers were redacted)
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {
-    require-curl-capability --dry-run=$dry_run
     let entry = (find-history-entry $id)
 
     if $entry == null {
@@ -286,6 +286,26 @@ export def "api history resend" [
     # Switch environment if specified
     # Note: global env concept not supported; flag is kept for backward compat but is a no-op
     # (was: api env use $environment — command does not exist)
+
+    let explicit_auth = not ($auth | is-empty)
+    let stored_auth = ($entry.request.auth? | default null)
+    let effective_auth = if $explicit_auth {
+        $auth
+    } else if $stored_auth == null {
+        {}
+    } else if ($stored_auth.replayable? | default false) == true {
+        $stored_auth
+    } else {
+        let auth_type = ($stored_auth.type? | default "inline")
+        fail-command $"History entry '($id)' used non-replayable ($auth_type) authentication; pass --auth to resend it"
+    }
+    let explicit_headers = $headers != null
+    if ($entry.request.headers_replayable? | default true) == false and not $explicit_headers {
+        fail-command $"History entry '($id)' contains redacted sensitive headers; pass --headers to resend it"
+    }
+    let effective_headers = if $explicit_headers { $headers } else { $entry.request.headers }
+
+    require-curl-capability --dry-run=$dry_run
 
     # Rebuild body record from stored body (avoid double-encoding)
     let body_record = if ($entry.request.body? | default null) != null {
@@ -300,7 +320,7 @@ export def "api history resend" [
     }
 
     # Execute request — pass body as record (api request handles to-json internally)
-    api request -m $entry.request.method $entry.request.url -b $body_record -H $entry.request.headers -a $auth --raw=$raw --dry-run=$dry_run
+    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --raw=$raw --dry-run=$dry_run
 }
 
 # Search history — uses index for URL/method; falls back to files for body search

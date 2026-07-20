@@ -105,3 +105,13 @@ request, interpolates variables, or touches `.nuon` files.
   output. HTTP 4xx and final 5xx remain typed exit-0 responses.
 - **Re-check:** run `tests/test_transport_failures.nu`; it covers direct, saved, resend, binary, and
   chain surfaces, negative preflight, exact attempts, redaction, and destination preservation.
+
+## 13. Auth previews leaked secrets and authenticated history resent without auth  (FIXED)
+- **Symptom:** basic/API-key dry-run and request export rendered wire credentials. History omitted
+  auth metadata, so default resend silently downgraded authenticated requests to unauthenticated.
+- **Fix:** auth preparation now has separate display, wire, and canonical replay projections.
+  Preview/export masks supported auth and sensitive headers without OAuth acquisition. Named refs
+  are stored without secrets and re-resolved on resend; inline auth is stored as non-replayable and
+  requires an explicit `--auth` override.
+- **Re-check:** run `tests/test_auth_replay.nu`; it covers rotation, override precedence, legacy
+  history, invalid refs, no-side-effect failures, query fragments, and the preview/export matrix.

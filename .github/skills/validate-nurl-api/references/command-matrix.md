@@ -80,7 +80,7 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api auth oauth2 delete | `api auth oauth2 delete tmpcred` | Removed. |
 | api auth show | `api auth bearer set tmpcred abc; api auth show --full; api auth bearer delete tmpcred` | Shows credential type/status and the isolated `tmpcred` value; never run `--full` against real secrets in captured logs. |
 | api auth list | `api auth list` | Lists configured credentials by type. |
-| **Applied auth** | add `-a {type: bearer, token_ref: tmpcred}` to `api get`/`api send` | Request carries an `Authorization` header; redact its value in captured output. |
+| **Applied auth** | add named bearer/basic/API-key/OAuth2 refs to `api get`/`api send`; repeat with `--dry-run` | Real requests carry resolved wire auth. Preview masks every credential, preserves API-key header/query names, and does not acquire OAuth tokens. |
 
 ## requests
 | Command | Invocation | Expected |
@@ -116,14 +116,14 @@ Full lifecycle on a temp request, cleaned up at the end.
 | api request show | `api request show tmp-req -c jsonplaceholder` | Prints method/url/headers. |
 | api request update | `api request update tmp-req --method POST -c jsonplaceholder` | Method now `POST`. |
 | api request delete | `api request delete tmp-req -c jsonplaceholder --force` | Removed. |
-| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is the interpolated curl dry-run, stderr is empty, and neither network nor history is touched. |
+| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is one interpolated, credential-masked curl line, stderr is empty, and neither network, OAuth, history, nor saved state is touched. |
 
 ## history
 | Command | Invocation | Expected |
 |---|---|---|
 | api history list | `api get .../posts/1; api history list` | New entry at the top. |
 | api history show | `api history show (api history list \| first \| get id)` | Prints full request/response. |
-| api history resend | `api history resend <id>` | Re-executes; POST bodies re-sent as a string (no double-encode). Transport failure has empty stdout and propagates nonzero. `-e` is **inert**. |
+| api history resend | `api history resend <id>` | Re-executes; POST bodies are not double-encoded. Named auth refs are re-resolved, inline auth requires an explicit `--auth` override, legacy no-auth entries remain unauthenticated, and `--dry-run` stays masked/side-effect-free. Transport failure has empty stdout and propagates nonzero. `-e` is **inert**. |
 | api history search | `api history search posts` | Matching entries. |
 | api history clear | `api history clear` | Removes only date directories older than `history_retention_days`; use `--before YYYY-MM-DD` for an explicit cutoff or `--all --force` to remove everything. Run destructive variants in a throwaway `API_ROOT`. |
 | api history export | `let out = ($nu.temp-dir \| path join $"nurl-hist-(random uuid).json"); api history export --format json --output $out; rm -f $out` | `--format` accepts case-sensitive `json` or `csv`; other values fail before output creation. This writes the isolated JSON export and then removes it. |

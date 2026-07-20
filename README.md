@@ -388,7 +388,10 @@ Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `st
 `--output raw` preserves the response payload text exactly, including JSON scalar syntax and
 whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
 takes precedence over `--output`. With `--dry-run`, the curl preview is returned instead of an
-HTTP response. `--save` may be combined with data modes, and `--binary-save` writes the response
+HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
+OAuth token endpoint. They render bearer/OAuth authorization, basic credentials, API-key values,
+and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
+header/query names. `--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted
 transport failures preserve an existing destination and leave an absent destination absent.
@@ -542,6 +545,10 @@ api get "{{base_url}}/protected" -a { type: basic, creds_ref: mycreds }
 api auth apikey set mykey "api-key-123" --header "X-API-Key"
 api get "{{base_url}}/data" -a { type: apikey, key_ref: mykey }
 
+# API key (in query)
+api auth apikey set querykey "api-key-123" --query "api_key"
+api get "{{base_url}}/data?format=json" -a { type: api_key, ref: querykey }
+
 # OAuth2 (client credentials)
 api auth oauth2 configure myapp --client-id "id" --client-secret "secret" --token-url "https://auth.example.com/token"
 api auth oauth2 token myapp  # Fetch/refresh token
@@ -549,6 +556,11 @@ api auth oauth2 token myapp  # Fetch/refresh token
 # View all auth configurations
 api auth show
 ```
+
+Named authentication accepts the family-specific aliases (`token_ref`, `creds_ref`, and `key_ref`)
+or the generic `ref`. Successful history stores only the canonical type and reference, never the
+resolved token, key, password, access token, refresh token, or client secret. Inline bearer, basic,
+and API-key values can execute, but are recorded as non-replayable without storing the credential.
 
 ### History
 
@@ -566,8 +578,11 @@ api history search "POST"
 # View full request/response details
 api history show 20260111-143208-xK9mPq
 
-# Resend a previous request (body, headers, and auth preserved exactly)
+# Resend a previous request (named auth is re-resolved from its saved reference)
 api history resend 20260111-143208-xK9mPq
+
+# Override stored auth (also required for history created from inline credentials)
+api history resend 20260111-143208-xK9mPq -a { type: bearer, ref: mytoken }
 
 # Rebuild the history index (repairs or migrates existing history files)
 api history rebuild-index
@@ -580,6 +595,12 @@ api history clear --all --force           # remove every history entry
 # Export history
 api history export --output history.json
 ```
+
+Re-resolving named auth on resend means credential rotation is honored automatically for bearer,
+basic, API-key header/query, and OAuth2 references. Legacy history without auth metadata retains
+its unauthenticated resend behavior. A default resend of non-replayable inline auth fails before
+network or file side effects and tells you to pass `--auth`. New history also redacts recognized
+sensitive explicit request headers; resend requires `--headers` instead of transmitting mask text.
 
 ### Request Chaining
 
