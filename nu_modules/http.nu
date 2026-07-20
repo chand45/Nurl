@@ -3,11 +3,12 @@
 
 use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use auth.nu [prepare-auth-context]
+use auth.nu [prepare-auth-context redact-sensitive-headers sensitive-header]
+use history.nu ["api history save"]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
+use string-compat.nu [ascii-equal-ignore-case]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -31,55 +32,6 @@ def resolve-request-file [requests_dir: string, name: string, --optional-suffix]
 
 def list-request-files [requests_dir: string] {
     list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
-}
-
-# Internal function to save history (avoids module scoping issues)
-def save-to-history [request: record, response: record] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let history_dir = ($root | path join "history")
-
-    if not ($history_dir | path exists) {
-        mkdir $history_dir
-    }
-
-    let date_dir = ($history_dir | path join (date now | format date "%Y-%m-%d"))
-    if not ($date_dir | path exists) {
-        mkdir $date_dir
-    }
-
-    let id = $"(date now | format date '%Y%m%d-%H%M%S')-(random chars --length 6)"
-    let config_path = ($root | path join "config.nuon")
-    let current_env = if ($config_path | path exists) {
-        (open $config_path).default_environment? | default null
-    } else { null }
-
-    let entry = {
-        id: $id
-        timestamp: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-        environment: $current_env
-        request: $request
-        response: $response
-    }
-
-    $entry | to nuon | save ($date_dir | path join $"($id).nuon")
-
-    # Update history index (B1) — inline to avoid cross-module dependency
-    let index_path = ($history_dir | path join "index.nuon")
-    let existing_index = if ($index_path | path exists) {
-        try { open $index_path } catch { [] }
-    } else { [] }
-    let new_summary = {
-        id: $id
-        timestamp: $entry.timestamp
-        method: ($request.method? | default "")
-        url: ($request.url? | default "")
-        status: ($response.status? | default 0)
-        time_ms: ($response.time_ms? | default 0)
-        date_dir: ($date_dir | path basename)
-    }
-    ($existing_index | append $new_summary | sort-by timestamp -r) | to nuon | save -f $index_path
-
-    $id
 }
 
 # Get default headers from config
@@ -147,43 +99,17 @@ def read-body-file [body_file: string] {
     }
 }
 
-def sensitive-header-name [name: string] {
-    let normalized = ($name | ascii-upcase)
-    (
-        $normalized in [
-            "AUTHORIZATION"
-            "PROXY-AUTHORIZATION"
-            "COOKIE"
-            "SET-COOKIE"
-            "X-API-KEY"
-            "API-KEY"
-            "APIKEY"
-            "X-AUTH-TOKEN"
-            "X-ACCESS-TOKEN"
-            "X-API-TOKEN"
-            "X-TOKEN"
-        ]
-        or ($normalized =~ '(^|[-_])(TOKEN|SECRET|SESSION|API[-_]?KEY)([-_]|$)')
-    )
+def encode-query-component [value: string] {
+    $value
+    | url encode
+    | str replace --all "/" "%2F"
+    | str replace --all ":" "%3A"
+    | str replace --all "%2D" "-"
+    | str replace --all "%5F" "_"
+    | str replace --all "%7E" "~"
 }
 
-def sensitive-header [name: string, value: any] {
-    (sensitive-header-name $name) or (($value | into string) =~ '(?i)^\s*(bearer|basic)\s+')
-}
-
-def redact-sensitive-headers [headers: record] {
-    $headers | transpose key value | reduce -f {} {|header, redacted|
-        $redacted | upsert $header.key (
-            if (sensitive-header $header.key $header.value) {
-                "******"
-            } else {
-                $header.value
-            }
-        )
-    }
-}
-
-def append-query-auth [url: string, name: string, value: string] {
+def append-query-auth [url: string, name: string, value: string, --masked] {
     let parts = ($url | split row "#")
     let base = ($parts | first)
     let fragment = if ($parts | length) > 1 {
@@ -196,7 +122,9 @@ def append-query-auth [url: string, name: string, value: string] {
     } else {
         "?"
     }
-    $"($base)($separator)($name)=($value)($fragment)"
+    let encoded_name = (encode-query-component $name)
+    let encoded_value = if $masked { "******" } else { encode-query-component $value }
+    $"($base)($separator)($encoded_name)=($encoded_value)($fragment)"
 }
 
 # Resolve body from multiple input sources (inline record/string, file)
@@ -1130,7 +1058,7 @@ def execute-request [
     # Handle dry-run mode
     if $dry_run {
         let display_url = if ($display_auth.type? | default "none") == "apikey_query" {
-            append-query-auth $final_url $display_auth.param_name $display_auth.key
+            append-query-auth $final_url $display_auth.param_name $display_auth.key --masked
         } else {
             $final_url
         }
@@ -1238,7 +1166,7 @@ def execute-request [
 
         if not $no_history {
             let history_response = ($response | update headers (redact-sensitive-headers $response.headers))
-            save-to-history $history_request_record $history_response
+            api history save $history_request_record $history_response | ignore
         }
 
         let result = {

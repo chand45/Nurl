@@ -67,6 +67,25 @@ def auth-test-server [infra: string] {
     $server_result.server
 }
 
+def assert-query-auth-event [
+    event: record
+    expected_path: string
+    expected_name: string
+    expected_value: string
+] {
+    assert (not ($event.path | str contains "#")) "URL fragment was transmitted to the server"
+    let path_parts = ($event.path | split row "?")
+    assert equal ($path_parts | first) $expected_path
+    assert equal ($path_parts | length) 2 "request path did not contain exactly one query"
+    let parameters = ($path_parts | last | split row "&")
+    assert equal ($parameters | length) 2 "API-key query data was split into extra parameters"
+    assert equal ($parameters | first) "existing=1"
+    let auth_parts = ($parameters | last | split row "=")
+    assert equal ($auth_parts | length) 2 "API-key query value was split at an unencoded equals sign"
+    assert equal (($auth_parts | first) | url decode) $expected_name
+    assert equal (($auth_parts | last) | url decode) $expected_value
+}
+
 def test-named-auth-history-replay-and-rotation [] {
     let root = (make-temp-dir "auth-replay-named")
     let infra = (make-temp-dir "auth-replay-named-server")
@@ -82,13 +101,15 @@ def test-named-auth-history-replay-and-rotation [] {
         let basic_b = "NAMED-BASIC-B-SENTINEL"
         let header_a = "NAMED-HEADER-A-SENTINEL"
         let header_b = "NAMED-HEADER-B-SENTINEL"
-        let query_a = "NAMED-QUERY-A-SENTINEL"
-        let query_b = "NAMED-QUERY-B-SENTINEL"
+        let query_name = "api&key=#%+ space世界~._-"
+        let query_a = "NAMED-QUERY-A-SENTINEL&injected=1#cut%=+ 世界~._-"
+        let query_b = "NAMED-QUERY-B-SENTINEL&rotated=2#cut%=+ 世界~._-"
+        let query_override = "NAMED-QUERY-OVERRIDE-SENTINEL&override=3#cut%=+ 世界~._-"
         let oauth_a = "ACCESS-TOKEN-SENTINEL"
         let oauth_b = "NAMED-OAUTH-B-SENTINEL"
         let all_secrets = [
             $bearer_a $bearer_b $bearer_override $basic_a $basic_b
-            $header_a $header_b $query_a $query_b $oauth_a $oauth_b
+            $header_a $header_b $query_a $query_b $query_override $oauth_a $oauth_b
             "CLIENT-SECRET-REPLAY-SENTINEL" "EXPLICIT-HISTORY-HEADER-SENTINEL"
         ]
 
@@ -96,10 +117,12 @@ def test-named-auth-history-replay-and-rotation [] {
         api auth bearer set replay-override $bearer_override | ignore
         api auth basic set replay-basic replay-user $basic_a | ignore
         api auth apikey set replay-header $header_a --header "X.Nurl+Key" | ignore
-        api auth apikey set replay-query $query_a --query "api.key+odd" | ignore
+        api auth apikey set replay-query $query_a --query $query_name | ignore
+        api auth apikey set replay-query-override $query_override --query $query_name | ignore
         api auth oauth2 configure replay-oauth --client-id replay-client --client-secret "CLIENT-SECRET-REPLAY-SENTINEL" --token-url $"($base)/token" | ignore
         api collection create replay | ignore
         api request create send-override GET $"($base)/send-override" --collection replay --auth {type: bearer, ref: replay-bearer} | ignore
+        api request create query-saved GET $"($base)/replay-query-saved?existing=1#client-fragment" --collection replay --auth {type: api_key, ref: replay-query} | ignore
 
         let before_bearer = (auth-history-ids)
         let bearer_result = (api get $"($base)/replay-bearer" -a {type: bearer, token_ref: replay-bearer} --raw)
@@ -161,14 +184,37 @@ def test-named-auth-history-replay-and-rotation [] {
         api get $"($base)/replay-query?existing=1#client-fragment" -a {type: api_key, ref: replay-query} --raw | ignore
         let query_history = (auth-new-history $before_query)
         assert-history-auth $query_history "api_key" "replay-query" $all_secrets
-        let query_first = (command-error-wire-events $server | where path =~ "^/replay-query" | first | get path)
-        assert equal $query_first $"/replay-query?existing=1&api.key+odd=($query_a)" "query API key was not placed before the fragment"
-        api auth apikey set replay-query $query_b --query "api.key+odd" | ignore
+        let query_first = (command-error-wire-events $server | where path =~ "^/replay-query\\?" | first)
+        assert-query-auth-event $query_first "/replay-query" $query_name $query_a
+        assert ($query_first.path | str contains "api%26key%3D%23%25%2B%20space%E4%B8%96%E7%95%8C~._-=") "query parameter name was not RFC 3986 encoded"
+        assert ($query_first.path | str contains "NAMED-QUERY-A-SENTINEL%26injected%3D1%23cut%25%3D%2B%20%E4%B8%96%E7%95%8C~._-") "query value was not RFC 3986 encoded"
+
+        let before_saved_query = (auth-history-ids)
+        api send query-saved --collection replay --raw | ignore
+        let saved_query_history = (auth-new-history $before_saved_query)
+        assert-history-auth $saved_query_history "api_key" "replay-query" $all_secrets
+        assert-query-auth-event (command-error-wire-events $server | where path =~ "^/replay-query-saved\\?" | first) "/replay-query-saved" $query_name $query_a
+
+        let before_chain_query = (auth-history-ids)
+        api chain run ([{
+            method: GET
+            url: $"($base)/replay-query-chain?existing=1#client-fragment"
+            auth: {type: api_key, ref: replay-query}
+        }]) --quiet | ignore
+        assert-history-auth (auth-new-history $before_chain_query) "api_key" "replay-query" $all_secrets
+        assert-query-auth-event (command-error-wire-events $server | where path =~ "^/replay-query-chain\\?" | first) "/replay-query-chain" $query_name $query_a
+
+        api auth apikey set replay-query $query_b --query $query_name | ignore
         let before_query_replay = (auth-history-ids)
         api history resend $query_history.id --raw | ignore
-        let query_last = (command-error-wire-events $server | where path =~ "^/replay-query" | last | get path)
-        assert equal $query_last $"/replay-query?existing=1&api.key+odd=($query_b)" "query API-key rotation was not resolved during resend"
+        let query_last = (command-error-wire-events $server | where path =~ "^/replay-query\\?" | last)
+        assert-query-auth-event $query_last "/replay-query" $query_name $query_b
         assert-history-auth (auth-new-history $before_query_replay) "api_key" "replay-query" $all_secrets
+
+        let before_query_override = (auth-history-ids)
+        api history resend $query_history.id --auth {type: api_key, ref: replay-query-override} --raw | ignore
+        assert-query-auth-event (command-error-wire-events $server | where path =~ "^/replay-query\\?" | last) "/replay-query" $query_name $query_override
+        assert-history-auth (auth-new-history $before_query_override) "api_key" "replay-query-override" $all_secrets
 
         let before_oauth = (auth-history-ids)
         api get $"($base)/replay-oauth" -a {type: oauth2, ref: replay-oauth} --raw | ignore
@@ -308,6 +354,182 @@ def test-inline-auth-is-nonreplayable [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-public-history-save-sanitizes-at-boundary [] {
+    let root = (make-temp-dir "history-save-boundary")
+    let infra = (make-temp-dir "history-save-boundary-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let secrets = [
+            "HISTORY-SAVE-BEARER-SENTINEL"
+            "HISTORY-SAVE-BASIC-SENTINEL"
+            "HISTORY-SAVE-APIKEY-SENTINEL"
+            "HISTORY-SAVE-HEADER-SENTINEL"
+            "HISTORY-SAVE-RESPONSE-SENTINEL"
+            "HISTORY-SAVE-OVERRIDE-SENTINEL"
+        ]
+        api auth bearer set history-save-override "HISTORY-SAVE-OVERRIDE-SENTINEL" | ignore
+        let response = {
+            status: 200
+            status_text: OK
+            headers: {Set-Cookie: "session=HISTORY-SAVE-RESPONSE-SENTINEL"}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        }
+        let cases = [
+            {
+                name: "bearer"
+                request: {
+                    method: GET
+                    url: $"($base)/history-save-boundary"
+                    headers: {
+                        Authorization: "Bearer HISTORY-SAVE-HEADER-SENTINEL"
+                        X-Keep: exact
+                    }
+                    body: null
+                    auth: {type: bearer, token: "HISTORY-SAVE-BEARER-SENTINEL"}
+                }
+                expected_auth: {type: bearer, replayable: false}
+            }
+            {
+                name: "basic"
+                request: {
+                    method: GET
+                    url: $"($base)/history-save-basic"
+                    headers: {}
+                    body: null
+                    auth: {type: basic, username: history-user, password: "HISTORY-SAVE-BASIC-SENTINEL"}
+                }
+                expected_auth: {type: basic, replayable: false}
+            }
+            {
+                name: "api-key"
+                request: {
+                    method: GET
+                    url: $"($base)/history-save-api-key"
+                    headers: {}
+                    body: null
+                    auth: {type: api_key, key: "HISTORY-SAVE-APIKEY-SENTINEL", query: "history&key"}
+                }
+                expected_auth: {type: api_key, replayable: false, location: query, param_name: "history&key"}
+            }
+        ]
+
+        mut saved_ids = []
+        for case in $cases {
+            let result = (run-command-process $root $"api history save ($case.request | to nuon) ($response | to nuon)")
+            assert equal $result.exit_code 0 $"direct history save failed: ($case.name): ($result.stderr)"
+            assert equal ($result.stderr | str trim) "" $"direct history save wrote stderr: ($case.name)"
+            assert equal $result.stdout ($result.stdout | ansi strip) $"direct history save emitted ANSI: ($case.name)"
+            for secret in $secrets {
+                assert (not ($result.stdout | str contains $secret)) $"direct history save exposed a secret: ($case.name)"
+            }
+            let id = ($result.stdout | str trim)
+            assert (not ($id | is-empty)) $"direct history save did not return an id: ($case.name)"
+            $saved_ids = ($saved_ids | append $id)
+            let entry = (api history get $id)
+            assert equal $entry.request.auth $case.expected_auth $"direct history auth was not canonical: ($case.name)"
+            assert equal $entry.response.headers."Set-Cookie" "******" "direct history response header was not redacted"
+            if $case.name == "bearer" {
+                assert equal $entry.request.headers.Authorization "******"
+                assert equal $entry.request.headers.X-Keep "exact"
+                assert equal $entry.request.headers_replayable false
+            }
+            for secret in $secrets {
+                assert (not (($entry | to nuon) | str contains $secret)) $"direct history get exposed a secret: ($case.name)"
+            }
+        }
+
+        let bearer_id = ($saved_ids | first)
+        let wire_before = (command-error-wire-events $server | length)
+        let history_before = (auth-history-count)
+        let default_replay = (run-command-process $root $"api history resend ($bearer_id | to nuon) --raw")
+        assert ($default_replay.exit_code != 0) "direct inline history replayed without auth"
+        assert equal ($default_replay.stdout | str trim) ""
+        assert ($default_replay.stderr | str contains "pass --auth")
+        assert equal $default_replay.stderr ($default_replay.stderr | ansi strip)
+        assert equal (command-error-wire-events $server | length) $wire_before
+        assert equal (auth-history-count) $history_before
+
+        let auth_only = (run-command-process $root $"api history resend ($bearer_id | to nuon) --auth {type: bearer, ref: history-save-override} --raw")
+        assert ($auth_only.exit_code != 0) "redacted direct history headers replayed as mask text"
+        assert equal ($auth_only.stdout | str trim) ""
+        assert ($auth_only.stderr | str contains "pass --headers")
+        assert equal $auth_only.stderr ($auth_only.stderr | ansi strip)
+        assert equal (command-error-wire-events $server | length) $wire_before
+        assert equal (auth-history-count) $history_before
+
+        let before_override = (auth-history-ids)
+        api history resend $bearer_id --auth {type: bearer, ref: history-save-override} --headers {X-Keep: exact} --raw | ignore
+        assert equal (command-error-wire-events $server | length) ($wire_before + 1)
+        assert-history-auth (auth-new-history $before_override) "bearer" "history-save-override" $secrets
+
+        let exported_file = ($root | path join "history-safe.json")
+        let readers = [
+            $"api history show ($bearer_id | to nuon) | to nuon"
+            $"api history get ($bearer_id | to nuon) | to nuon"
+            "api history list | to nuon"
+            "api history export --format json"
+            $"api history export --format json --output ($exported_file | to nuon)"
+        ]
+        for command in $readers {
+            let result = (run-command-process $root $command)
+            assert equal $result.exit_code 0 $"history reader/export failed: ($command): ($result.stderr)"
+            assert equal ($result.stderr | str trim) "" $"history reader/export wrote stderr: ($command)"
+            for secret in $secrets {
+                assert (not ($result.stdout | str contains $secret)) $"history reader/export exposed a secret: ($command)"
+            }
+        }
+        let public_bytes = (
+            command-error-snapshot $root
+            | where {|entry| not ($entry.path | str ends-with "secrets.nuon") }
+            | get content
+            | compact
+            | str join "\n"
+        )
+        for secret in $secrets {
+            assert (not ($public_bytes | str contains $secret)) "history bytes/index/export persisted a credential"
+        }
+
+        let invalid_cases = [
+            {
+                request: {method: GET, url: $"($base)/unknown", headers: {}, body: null, auth: {type: unknown, token: unsafe}}
+                expected: "Unsupported authentication type 'unknown'"
+            }
+            {
+                request: {method: GET, url: $"($base)/malformed", headers: {}, body: null, auth: {type: bearer, replayable: true}}
+                expected: "Bearer history authentication is malformed"
+            }
+            {
+                request: {method: GET, url: $"($base)/bad-headers", headers: "HISTORY-SAVE-HEADER-SENTINEL", body: null}
+                expected: "History request headers must be a record"
+            }
+        ]
+        for case in $invalid_cases {
+            let before = (command-error-snapshot $root)
+            let result = (run-command-process $root $"api history save ($case.request | to nuon) ($response | to nuon)")
+            assert ($result.exit_code != 0) "unsafe direct history save unexpectedly succeeded"
+            assert equal ($result.stdout | str trim) ""
+            assert ($result.stderr | str contains $case.expected) $"unsafe direct history save error was not actionable: ($result.stderr)"
+            assert equal $result.stderr ($result.stderr | ansi strip)
+            for secret in $secrets {
+                assert (not ($result.stderr | str contains $secret)) "unsafe direct history save error exposed a credential"
+            }
+            assert equal (command-error-snapshot $root) $before "unsafe direct history save mutated state"
+        }
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
 def test-legacy-and-invalid-auth-history [] {
     let root = (make-temp-dir "auth-replay-invalid")
     let infra = (make-temp-dir "auth-replay-invalid-server")
@@ -402,10 +624,13 @@ def test-auth-preview-and-export-secrecy [] {
         $env.API_ROOT = $root
         api init | ignore
         let base = $"http://127.0.0.1:($server.port)"
+        let preview_query_name = "api&key=#%+ space世界~._-"
+        let preview_query_secret = "PREVIEW-QUERY-SENTINEL&injected=1#cut%=+ 世界~._-"
         let secrets = [
             "PREVIEW-BEARER-SENTINEL"
             "PREVIEW-BASIC-SENTINEL"
             "PREVIEW-HEADER-SENTINEL"
+            $preview_query_secret
             "PREVIEW-QUERY-SENTINEL"
             "PREVIEW-OAUTH-CLIENT-SENTINEL"
             "EXPLICIT-AUTH-SENTINEL"
@@ -418,7 +643,7 @@ def test-auth-preview-and-export-secrecy [] {
         api auth bearer set "preview ref.+odd" "Bearer PREVIEW-BEARER-SENTINEL" | ignore
         api auth basic set preview-basic preview-user "PREVIEW-BASIC-SENTINEL" | ignore
         api auth apikey set preview-header "PREVIEW-HEADER-SENTINEL" --header "X.Nurl+Key" | ignore
-        api auth apikey set preview-query "PREVIEW-QUERY-SENTINEL" --query "api.key+odd" | ignore
+        api auth apikey set preview-query $preview_query_secret --query $preview_query_name | ignore
         api auth oauth2 configure preview-oauth --client-id preview-client --client-secret "PREVIEW-OAUTH-CLIENT-SENTINEL" --token-url $"($base)/token" | ignore
         api collection create preview | ignore
         api request create bearer GET $"($base)/saved-bearer" --collection preview --auth {type: bearer, ref: "preview ref.+odd"} | ignore
@@ -441,11 +666,11 @@ def test-auth-preview-and-export-secrecy [] {
             {label: "generic bearer", command: $"api request -m GET (($base + '/direct-bearer') | to nuon) -a {type: bearer, token_ref: 'preview ref.+odd'} --save ($text_output | to nuon) --binary-save ($binary_output | to nuon) --dry-run", expected: ["Authorization: ******"]}
             {label: "get basic", command: $"api get (($base + '/direct-basic') | to nuon) -a {type: basic, creds_ref: preview-basic} --dry-run", expected: ["-u ******:******"]}
             {label: "post API-key header", command: $"api post (($base + '/direct-header') | to nuon) -b {ok: true} -a {type: api_key, key_ref: preview-header} --dry-run", expected: ["X.Nurl+Key: ******"]}
-            {label: "put API-key query", command: $"api put (($base + '/direct-query?existing=1#frag') | to nuon) -b {ok: true} -a {type: api_key, ref: preview-query} --dry-run", expected: ["existing=1&api.key+odd=******#frag"]}
+            {label: "put API-key query", command: $"api put (($base + '/direct-query?existing=1#frag') | to nuon) -b {ok: true} -a {type: api_key, ref: preview-query} --dry-run", expected: ["existing=1&api%26key%3D%23%25%2B%20space%E4%B8%96%E7%95%8C~._-=******#frag"]}
             {label: "patch OAuth", command: $"api patch (($base + '/direct-oauth') | to nuon) -b {ok: true} -a {type: oauth2, ref: preview-oauth} --dry-run", expected: ["Authorization: ******"]}
             {label: "delete inline bearer", command: $"api delete (($base + '/inline-bearer') | to nuon) -a {type: bearer, token: 'PREVIEW-BEARER-SENTINEL'} --dry-run", expected: ["Authorization: ******"]}
             {label: "head inline basic", command: $"api head (($base + '/inline-basic') | to nuon) -a {type: basic, username: user, password: 'PREVIEW-BASIC-SENTINEL'} --dry-run", expected: ["-u ******:******"]}
-            {label: "options inline query", command: $"api options (($base + '/empty?#frag') | to nuon) -a {type: api_key, key: 'PREVIEW-QUERY-SENTINEL', query: 'api.key+odd'} --dry-run", expected: ["empty?api.key+odd=******#frag"]}
+            {label: "options inline query", command: $"api options (($base + '/empty?#frag') | to nuon) -a {type: api_key, key: 'PREVIEW-QUERY-SENTINEL', query: 'api.key+odd'} --dry-run", expected: ["empty?api.key%2Bodd=******#frag"]}
             {
                 label: "sensitive explicit headers"
                 command: $"api get (($base + '/sensitive-headers') | to nuon) -H {Authorization: 'EXPLICIT-AUTH-SENTINEL', Proxy-Authorization: 'EXPLICIT-PROXY-SENTINEL', Cookie: 'EXPLICIT-COOKIE-SENTINEL', Set-Cookie: 'EXPLICIT-SET-COOKIE-SENTINEL', X-Auth-Token: 'EXPLICIT-TOKEN-SENTINEL', X-Keep: exact} --dry-run"
@@ -453,13 +678,23 @@ def test-auth-preview-and-export-secrecy [] {
             }
         ]
         let saved_commands = ["bearer" "basic" "header" "query" "oauth"] | each {|name|
+            let expected = if $name == "query" {
+                ["api%26key%3D%23%25%2B%20space%E4%B8%96%E7%95%8C~._-=******#frag"]
+            } else {
+                ["******"]
+            }
             [
-                {label: $"send ($name)", command: $"api send ($name) --collection preview --dry-run", expected: ["******"]}
-                {label: $"export ($name)", command: $"api request export ($name) --collection preview", expected: ["******"]}
+                {label: $"send ($name)", command: $"api send ($name) --collection preview --dry-run", expected: $expected}
+                {label: $"export ($name)", command: $"api request export ($name) --collection preview", expected: $expected}
             ]
         } | flatten
         let history_commands = $replay_ids | each {|item|
-            {label: $"history resend ($item.name)", command: $"api history resend ($item.id | to nuon) --dry-run", expected: ["******"]}
+            let expected = if $item.name == "query" {
+                ["api%26key%3D%23%25%2B%20space%E4%B8%96%E7%95%8C~._-=******#frag"]
+            } else {
+                ["******"]
+            }
+            {label: $"history resend ($item.name)", command: $"api history resend ($item.id | to nuon) --dry-run", expected: $expected}
         }
         let all_commands = $commands | append $saved_commands | append $history_commands
         let before = (command-error-snapshot $root)
@@ -471,6 +706,101 @@ def test-auth-preview-and-export-secrecy [] {
         assert (not ($binary_output | path exists)) "dry-run created a binary output file"
         assert equal (open $server.count_file --raw | str trim) "0" "dry-run/export acquired or refreshed an OAuth token"
         assert equal (command-error-wire-events $server | length) 0 "dry-run/export reached the protected endpoint"
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
+def test-oauth-provider-errors-are-secret-safe [] {
+    let root = (make-temp-dir "oauth-provider-errors")
+    let infra = (make-temp-dir "oauth-provider-errors-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let output_path = ($root | path join "oauth-error-output.bin")
+        let save_path = ($root | path join "oauth-error-save.txt")
+        let secrets = [
+            "CLIENT-SECRET-ERROR-SENTINEL"
+            "CLIENT-SECRET-REFRESH-ERROR-SENTINEL"
+            "ACCESS-TOKEN-ERROR-SENTINEL"
+            "REFRESH-TOKEN-ERROR-SENTINEL"
+        ]
+
+        api auth oauth2 configure provider-error --client-id error-client --client-secret "CLIENT-SECRET-ERROR-SENTINEL" --token-url $"($base)/token-error-initial" | ignore
+        api collection create oauth-errors | ignore
+        api request create provider-error GET $"($base)/saved-provider-error" --collection oauth-errors --auth {type: oauth2, ref: provider-error} | ignore
+        let history_id = (api history save {
+            method: GET
+            url: $"($base)/history-provider-error"
+            headers: {}
+            body: null
+            auth: {type: oauth2, ref: provider-error}
+        } {
+            status: 200
+            status_text: OK
+            headers: {}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        })
+
+        let commands = [
+            $"api get (($base + '/direct-provider-error') | to nuon) -a {type: oauth2, ref: provider-error} --save ($save_path | to nuon) --binary-save ($output_path | to nuon) --output none"
+            "api send provider-error --collection oauth-errors --output none"
+            $"api history resend ($history_id | to nuon) --raw"
+            $"api chain run ([{method: GET, url: (($base + '/chain-provider-error') | to nuon), auth: {type: oauth2, ref: provider-error}}]) --quiet | ignore"
+        ]
+        mut expected_count = 0
+        for command in $commands {
+            let before = (command-error-snapshot $root)
+            let history_before = (auth-history-count)
+            let result = (run-command-process $root $command)
+            $expected_count = $expected_count + 1
+            assert ($result.exit_code != 0) $"OAuth provider error unexpectedly succeeded: ($command)"
+            assert equal ($result.stdout | str trim) "" $"OAuth provider error wrote stdout: ($command)"
+            assert ($result.stderr | str contains "OAuth2 provider error: invalid_client") $"OAuth provider error omitted its safe code: ($command): ($result.stderr)"
+            assert ($result.stderr | str contains "HTTP 400") $"OAuth provider error omitted its safe status: ($command): ($result.stderr)"
+            assert equal $result.stderr ($result.stderr | ansi strip) $"OAuth provider error emitted ANSI: ($command)"
+            for secret in $secrets {
+                assert (not ($result.stderr | str contains $secret)) $"OAuth provider error exposed a credential: ($command)"
+            }
+            assert equal (open $server.count_file --raw | str trim | into int) $expected_count "OAuth provider error retried or skipped its one token request"
+            assert equal (command-error-wire-events $server | length) 0 "OAuth provider error reached the protected endpoint"
+            assert equal (auth-history-count) $history_before "OAuth provider error created history"
+            assert equal (command-error-snapshot $root) $before "OAuth provider error mutated config, secrets, history, or output state"
+            assert (not ($output_path | path exists)) "OAuth provider error mutated binary output"
+            assert (not ($save_path | path exists)) "OAuth provider error mutated text output"
+        }
+
+        api auth oauth2 configure refresh-error --client-id refresh-client --client-secret "CLIENT-SECRET-REFRESH-ERROR-SENTINEL" --token-url $"($base)/token-error-refresh" | ignore
+        let secrets_path = ($root | path join "secrets.nuon")
+        let seeded = (
+            open $secrets_path
+            | update oauth.refresh-error.access_token "ACCESS-TOKEN-ERROR-SENTINEL"
+            | update oauth.refresh-error.refresh_token "REFRESH-TOKEN-ERROR-SENTINEL"
+            | update oauth.refresh-error.expires_at "2000-01-01T00:00:00Z"
+        )
+        $seeded | to nuon --indent 4 | save -f $secrets_path
+        let refresh_before = (command-error-snapshot $root)
+        let refresh_count_before = (open $server.count_file --raw | str trim | into int)
+        let refresh = (run-command-process $root "api auth oauth2 refresh refresh-error")
+        assert ($refresh.exit_code != 0) "OAuth refresh provider error unexpectedly succeeded"
+        assert equal ($refresh.stdout | str trim) ""
+        assert ($refresh.stderr | str contains "OAuth2 provider error: invalid_grant") $"OAuth refresh error omitted its safe code: ($refresh.stderr)"
+        assert ($refresh.stderr | str contains "HTTP 400") $"OAuth refresh error omitted its safe status: ($refresh.stderr)"
+        assert equal $refresh.stderr ($refresh.stderr | ansi strip)
+        for secret in $secrets {
+            assert (not ($refresh.stderr | str contains $secret)) "OAuth refresh provider error exposed a credential"
+        }
+        assert equal (open $server.count_file --raw | str trim | into int) ($refresh_count_before + 1) "OAuth refresh provider error triggered a fallback token retry"
+        assert equal (command-error-snapshot $root) $refresh_before "OAuth refresh provider error mutated secret/config/history state"
         null
     } catch {|error| $error }
 
@@ -555,8 +885,10 @@ export def run-suite-auth-replay [] {
     [
         (run-test "named auth refs replay with rotation and override precedence" { test-named-auth-history-replay-and-rotation })
         (run-test "inline auth history requires an explicit replay override" { test-inline-auth-is-nonreplayable })
+        (run-test "public history save sanitizes auth and headers at the persistence boundary" { test-public-history-save-sanitizes-at-boundary })
         (run-test "legacy history replays while missing, deleted, malformed, and unknown auth fail safely" { test-legacy-and-invalid-auth-history })
         (run-test "dry-run, send, export, and history previews mask all supported auth" { test-auth-preview-and-export-secrecy })
+        (run-test "OAuth provider errors expose only stable safe codes across request surfaces" { test-oauth-provider-errors-are-secret-safe })
         (run-test "authenticated output modes preserve types and never expose auth" { test-authenticated-output-contracts })
     ]
 }

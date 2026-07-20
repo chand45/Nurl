@@ -140,10 +140,21 @@ try {
             if ($requestLine -match ' /ready ') {
                 $payload = 'ready'
                 $contentType = 'text/plain'
-            } elseif ($requestLine -match ' /token ') {
+            } elseif ($requestLine -match ' /token(?:-error-initial|-error-refresh)? ') {
+                $requestPath = ($requestLine -split ' ')[1]
                 $count = [int]([System.IO.File]::ReadAllText($CountFile)) + 1
                 [System.IO.File]::WriteAllText($CountFile, [string]$count)
-                if ($body -match 'grant_type=refresh_token') {
+                if ($requestPath -eq '/token-error-initial') {
+                    $response = @{
+                        error = 'invalid_client'
+                        error_description = 'CLIENT-SECRET-ERROR-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-error-refresh') {
+                    $response = @{
+                        error = 'invalid_grant'
+                        error_description = 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL'
+                    }
+                } elseif ($body -match 'grant_type=refresh_token') {
                     $response = @{
                         access_token = 'ACCESS-TOKEN-REFRESHED-SENTINEL'
                         refresh_token = 'REFRESH-TOKEN-REFRESHED-SENTINEL'
@@ -216,7 +227,7 @@ try {
                 [System.Text.Encoding]::UTF8.GetBytes($payload)
             }
             $crlf = \"`r`n\"
-            $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
+            $statusLine = if ($requestPath -in @('/token-error-initial', '/token-error-refresh')) { 'HTTP/1.1 400 Bad Request' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
@@ -366,7 +377,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_protected()
 
     def do_POST(self):
-        if self.path != '/token':
+        if self.path not in ('/token', '/token-error-initial', '/token-error-refresh'):
             self.send_protected()
             return
         global count
@@ -375,7 +386,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         count += 1
         with open(count_file, 'w', encoding='utf-8') as handle:
             handle.write(str(count))
-        if 'grant_type=refresh_token' in body:
+        if self.path == '/token-error-initial':
+            payload = {
+                'error': 'invalid_client',
+                'error_description': 'CLIENT-SECRET-ERROR-SENTINEL',
+            }
+        elif self.path == '/token-error-refresh':
+            payload = {
+                'error': 'invalid_grant',
+                'error_description': 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL',
+            }
+        elif 'grant_type=refresh_token' in body:
             payload = {
                 'access_token': 'ACCESS-TOKEN-REFRESHED-SENTINEL',
                 'refresh_token': 'REFRESH-TOKEN-REFRESHED-SENTINEL',
@@ -388,7 +409,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'expires_in': 3600,
             }
         encoded = json.dumps(payload).encode('utf-8')
-        self.send_response(200)
+        self.send_response(400 if self.path.startswith('/token-error-') else 200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()

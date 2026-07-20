@@ -4,6 +4,7 @@
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case]
+use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header]
 
 # Get history directory
 def get-history-dir [] {
@@ -114,11 +115,57 @@ def generate-history-id [] {
     $"($date_part)-($random_part)"
 }
 
+def sanitize-history-headers [headers: any, label: string] {
+    if not (($headers | describe) | str starts-with "record") {
+        fail-command $"($label) headers must be a record"
+    }
+    {
+        headers: (redact-sensitive-headers $headers)
+        had_sensitive: (
+            $headers
+            | transpose key value
+            | any {|header| sensitive-header $header.key $header.value }
+        )
+    }
+}
+
+def sanitize-history-request [request: record] {
+    let header_context = (
+        sanitize-history-headers ($request.headers? | default {}) "History request"
+    )
+    mut safe_request = ($request | upsert headers $header_context.headers)
+    let auth = ($request.auth? | default null)
+    if $auth != null {
+        if not (($auth | describe) | str starts-with "record") {
+            fail-command "History request authentication must be a record"
+        }
+        let safe_auth = (auth-history-projection $auth)
+        if $safe_auth == null {
+            $safe_request = ($safe_request | reject auth)
+        } else {
+            $safe_request = ($safe_request | upsert auth $safe_auth)
+        }
+    }
+    if $header_context.had_sensitive or ($request.headers_replayable? | default true) == false {
+        $safe_request = ($safe_request | upsert headers_replayable false)
+    }
+    $safe_request
+}
+
+def sanitize-history-response [response: record] {
+    let header_context = (
+        sanitize-history-headers ($response.headers? | default {}) "History response"
+    )
+    $response | upsert headers $header_context.headers
+}
+
 # Save request/response to history
 export def "api history save" [
     request: record    # Request details
     response: record   # Response details
 ] {
+    let safe_request = (sanitize-history-request $request)
+    let safe_response = (sanitize-history-response $response)
     let dir = (ensure-history-dir)
     let date_dir = ($dir | path join (date now | format date "%Y-%m-%d"))
 
@@ -141,8 +188,8 @@ export def "api history save" [
         id: $id
         timestamp: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
         environment: $current_env
-        request: $request
-        response: $response
+        request: $safe_request
+        response: $safe_response
     }
 
     let file_name = $"($id).nuon"
@@ -154,10 +201,10 @@ export def "api history save" [
     append-to-history-index {
         id: $id
         timestamp: $entry.timestamp
-        method: ($request.method? | default "")
-        url: ($request.url? | default "")
-        status: ($response.status? | default 0)
-        time_ms: ($response.time_ms? | default 0)
+        method: ($safe_request.method? | default "")
+        url: ($safe_request.url? | default "")
+        status: ($safe_response.status? | default 0)
+        time_ms: ($safe_response.time_ms? | default 0)
         date_dir: ($date_dir | path basename)
     }
 

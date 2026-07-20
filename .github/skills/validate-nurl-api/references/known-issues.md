@@ -115,3 +115,28 @@ request, interpolates variables, or touches `.nuon` files.
   requires an explicit `--auth` override.
 - **Re-check:** run `tests/test_auth_replay.nu`; it covers rotation, override precedence, legacy
   history, invalid refs, no-side-effect failures, query fragments, and the preview/export matrix.
+
+## 14. Direct history saves could bypass credential sanitization  (FIXED)
+- **Symptom:** a caller could pass inline auth or sensitive headers to `api history save`, then
+  recover the values through history bytes, index, show/get, or export.
+- **Fix:** `api history save` is now the shared persistence boundary for live and synthetic saves.
+  It canonicalizes named refs, makes inline auth non-replayable, masks sensitive request/response
+  headers, and rejects unknown or malformed auth before creating or modifying history state.
+- **Re-check:** run the direct-save cases in `tests/test_auth_replay.nu`; verify no sentinel exists
+  in persisted bytes or any public history projection and unsafe auth causes no mutation.
+
+## 15. Query API keys could alter URL structure  (FIXED)
+- **Symptom:** reserved characters in a query API-key name or value could create extra parameters,
+  truncate the credential at `#`, or otherwise change request semantics.
+- **Fix:** query API-key names and wire values are RFC 3986 query-component encoded exactly once.
+  Existing queries and fragment placement are preserved; previews encode the name and mask the value.
+- **Re-check:** run `tests/test_auth_replay.nu`; its local server covers `&`, `=`, `#`, `%`, `+`,
+  spaces, Unicode, existing/empty queries, fragments, rotation, override, saved requests, and chains.
+
+## 16. OAuth provider descriptions could echo credentials  (FIXED)
+- **Symptom:** token or refresh failures emitted an untrusted provider `error_description`, which
+  could contain a client secret, access token, or refresh token.
+- **Fix:** OAuth failures omit provider descriptions and report only a validated provider error
+  code and safe HTTP status. A refresh provider error is not retried as a new token request.
+- **Re-check:** run the initial-token and refresh error cases in `tests/test_auth_replay.nu`; they
+  assert secret-free, non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.

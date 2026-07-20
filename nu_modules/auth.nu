@@ -216,20 +216,14 @@ def acquire-oauth2-token [
     let output = (curl -s -X POST $config.token_url
         -H "Content-Type: application/x-www-form-urlencoded"
         -d $"($body)($scope_param)"
+        --write-out "\n%{http_code}"
         | complete)
 
-    if $output.exit_code != 0 {
-        fail-command "OAuth2 token request failed"
-    }
-
-    let response = try {
-        $output.stdout | from json
-    } catch {
-        fail-command "Failed to parse OAuth2 response"
-    }
+    let parsed = (parse-oauth-provider-response $output "OAuth2 token request failed")
+    let response = $parsed.response
 
     if ($response.error? | default null) != null {
-        fail-command $"OAuth2 error: ($response.error) - ($response.error_description? | default '')"
+        fail-oauth-provider-error $response $parsed.status
     }
 
     # Save token
@@ -279,20 +273,14 @@ def refresh-oauth2-token [name: string] {
     let output = (curl -s -X POST $config.token_url
         -H "Content-Type: application/x-www-form-urlencoded"
         -d $body
+        --write-out "\n%{http_code}"
         | complete)
 
-    if $output.exit_code != 0 {
-        fail-command "OAuth2 refresh failed"
-    }
-
-    let response = try {
-        $output.stdout | from json
-    } catch {
-        fail-command "Failed to parse OAuth2 response"
-    }
+    let parsed = (parse-oauth-provider-response $output "OAuth2 refresh failed")
+    let response = $parsed.response
 
     if ($response.error? | default null) != null {
-        return (acquire-oauth2-token $name --force)
+        fail-oauth-provider-error $response $parsed.status
     }
 
     # Save new token
@@ -334,6 +322,36 @@ export def "api auth oauth2 delete" [name: string] {
 }
 
 # --- Utility Functions ---
+
+def parse-oauth-provider-response [output: record, failure_message: string] {
+    if $output.exit_code != 0 {
+        fail-command $failure_message
+    }
+    let parts = ($output.stdout | split row "\n")
+    let status = ($parts | last | str trim)
+    if not ($status =~ '^[0-9]{3}$') {
+        fail-command "Failed to parse OAuth2 response"
+    }
+    let response = try {
+        $parts | drop 1 | str join "\n" | from json
+    } catch {
+        fail-command "Failed to parse OAuth2 response"
+    }
+    {response: $response, status: $status}
+}
+
+def fail-oauth-provider-error [response: record, status: string] {
+    let raw_code = ($response.error? | default "unknown_error")
+    let code = if (
+        ($raw_code | describe) == "string"
+        and $raw_code =~ '^[A-Za-z0-9._-]{1,100}$'
+    ) {
+        $raw_code
+    } else {
+        "unknown_error"
+    }
+    fail-command $"OAuth2 provider error: ($code) \(HTTP ($status)\)"
+}
 
 def auth-field [auth_spec: record, names: list<string>] {
     for name in $names {
@@ -457,6 +475,127 @@ def validate-oauth-reference [name: string] {
     require-auth-string $config "client_id" $label | ignore
     require-auth-string $config "client_secret" $label | ignore
     require-auth-string $config "token_url" $label | ignore
+}
+
+export def sensitive-header [name: string, value: any] {
+    let normalized = ($name | ascii-upcase)
+    let sensitive_name = (
+        $normalized in [
+            "AUTHORIZATION"
+            "PROXY-AUTHORIZATION"
+            "COOKIE"
+            "SET-COOKIE"
+            "X-API-KEY"
+            "API-KEY"
+            "APIKEY"
+            "X-AUTH-TOKEN"
+            "X-ACCESS-TOKEN"
+            "X-API-TOKEN"
+            "X-TOKEN"
+        ]
+        or ($normalized =~ '(^|[-_])(TOKEN|SECRET|SESSION|API[-_]?KEY)([-_]|$)')
+    )
+    $sensitive_name or (($value | into string) =~ '(?i)^\s*(bearer|basic)\s+')
+}
+
+export def redact-sensitive-headers [headers: record] {
+    $headers | transpose key value | reduce -f {} {|header, redacted|
+        $redacted | upsert $header.key (
+            if (sensitive-header $header.key $header.value) {
+                "******"
+            } else {
+                $header.value
+            }
+        )
+    }
+}
+
+def non-replayable-apikey-history [auth_spec: record, auth_type: string] {
+    let shape = match $auth_type {
+        "APIKEY_QUERY" => {
+            let name = (require-auth-string $auth_spec "param_name" "Inline API key query authentication")
+            {location: "query", param_name: $name}
+        }
+        "APIKEY_HEADER" => {
+            let name = (require-auth-string $auth_spec "header_name" "Inline API key header authentication")
+            {location: "header", header_name: $name}
+        }
+        _ => {
+            let resolved = (resolve-inline-apikey-shape $auth_spec)
+            if $resolved.type == "apikey_query" {
+                {location: "query", param_name: $resolved.param_name}
+            } else {
+                {location: "header", header_name: $resolved.header_name}
+            }
+        }
+    }
+    {type: "api_key", replayable: false} | merge $shape
+}
+
+# Convert caller, wire, or already-canonical auth into secret-free history metadata.
+export def auth-history-projection [auth_spec: record] {
+    if ($auth_spec | is-empty) {
+        return null
+    }
+
+    let raw_type = ($auth_spec.type? | default null)
+    if $raw_type == null or ($raw_type | describe) != "string" or ($raw_type | str trim | is-empty) {
+        fail-command "Authentication type must be a non-empty string"
+    }
+    let auth_type = ($raw_type | ascii-upcase)
+    let replayable = ($auth_spec.replayable? | default null)
+
+    match $auth_type {
+        "NONE" => { null }
+        "BEARER" => {
+            let ref = (auth-reference $auth_spec ["token_ref" "ref"] "******")
+            if not ($ref | is-empty) {
+                {type: "bearer", ref: $ref, replayable: true}
+            } else if ("token" in ($auth_spec | columns)) or $replayable == false {
+                if "token" in ($auth_spec | columns) {
+                    require-auth-string $auth_spec "token" "Inline bearer authentication" | ignore
+                }
+                {type: "bearer", replayable: false}
+            } else {
+                fail-command "Bearer history authentication is malformed"
+            }
+        }
+        "BASIC" => {
+            let ref = (auth-reference $auth_spec ["creds_ref" "ref"] "Basic credentials")
+            if not ($ref | is-empty) {
+                {type: "basic", ref: $ref, replayable: true}
+            } else if ("username" in ($auth_spec | columns)) or ("password" in ($auth_spec | columns)) {
+                require-auth-string $auth_spec "username" "Inline basic authentication" --allow-empty | ignore
+                require-auth-string $auth_spec "password" "Inline basic authentication" --allow-empty | ignore
+                {type: "basic", replayable: false}
+            } else if $replayable == false {
+                {type: "basic", replayable: false}
+            } else {
+                fail-command "Basic history authentication is malformed"
+            }
+        }
+        "API_KEY" | "APIKEY" | "APIKEY_HEADER" | "APIKEY_QUERY" => {
+            let ref = (auth-reference $auth_spec ["key_ref" "ref"] "API key")
+            if not ($ref | is-empty) {
+                {type: "api_key", ref: $ref, replayable: true}
+            } else if ("key" in ($auth_spec | columns)) or $replayable == false {
+                if "key" in ($auth_spec | columns) {
+                    require-auth-string $auth_spec "key" "Inline API key authentication" | ignore
+                }
+                non-replayable-apikey-history $auth_spec $auth_type
+            } else {
+                fail-command "API key history authentication is malformed"
+            }
+        }
+        "OAUTH2" => {
+            let ref = (auth-reference $auth_spec ["ref"] "OAuth2")
+            if ($ref | is-empty) {
+                fail-command "OAuth2 history authentication requires a non-empty ref"
+            }
+            {type: "oauth2", ref: $ref, replayable: true}
+        }
+        _ => { fail-command $"Unsupported authentication type '($raw_type)'" }
+    }
 }
 
 # Prepare separate safe display/history projections and a secret-bearing wire projection.

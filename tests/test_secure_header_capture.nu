@@ -255,7 +255,7 @@ public static class FakeCurl
                 sensitiveArguments += " Basic " + args[index + 1];
             }
         }
-        if (mode == "supported-oauth" && String.IsNullOrEmpty(format))
+        if (mode == "supported-oauth" && format.IndexOf("%{time_total}", StringComparison.Ordinal) < 0)
         {
             if (!String.IsNullOrEmpty(log))
             {
@@ -266,7 +266,8 @@ public static class FakeCurl
             {
                 token = "SUPPORTED-ACCESS";
             }
-            Console.Out.Write("{\"access_token\":\"" + token + "\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}");
+            string tokenMetadata = format.Replace("%{http_code}", "200");
+            Console.Out.Write("{\"access_token\":\"" + token + "\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}" + tokenMetadata);
             return 0;
         }
         if (!String.IsNullOrEmpty(log))
@@ -520,11 +521,18 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ] && [ -z "$format" ]; then
-  echo token >> "$NURL_FAKE_CURL_LOG"
-  token=${NURL_FAKE_CURL_OAUTH_TOKEN:-SUPPORTED-ACCESS}
-  printf "%s" "{\"access_token\":\"$token\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}"
-  exit 0
+if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ]; then
+  case "$format" in
+    *"%{time_total}"*)
+      ;;
+    *)
+      echo token >> "$NURL_FAKE_CURL_LOG"
+      token=${NURL_FAKE_CURL_OAUTH_TOKEN:-SUPPORTED-ACCESS}
+      token_metadata=$(printf "%s" "$format" | sed -e "s/%{http_code}/200/g")
+      printf "%s%s" "{\"access_token\":\"$token\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}" "$token_metadata"
+      exit 0
+      ;;
+  esac
 fi
 echo request >> "$NURL_FAKE_CURL_LOG"
 if [ -n "$output_path" ]; then

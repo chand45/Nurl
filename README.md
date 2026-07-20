@@ -391,7 +391,9 @@ takes precedence over `--output`. With `--dry-run`, the curl preview is returned
 HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
 OAuth token endpoint. They render bearer/OAuth authorization, basic credentials, API-key values,
 and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
-header/query names. `--save` may be combined with data modes, and `--binary-save` writes the response
+header/query names. Query API-key names use RFC 3986 query-component encoding in previews, and real
+requests encode both the name and value exactly once while preserving existing queries and fragments.
+`--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted
 transport failures preserve an existing destination and leave an absent destination absent.
@@ -561,6 +563,8 @@ Named authentication accepts the family-specific aliases (`token_ref`, `creds_re
 or the generic `ref`. Successful history stores only the canonical type and reference, never the
 resolved token, key, password, access token, refresh token, or client secret. Inline bearer, basic,
 and API-key values can execute, but are recorded as non-replayable without storing the credential.
+OAuth token failures report only a safe provider error code and HTTP status; untrusted provider
+descriptions are omitted because they can echo credentials.
 
 ### History
 
@@ -600,7 +604,10 @@ Re-resolving named auth on resend means credential rotation is honored automatic
 basic, API-key header/query, and OAuth2 references. Legacy history without auth metadata retains
 its unauthenticated resend behavior. A default resend of non-replayable inline auth fails before
 network or file side effects and tells you to pass `--auth`. New history also redacts recognized
-sensitive explicit request headers; resend requires `--headers` instead of transmitting mask text.
+sensitive request and response headers. This sanitization is enforced by the shared persistence
+boundary for automatic and direct synthetic history saves, so history bytes, index, show/get, and
+export cannot expose the original values. Resend requires `--headers` instead of transmitting mask
+text from a sensitive stored request header.
 
 ### Request Chaining
 
