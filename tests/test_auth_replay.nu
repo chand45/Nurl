@@ -369,15 +369,32 @@ def test-public-history-save-sanitizes-at-boundary [] {
             "HISTORY-SAVE-HEADER-SENTINEL"
             "HISTORY-SAVE-RESPONSE-SENTINEL"
             "HISTORY-SAVE-OVERRIDE-SENTINEL"
+            "HISTORY-SAVE-TOPLEVEL-SENTINEL"
+            "HISTORY-SAVE-NESTED-SENTINEL"
+            "HISTORY-SAVE-RESPONSE-METADATA-SENTINEL"
+            "HISTORY-SAVE-NAMED-BEARER-SENTINEL"
+            "HISTORY-SAVE-NAMED-BASIC-SENTINEL"
+            "HISTORY-SAVE-NAMED-API-SENTINEL"
+            "HISTORY-SAVE-NAMED-OAUTH-SENTINEL"
         ]
         api auth bearer set history-save-override "HISTORY-SAVE-OVERRIDE-SENTINEL" | ignore
+        api auth bearer set history-save-named-bearer "HISTORY-SAVE-NAMED-BEARER-SENTINEL" | ignore
+        api auth basic set history-save-named-basic history-user "HISTORY-SAVE-NAMED-BASIC-SENTINEL" | ignore
+        api auth apikey set history-save-named-api "HISTORY-SAVE-NAMED-API-SENTINEL" --query "history.named" | ignore
+        api auth oauth2 configure history-save-named-oauth --client-id history-client --client-secret "HISTORY-SAVE-NAMED-OAUTH-SENTINEL" --token-url $"($base)/token" | ignore
         let response = {
             status: 200
             status_text: OK
             headers: {Set-Cookie: "session=HISTORY-SAVE-RESPONSE-SENTINEL"}
-            body: null
+            body: {access_token: "BODY-CONTENT-PRESERVED"}
             time_ms: 1
             size_bytes: 0
+            access_token: "HISTORY-SAVE-RESPONSE-METADATA-SENTINEL"
+            metadata: {
+                credentials: {
+                    client_secret: "HISTORY-SAVE-RESPONSE-METADATA-SENTINEL"
+                }
+            }
         }
         let cases = [
             {
@@ -391,6 +408,13 @@ def test-public-history-save-sanitizes-at-boundary [] {
                     }
                     body: null
                     auth: {type: bearer, token: "HISTORY-SAVE-BEARER-SENTINEL"}
+                    access_token: "HISTORY-SAVE-TOPLEVEL-SENTINEL"
+                    client_secret: "HISTORY-SAVE-TOPLEVEL-SENTINEL"
+                    metadata: {
+                        credentials: {
+                            refresh_token: "HISTORY-SAVE-NESTED-SENTINEL"
+                        }
+                    }
                 }
                 expected_auth: {type: bearer, replayable: false}
             }
@@ -433,13 +457,54 @@ def test-public-history-save-sanitizes-at-boundary [] {
             let entry = (api history get $id)
             assert equal $entry.request.auth $case.expected_auth $"direct history auth was not canonical: ($case.name)"
             assert equal $entry.response.headers."Set-Cookie" "******" "direct history response header was not redacted"
+            assert equal ($entry.response | columns) ["status" "status_text" "headers" "body" "time_ms" "size_bytes"] "history response retained unknown metadata"
+            assert equal $entry.response.body.access_token "BODY-CONTENT-PRESERVED" "history response body semantics changed"
             if $case.name == "bearer" {
+                assert equal ($entry.request | columns) ["method" "url" "headers" "body" "auth" "headers_replayable"] "history request retained unknown metadata"
                 assert equal $entry.request.headers.Authorization "******"
                 assert equal $entry.request.headers.X-Keep "exact"
                 assert equal $entry.request.headers_replayable false
             }
             for secret in $secrets {
                 assert (not (($entry | to nuon) | str contains $secret)) $"direct history get exposed a secret: ($case.name)"
+            }
+        }
+
+        let named_cases = [
+            {
+                name: bearer
+                auth: {type: bearer, token_ref: history-save-named-bearer}
+                expected: {type: bearer, ref: history-save-named-bearer, replayable: true}
+            }
+            {
+                name: basic
+                auth: {type: basic, creds_ref: history-save-named-basic}
+                expected: {type: basic, ref: history-save-named-basic, replayable: true}
+            }
+            {
+                name: api-key
+                auth: {type: api_key, key_ref: history-save-named-api}
+                expected: {type: api_key, ref: history-save-named-api, replayable: true}
+            }
+            {
+                name: oauth2
+                auth: {type: oauth2, ref: history-save-named-oauth}
+                expected: {type: oauth2, ref: history-save-named-oauth, replayable: true}
+            }
+        ]
+        for case in $named_cases {
+            let request = {
+                method: GET
+                url: $"($base)/history-save-named-($case.name)"
+                headers: {}
+                body: null
+                auth: $case.auth
+            }
+            let id = (api history save $request $response)
+            let entry = (api history get $id)
+            assert equal $entry.request.auth $case.expected $"valid direct-save ref was not canonical: ($case.name)"
+            for secret in $secrets {
+                assert (not (($entry | to nuon) | str contains $secret)) $"valid direct-save ref exposed a credential: ($case.name)"
             }
         }
 
@@ -494,6 +559,62 @@ def test-public-history-save-sanitizes-at-boundary [] {
             assert (not ($public_bytes | str contains $secret)) "history bytes/index/export persisted a credential"
         }
 
+        api auth bearer set history-deleted-bearer deleted | ignore
+        api auth basic set history-deleted-basic user deleted | ignore
+        api auth apikey set history-deleted-api deleted | ignore
+        api auth oauth2 configure history-deleted-oauth --client-id id --client-secret deleted --token-url $"($base)/token" | ignore
+        api auth bearer delete history-deleted-bearer | ignore
+        api auth basic delete history-deleted-basic | ignore
+        api auth apikey delete history-deleted-api | ignore
+        api auth oauth2 delete history-deleted-oauth | ignore
+        let secrets_path = ($root | path join "secrets.nuon")
+        let malformed = (
+            open $secrets_path
+            | update tokens ($in.tokens | upsert history-malformed-bearer {bearer: 42})
+            | update basic_auth ($in.basic_auth | upsert history-malformed-basic {username: user})
+            | update api_keys ($in.api_keys | upsert history-malformed-api {key: value, type: query})
+            | update oauth ($in.oauth | upsert history-malformed-oauth {
+                client_id: id
+                client_secret: secret
+                token_url: $"($base)/token"
+                access_token: 42
+            })
+        )
+        $malformed | to nuon --indent 4 | save -f $secrets_path
+
+        let invalid_ref_cases = [
+            {auth: {type: bearer, ref: history-missing-bearer}, expected: "history-missing-bearer"}
+            {auth: {type: basic, ref: history-missing-basic}, expected: "Basic credentials 'history-missing-basic' not found"}
+            {auth: {type: api_key, ref: history-missing-api}, expected: "API key 'history-missing-api' not found"}
+            {auth: {type: oauth2, ref: history-missing-oauth}, expected: "OAuth2 'history-missing-oauth' not found"}
+            {auth: {type: bearer, token_ref: history-deleted-bearer}, expected: "history-deleted-bearer"}
+            {auth: {type: basic, creds_ref: history-deleted-basic}, expected: "Basic credentials 'history-deleted-basic' not found"}
+            {auth: {type: api_key, key_ref: history-deleted-api}, expected: "API key 'history-deleted-api' not found"}
+            {auth: {type: oauth2, ref: history-deleted-oauth}, expected: "OAuth2 'history-deleted-oauth' not found"}
+            {auth: {type: bearer, ref: ""}, expected: "reference must be a non-empty string"}
+            {auth: {type: basic, ref: ""}, expected: "reference must be a non-empty string"}
+            {auth: {type: api_key, ref: ""}, expected: "reference must be a non-empty string"}
+            {auth: {type: oauth2, ref: ""}, expected: "reference must be a non-empty string"}
+            {auth: {type: bearer, ref: 42}, expected: "reference must be a non-empty string"}
+            {auth: {type: basic, ref: 42}, expected: "reference must be a non-empty string"}
+            {auth: {type: api_key, ref: 42}, expected: "reference must be a non-empty string"}
+            {auth: {type: oauth2, ref: 42}, expected: "reference must be a non-empty string"}
+            {auth: {type: bearer, ref: history-malformed-bearer}, expected: "history-malformed-bearer"}
+            {auth: {type: basic, ref: history-malformed-basic}, expected: "Basic credentials 'history-malformed-basic' is malformed"}
+            {auth: {type: api_key, ref: history-malformed-api}, expected: "API key 'history-malformed-api' is malformed"}
+            {auth: {type: oauth2, ref: history-malformed-oauth}, expected: "OAuth2 'history-malformed-oauth' is malformed"}
+        ]
+        for case in $invalid_ref_cases {
+            let before = (command-error-snapshot $root)
+            let request = {method: GET, url: $"($base)/invalid-ref", headers: {}, body: null, auth: $case.auth}
+            let result = (run-command-process $root $"api history save ($request | to nuon) ($response | to nuon)")
+            assert ($result.exit_code != 0) "invalid direct history ref unexpectedly succeeded"
+            assert equal ($result.stdout | str trim) ""
+            assert ($result.stderr | str contains $case.expected) $"invalid direct history ref error was not actionable: ($result.stderr)"
+            assert equal $result.stderr ($result.stderr | ansi strip)
+            assert equal (command-error-snapshot $root) $before "invalid direct history ref mutated state"
+        }
+
         let invalid_cases = [
             {
                 request: {method: GET, url: $"($base)/unknown", headers: {}, body: null, auth: {type: unknown, token: unsafe}}
@@ -507,6 +628,10 @@ def test-public-history-save-sanitizes-at-boundary [] {
                 request: {method: GET, url: $"($base)/bad-headers", headers: "HISTORY-SAVE-HEADER-SENTINEL", body: null}
                 expected: "History request headers must be a record"
             }
+            {
+                request: {method: 42, url: $"($base)/bad-method", headers: {}, body: null}
+                expected: "History request method must be a non-empty string"
+            }
         ]
         for case in $invalid_cases {
             let before = (command-error-snapshot $root)
@@ -519,6 +644,34 @@ def test-public-history-save-sanitizes-at-boundary [] {
                 assert (not ($result.stderr | str contains $secret)) "unsafe direct history save error exposed a credential"
             }
             assert equal (command-error-snapshot $root) $before "unsafe direct history save mutated state"
+        }
+        let canonical_request = {method: GET, url: $"($base)/invalid-response", headers: {}, body: null}
+        let invalid_responses = [
+            {
+                response: ($response | update status "200")
+                expected: "History response status must be an integer between 100 and 599"
+            }
+            {
+                response: ($response | update headers "HISTORY-SAVE-RESPONSE-METADATA-SENTINEL")
+                expected: "History response headers must be a record"
+            }
+            {
+                response: ($response | update time_ms (-1))
+                expected: "History response time_ms must be a non-negative number"
+            }
+            {
+                response: ($response | update size_bytes 1.5)
+                expected: "History response size_bytes must be a non-negative integer"
+            }
+        ]
+        for case in $invalid_responses {
+            let before = (command-error-snapshot $root)
+            let result = (run-command-process $root $"api history save ($canonical_request | to nuon) ($case.response | to nuon)")
+            assert ($result.exit_code != 0) "invalid history response unexpectedly succeeded"
+            assert equal ($result.stdout | str trim) ""
+            assert ($result.stderr | str contains $case.expected) $"invalid history response error was not actionable: ($result.stderr)"
+            assert equal $result.stderr ($result.stderr | ansi strip)
+            assert equal (command-error-snapshot $root) $before "invalid history response mutated state"
         }
         null
     } catch {|error| $error }
@@ -539,22 +692,44 @@ def test-legacy-and-invalid-auth-history [] {
         api init | ignore
         let base = $"http://127.0.0.1:($server.port)"
 
-        let legacy_id = (api history save {
+        let legacy_id = "20200101-000000-legacy"
+        let legacy_date = "2020-01-01"
+        let legacy_dir = ($root | path join "history" $legacy_date)
+        mkdir $legacy_dir
+        let legacy_path = ($legacy_dir | path join $"($legacy_id).nuon")
+        {
+            id: $legacy_id
+            timestamp: "2020-01-01T00:00:00Z"
+            environment: null
+            request: {
+                method: GET
+                url: $"($base)/legacy-no-auth"
+                headers: {}
+                body: null
+            }
+            response: {
+                status: 200
+                status_text: OK
+                headers: {}
+                body: null
+                time_ms: 1
+                size_bytes: 0
+            }
+        } | to nuon | save $legacy_path
+        [{
+            id: $legacy_id
+            timestamp: "2020-01-01T00:00:00Z"
             method: GET
             url: $"($base)/legacy-no-auth"
-            headers: {}
-            body: null
-        } {
             status: 200
-            status_text: OK
-            headers: {}
-            body: null
             time_ms: 1
-            size_bytes: 0
-        })
+            date_dir: $legacy_date
+        }] | to nuon | save -f ($root | path join "history" "index.nuon")
+        let legacy_bytes = (open $legacy_path --raw)
         api history resend $legacy_id --raw | ignore
         assert equal (command-error-wire-events $server | where path == "/legacy-no-auth" | length) 1 "legacy no-auth history no longer resends"
         assert (((api history get $legacy_id).request.auth? | default null) == null) "legacy entry was migrated unexpectedly"
+        assert equal (open $legacy_path --raw) $legacy_bytes "legacy history file was migrated during resend"
 
         api auth bearer set deleted-bearer deleted | ignore
         api auth basic set deleted-basic user deleted | ignore
@@ -731,6 +906,21 @@ def test-oauth-provider-errors-are-secret-safe [] {
             "CLIENT-SECRET-REFRESH-ERROR-SENTINEL"
             "ACCESS-TOKEN-ERROR-SENTINEL"
             "REFRESH-TOKEN-ERROR-SENTINEL"
+            "FAILED-ACCESS-SENTINEL"
+            "FAILED-REFRESH-SENTINEL"
+            "DESCRIPTION-ONLY-SENTINEL"
+            "UNSAFE-ERROR-CODE-SENTINEL"
+            "MALFORMED-OAUTH-SENTINEL"
+            "NONRECORD-OAUTH-SENTINEL"
+            "MISSING-ACCESS-REFRESH-SENTINEL"
+            "EMPTY-ACCESS-REFRESH-SENTINEL"
+            "NONSTRING-ACCESS-SENTINEL"
+            "INVALID-REFRESH-ACCESS-SENTINEL"
+            "INVALID-TYPE-ACCESS-SENTINEL"
+            "UNSUPPORTED-TYPE-ACCESS-SENTINEL"
+            "INVALID-EXPIRY-ACCESS-SENTINEL"
+            "INVALID-EXPIRY-TYPE-ACCESS-SENTINEL"
+            "INVALID-EXPIRY-HIGH-ACCESS-SENTINEL"
         ]
 
         api auth oauth2 configure provider-error --client-id error-client --client-secret "CLIENT-SECRET-ERROR-SENTINEL" --token-url $"($base)/token-error-initial" | ignore
@@ -801,6 +991,107 @@ def test-oauth-provider-errors-are-secret-safe [] {
         }
         assert equal (open $server.count_file --raw | str trim | into int) ($refresh_count_before + 1) "OAuth refresh provider error triggered a fallback token retry"
         assert equal (command-error-snapshot $root) $refresh_before "OAuth refresh provider error mutated secret/config/history state"
+
+        let invalid_shapes = [
+            {name: status-302, status: 302, code: unknown_error}
+            {name: status-400, status: 400, code: unknown_error}
+            {name: status-500, status: 500, code: unknown_error}
+            {name: description-only, status: 400, code: unknown_error}
+            {name: unsafe-code, status: 400, code: unknown_error}
+            {name: malformed-json, status: 200, code: invalid_response}
+            {name: non-record, status: 200, code: invalid_response}
+            {name: missing-access, status: 200, code: invalid_response}
+            {name: empty-access, status: 200, code: invalid_response}
+            {name: nonstring-access, status: 200, code: invalid_response}
+            {name: invalid-refresh, status: 200, code: invalid_response}
+            {name: invalid-type, status: 200, code: invalid_response}
+            {name: unsupported-type, status: 200, code: invalid_response}
+            {name: invalid-expiry, status: 200, code: invalid_response}
+            {name: invalid-expiry-type, status: 200, code: invalid_response}
+            {name: invalid-expiry-high, status: 200, code: invalid_response}
+        ]
+        for case in $invalid_shapes {
+            let initial_name = $"shape-initial-($case.name)"
+            let initial_client_secret = $"INITIAL-CLIENT-($case.name)"
+            api auth oauth2 configure $initial_name --client-id shape-client --client-secret $initial_client_secret --token-url $"($base)/token-($case.name)" | ignore
+            let initial_before = (command-error-snapshot $root)
+            let initial_count = (open $server.count_file --raw | str trim | into int)
+            let initial_command = if $case.name == "status-500" {
+                $"api get (($base + '/must-not-use-failed-token') | to nuon) -a {type: oauth2, ref: ($initial_name)} --save ($save_path | to nuon) --binary-save ($output_path | to nuon) --output none"
+            } else {
+                $"api auth oauth2 token ($initial_name | to nuon)"
+            }
+            let initial = (run-command-process $root $initial_command)
+            assert ($initial.exit_code != 0) $"invalid initial OAuth response unexpectedly succeeded: ($case.name)"
+            assert equal ($initial.stdout | str trim) "" $"invalid initial OAuth response wrote stdout: ($case.name)"
+            assert ($initial.stderr | str contains $"OAuth2 provider error: ($case.code)") $"invalid initial OAuth response omitted its safe code: ($case.name): ($initial.stderr)"
+            assert ($initial.stderr | str contains $"HTTP ($case.status)") $"invalid initial OAuth response omitted its status: ($case.name): ($initial.stderr)"
+            assert equal $initial.stderr ($initial.stderr | ansi strip) $"invalid initial OAuth response emitted ANSI: ($case.name)"
+            for secret in ($secrets | append $initial_client_secret) {
+                assert (not ($initial.stderr | str contains $secret)) $"invalid initial OAuth response exposed provider data: ($case.name)"
+            }
+            assert equal (open $server.count_file --raw | str trim | into int) ($initial_count + 1) $"invalid initial OAuth response did not make exactly one token request: ($case.name)"
+            assert equal (command-error-wire-events $server | length) 0 $"invalid initial OAuth response reached a protected endpoint: ($case.name)"
+            assert equal (command-error-snapshot $root) $initial_before $"invalid initial OAuth response mutated state: ($case.name)"
+            assert (not ($output_path | path exists))
+            assert (not ($save_path | path exists))
+
+            let refresh_name = $"shape-refresh-($case.name)"
+            let refresh_client_secret = $"REFRESH-CLIENT-($case.name)"
+            let old_access = $"OLD-ACCESS-($case.name)"
+            let old_refresh = $"OLD-REFRESH-($case.name)"
+            api auth oauth2 configure $refresh_name --client-id refresh-client --client-secret $refresh_client_secret --token-url $"($base)/token-($case.name)" | ignore
+            let current = (open $secrets_path)
+            let refresh_config = (
+                $current.oauth
+                | get $refresh_name
+                | upsert access_token $old_access
+                | upsert refresh_token $old_refresh
+                | upsert expires_at "2000-01-01T00:00:00Z"
+            )
+            ($current | update oauth ($current.oauth | upsert $refresh_name $refresh_config))
+            | to nuon --indent 4
+            | save -f $secrets_path
+            let refresh_shape_before = (command-error-snapshot $root)
+            let shape_count = (open $server.count_file --raw | str trim | into int)
+            let refresh_shape = (run-command-process $root $"api auth oauth2 refresh ($refresh_name | to nuon)")
+            assert ($refresh_shape.exit_code != 0) $"invalid OAuth refresh response unexpectedly succeeded: ($case.name)"
+            assert equal ($refresh_shape.stdout | str trim) "" $"invalid OAuth refresh response wrote stdout: ($case.name)"
+            assert ($refresh_shape.stderr | str contains $"OAuth2 provider error: ($case.code)") $"invalid OAuth refresh response omitted its safe code: ($case.name): ($refresh_shape.stderr)"
+            assert ($refresh_shape.stderr | str contains $"HTTP ($case.status)") $"invalid OAuth refresh response omitted its status: ($case.name): ($refresh_shape.stderr)"
+            assert equal $refresh_shape.stderr ($refresh_shape.stderr | ansi strip) $"invalid OAuth refresh response emitted ANSI: ($case.name)"
+            for secret in ($secrets | append [$refresh_client_secret $old_access $old_refresh]) {
+                assert (not ($refresh_shape.stderr | str contains $secret)) $"invalid OAuth refresh response exposed provider data: ($case.name)"
+            }
+            assert equal (open $server.count_file --raw | str trim | into int) ($shape_count + 1) $"invalid OAuth refresh response retried or skipped the token endpoint: ($case.name)"
+            assert equal (command-error-snapshot $root) $refresh_shape_before $"invalid OAuth refresh response overwrote stored credentials: ($case.name)"
+        }
+
+        api auth oauth2 configure valid-shaped --client-id valid-client --client-secret valid-secret --token-url $"($base)/token-valid-shaped" | ignore
+        let valid_count = (open $server.count_file --raw | str trim | into int)
+        let valid_initial = (run-command-process $root "api auth oauth2 token valid-shaped")
+        assert equal $valid_initial.exit_code 0 $"valid shaped token failed: ($valid_initial.stderr)"
+        assert equal ($valid_initial.stderr | str trim) ""
+        assert equal (open $server.count_file --raw | str trim | into int) ($valid_count + 1)
+        let valid_secrets = (open $secrets_path)
+        assert equal $valid_secrets.oauth.valid-shaped.access_token "VALID-SHAPED-ACCESS"
+        assert equal $valid_secrets.oauth.valid-shaped.refresh_token "VALID-SHAPED-REFRESH"
+
+        let valid_seeded = (
+            $valid_secrets
+            | update oauth.valid-shaped.access_token "OLD-VALID-ACCESS"
+            | update oauth.valid-shaped.refresh_token "OLD-VALID-REFRESH"
+            | update oauth.valid-shaped.expires_at "2000-01-01T00:00:00Z"
+        )
+        $valid_seeded | to nuon --indent 4 | save -f $secrets_path
+        let valid_refresh_count = (open $server.count_file --raw | str trim | into int)
+        let valid_refresh = (run-command-process $root "api auth oauth2 refresh valid-shaped")
+        assert equal $valid_refresh.exit_code 0 $"valid shaped refresh failed: ($valid_refresh.stderr)"
+        assert equal ($valid_refresh.stderr | str trim) ""
+        assert equal (open $server.count_file --raw | str trim | into int) ($valid_refresh_count + 1)
+        let refreshed_valid = (open $secrets_path)
+        assert equal $refreshed_valid.oauth.valid-shaped.access_token "VALID-SHAPED-ACCESS"
+        assert equal $refreshed_valid.oauth.valid-shaped.refresh_token "VALID-SHAPED-REFRESH"
         null
     } catch {|error| $error }
 

@@ -563,8 +563,10 @@ Named authentication accepts the family-specific aliases (`token_ref`, `creds_re
 or the generic `ref`. Successful history stores only the canonical type and reference, never the
 resolved token, key, password, access token, refresh token, or client secret. Inline bearer, basic,
 and API-key values can execute, but are recorded as non-replayable without storing the credential.
-OAuth token failures report only a safe provider error code and HTTP status; untrusted provider
-descriptions are omitted because they can echo credentials.
+Before a direct history save, named references are validated against local credential metadata
+without contacting an OAuth provider. OAuth accepts tokens only from 2xx responses with a valid
+token record; failures report only a safe provider error code/status, never the untrusted response
+description or token fields.
 
 ### History
 
@@ -605,9 +607,11 @@ basic, API-key header/query, and OAuth2 references. Legacy history without auth 
 its unauthenticated resend behavior. A default resend of non-replayable inline auth fails before
 network or file side effects and tells you to pass `--auth`. New history also redacts recognized
 sensitive request and response headers. This sanitization is enforced by the shared persistence
-boundary for automatic and direct synthetic history saves, so history bytes, index, show/get, and
-export cannot expose the original values. Resend requires `--headers` instead of transmitting mask
-text from a sensitive stored request header.
+boundary for automatic and direct synthetic history saves. It constructs explicit canonical
+request/response records, validates their field types before mutation, and omits caller-supplied
+metadata outside that schema, so history bytes, index, show/get, and export cannot expose smuggled
+credential fields. Response bodies remain unchanged. Resend requires `--headers` instead of
+transmitting mask text from a sensitive stored request header.
 
 ### Request Chaining
 

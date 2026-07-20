@@ -222,20 +222,16 @@ def acquire-oauth2-token [
     let parsed = (parse-oauth-provider-response $output "OAuth2 token request failed")
     let response = $parsed.response
 
-    if ($response.error? | default null) != null {
-        fail-oauth-provider-error $response $parsed.status
-    }
-
     # Save token
-    let expires_in = ($response.expires_in? | default 3600)
+    let expires_in = $parsed.expires_in
     let expires_at = ((date now) + ($expires_in | into duration --unit sec) | format date "%Y-%m-%dT%H:%M:%SZ")
 
     mut new_secrets = (load-secrets)
     mut oauth_config = ($new_secrets.oauth | get $name)
     $oauth_config = ($oauth_config | upsert access_token $response.access_token)
     $oauth_config = ($oauth_config | upsert expires_at $expires_at)
-    if ($response.refresh_token? | default null) != null {
-        $oauth_config = ($oauth_config | upsert refresh_token $response.refresh_token)
+    if $parsed.refresh_token != null {
+        $oauth_config = ($oauth_config | upsert refresh_token $parsed.refresh_token)
     }
     $new_secrets = ($new_secrets | upsert oauth ($new_secrets.oauth | upsert $name $oauth_config))
     save-secrets $new_secrets
@@ -279,20 +275,16 @@ def refresh-oauth2-token [name: string] {
     let parsed = (parse-oauth-provider-response $output "OAuth2 refresh failed")
     let response = $parsed.response
 
-    if ($response.error? | default null) != null {
-        fail-oauth-provider-error $response $parsed.status
-    }
-
     # Save new token
-    let expires_in = ($response.expires_in? | default 3600)
+    let expires_in = $parsed.expires_in
     let expires_at = ((date now) + ($expires_in | into duration --unit sec) | format date "%Y-%m-%dT%H:%M:%SZ")
 
     mut new_secrets = (load-secrets)
     mut oauth_config = ($new_secrets.oauth | get $name)
     $oauth_config = ($oauth_config | upsert access_token $response.access_token)
     $oauth_config = ($oauth_config | upsert expires_at $expires_at)
-    if ($response.refresh_token? | default null) != null {
-        $oauth_config = ($oauth_config | upsert refresh_token $response.refresh_token)
+    if $parsed.refresh_token != null {
+        $oauth_config = ($oauth_config | upsert refresh_token $parsed.refresh_token)
     }
     $new_secrets = ($new_secrets | upsert oauth ($new_secrets.oauth | upsert $name $oauth_config))
     save-secrets $new_secrets
@@ -328,29 +320,97 @@ def parse-oauth-provider-response [output: record, failure_message: string] {
         fail-command $failure_message
     }
     let parts = ($output.stdout | split row "\n")
-    let status = ($parts | last | str trim)
-    if not ($status =~ '^[0-9]{3}$') {
+    let status_text = ($parts | last | str trim)
+    if not ($status_text =~ '^[0-9]{3}$') {
         fail-command "Failed to parse OAuth2 response"
     }
-    let response = try {
-        $parts | drop 1 | str join "\n" | from json
+    let status = ($status_text | into int)
+    let decoded = try {
+        {value: ($parts | drop 1 | str join "\n" | from json), valid: true}
     } catch {
-        fail-command "Failed to parse OAuth2 response"
+        {value: null, valid: false}
     }
-    {response: $response, status: $status}
+    if $status < 200 or $status >= 300 {
+        fail-oauth-provider-error $decoded.value $status
+    }
+    if not $decoded.valid or not (($decoded.value | describe) | str starts-with "record") {
+        fail-oauth-invalid-response $status "expected a JSON object"
+    }
+
+    let response = $decoded.value
+    if ($response.error? | default null) != null {
+        fail-oauth-provider-error $response $status
+    }
+    let access_token = ($response.access_token? | default null)
+    if $access_token == null or ($access_token | describe) != "string" or ($access_token | str trim | is-empty) {
+        fail-oauth-invalid-response $status "access_token must be a non-empty string"
+    }
+    let refresh_token = ($response.refresh_token? | default null)
+    if $refresh_token != null and (
+        ($refresh_token | describe) != "string" or ($refresh_token | str trim | is-empty)
+    ) {
+        fail-oauth-invalid-response $status "refresh_token must be a non-empty string when present"
+    }
+    let token_type = ($response.token_type? | default null)
+    if $token_type != null and (
+        ($token_type | describe) != "string"
+        or ($token_type | str trim | is-empty)
+        or ($token_type | ascii-upcase) != "BEARER"
+    ) {
+        fail-oauth-invalid-response $status "token_type must be Bearer when present"
+    }
+    let expires_in = ($response.expires_in? | default 3600)
+    if ($expires_in | describe) != "int" or $expires_in < 1 or $expires_in > 315360000 {
+        fail-oauth-invalid-response $status "expires_in must be an integer between 1 and 315360000"
+    }
+
+    {
+        response: $response
+        status: $status
+        expires_in: $expires_in
+        refresh_token: $refresh_token
+    }
 }
 
-def fail-oauth-provider-error [response: record, status: string] {
-    let raw_code = ($response.error? | default "unknown_error")
-    let code = if (
-        ($raw_code | describe) == "string"
-        and $raw_code =~ '^[A-Za-z0-9._-]{1,100}$'
-    ) {
+def oauth-provider-error-code [response: any] {
+    let raw_code = if (($response | describe) | str starts-with "record") {
+        $response.error? | default "unknown_error"
+    } else {
+        "unknown_error"
+    }
+    let allowed_codes = [
+        "invalid_request"
+        "invalid_client"
+        "invalid_grant"
+        "unauthorized_client"
+        "unsupported_grant_type"
+        "invalid_scope"
+        "server_error"
+        "temporarily_unavailable"
+        "invalid_token"
+        "insufficient_scope"
+        "unsupported_token_type"
+        "invalid_target"
+        "interaction_required"
+        "login_required"
+        "account_selection_required"
+        "consent_required"
+    ]
+    let code = if ($raw_code | describe) == "string" and $raw_code in $allowed_codes {
         $raw_code
     } else {
         "unknown_error"
     }
+    $code
+}
+
+def fail-oauth-provider-error [response: any, status: int] {
+    let code = (oauth-provider-error-code $response)
     fail-command $"OAuth2 provider error: ($code) \(HTTP ($status)\)"
+}
+
+def fail-oauth-invalid-response [status: int, reason: string] {
+    fail-command $"OAuth2 provider error: invalid_response \(HTTP ($status)\); ($reason)"
 }
 
 def auth-field [auth_spec: record, names: list<string>] {
@@ -475,6 +535,25 @@ def validate-oauth-reference [name: string] {
     require-auth-string $config "client_id" $label | ignore
     require-auth-string $config "client_secret" $label | ignore
     require-auth-string $config "token_url" $label | ignore
+    for field in ["access_token" "refresh_token"] {
+        let value = ($config | get -o $field)
+        if $value != null and (
+            ($value | describe) != "string" or ($value | str trim | is-empty)
+        ) {
+            fail-command $"($label) is malformed"
+        }
+    }
+    let expires_at = ($config.expires_at? | default null)
+    if $expires_at != null {
+        if ($expires_at | describe) != "string" or ($expires_at | str trim | is-empty) {
+            fail-command $"($label) is malformed"
+        }
+        try {
+            $expires_at | into datetime | ignore
+        } catch {
+            fail-command $"($label) is malformed"
+        }
+    }
 }
 
 export def sensitive-header [name: string, value: any] {
@@ -550,6 +629,7 @@ export def auth-history-projection [auth_spec: record] {
         "BEARER" => {
             let ref = (auth-reference $auth_spec ["token_ref" "ref"] "******")
             if not ($ref | is-empty) {
+                resolve-bearer-reference $ref --metadata-only | ignore
                 {type: "bearer", ref: $ref, replayable: true}
             } else if ("token" in ($auth_spec | columns)) or $replayable == false {
                 if "token" in ($auth_spec | columns) {
@@ -563,6 +643,7 @@ export def auth-history-projection [auth_spec: record] {
         "BASIC" => {
             let ref = (auth-reference $auth_spec ["creds_ref" "ref"] "Basic credentials")
             if not ($ref | is-empty) {
+                resolve-basic-reference $ref --metadata-only | ignore
                 {type: "basic", ref: $ref, replayable: true}
             } else if ("username" in ($auth_spec | columns)) or ("password" in ($auth_spec | columns)) {
                 require-auth-string $auth_spec "username" "Inline basic authentication" --allow-empty | ignore
@@ -577,6 +658,7 @@ export def auth-history-projection [auth_spec: record] {
         "API_KEY" | "APIKEY" | "APIKEY_HEADER" | "APIKEY_QUERY" => {
             let ref = (auth-reference $auth_spec ["key_ref" "ref"] "API key")
             if not ($ref | is-empty) {
+                resolve-apikey-reference $ref --metadata-only | ignore
                 {type: "api_key", ref: $ref, replayable: true}
             } else if ("key" in ($auth_spec | columns)) or $replayable == false {
                 if "key" in ($auth_spec | columns) {
@@ -592,6 +674,7 @@ export def auth-history-projection [auth_spec: record] {
             if ($ref | is-empty) {
                 fail-command "OAuth2 history authentication requires a non-empty ref"
             }
+            validate-oauth-reference $ref
             {type: "oauth2", ref: $ref, replayable: true}
         }
         _ => { fail-command $"Unsupported authentication type '($raw_type)'" }

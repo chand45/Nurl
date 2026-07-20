@@ -140,19 +140,101 @@ try {
             if ($requestLine -match ' /ready ') {
                 $payload = 'ready'
                 $contentType = 'text/plain'
-            } elseif ($requestLine -match ' /token(?:-error-initial|-error-refresh)? ') {
+            } elseif ($requestLine -match ' /token(?:-[a-z0-9-]+)? ') {
                 $requestPath = ($requestLine -split ' ')[1]
                 $count = [int]([System.IO.File]::ReadAllText($CountFile)) + 1
                 [System.IO.File]::WriteAllText($CountFile, [string]$count)
+                $tokenStatus = 200
                 if ($requestPath -eq '/token-error-initial') {
+                    $tokenStatus = 400
                     $response = @{
                         error = 'invalid_client'
                         error_description = 'CLIENT-SECRET-ERROR-SENTINEL'
                     }
                 } elseif ($requestPath -eq '/token-error-refresh') {
+                    $tokenStatus = 400
                     $response = @{
                         error = 'invalid_grant'
                         error_description = 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL'
+                    }
+                } elseif ($requestPath -in @('/token-status-302', '/token-status-400', '/token-status-500')) {
+                    $tokenStatus = [int](($requestPath -split '-')[-1])
+                    $response = @{
+                        access_token = 'FAILED-ACCESS-SENTINEL'
+                        refresh_token = 'FAILED-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-description-only') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error_description = 'DESCRIPTION-ONLY-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-unsafe-code') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error = 'UNSAFE-ERROR-CODE-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-malformed-json') {
+                    $payload = '{\"access_token\":\"MALFORMED-OAUTH-SENTINEL\"'
+                    $response = $null
+                } elseif ($requestPath -eq '/token-non-record') {
+                    $payload = '[\"NONRECORD-OAUTH-SENTINEL\"]'
+                    $response = $null
+                } elseif ($requestPath -eq '/token-missing-access') {
+                    $response = @{
+                        refresh_token = 'MISSING-ACCESS-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-empty-access') {
+                    $response = @{
+                        access_token = ''
+                        refresh_token = 'EMPTY-ACCESS-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-nonstring-access') {
+                    $response = @{
+                        access_token = @('NONSTRING-ACCESS-SENTINEL')
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-refresh') {
+                    $response = @{
+                        access_token = 'INVALID-REFRESH-ACCESS-SENTINEL'
+                        refresh_token = 42
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-type') {
+                    $response = @{
+                        access_token = 'INVALID-TYPE-ACCESS-SENTINEL'
+                        token_type = @('Bearer')
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-unsupported-type') {
+                    $response = @{
+                        access_token = 'UNSUPPORTED-TYPE-ACCESS-SENTINEL'
+                        token_type = 'mac'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-ACCESS-SENTINEL'
+                        expires_in = 0
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry-type') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-TYPE-ACCESS-SENTINEL'
+                        expires_in = '3600'
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry-high') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-HIGH-ACCESS-SENTINEL'
+                        expires_in = 315360001
+                    }
+                } elseif ($requestPath -eq '/token-valid-shaped') {
+                    $response = @{
+                        access_token = 'VALID-SHAPED-ACCESS'
+                        refresh_token = 'VALID-SHAPED-REFRESH'
+                        token_type = 'Bearer'
+                        expires_in = 1800
                     }
                 } elseif ($body -match 'grant_type=refresh_token') {
                     $response = @{
@@ -167,7 +249,9 @@ try {
                         expires_in = 3600
                     }
                 }
-                $payload = $response | ConvertTo-Json -Compress
+                if ($null -ne $response) {
+                    $payload = $response | ConvertTo-Json -Compress
+                }
                 $contentType = 'application/json'
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
@@ -227,7 +311,7 @@ try {
                 [System.Text.Encoding]::UTF8.GetBytes($payload)
             }
             $crlf = \"`r`n\"
-            $statusLine = if ($requestPath -in @('/token-error-initial', '/token-error-refresh')) { 'HTTP/1.1 400 Bad Request' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
+            $statusLine = if ($requestPath -like '/token*') { 'HTTP/1.1 ' + $tokenStatus + ' OAuth Response' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
@@ -377,7 +461,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_protected()
 
     def do_POST(self):
-        if self.path not in ('/token', '/token-error-initial', '/token-error-refresh'):
+        if self.path != '/token' and not self.path.startswith('/token-'):
             self.send_protected()
             return
         global count
@@ -386,15 +470,94 @@ class Handler(http.server.BaseHTTPRequestHandler):
         count += 1
         with open(count_file, 'w', encoding='utf-8') as handle:
             handle.write(str(count))
+        status = 200
+        raw_payload = None
         if self.path == '/token-error-initial':
+            status = 400
             payload = {
                 'error': 'invalid_client',
                 'error_description': 'CLIENT-SECRET-ERROR-SENTINEL',
             }
         elif self.path == '/token-error-refresh':
+            status = 400
             payload = {
                 'error': 'invalid_grant',
                 'error_description': 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL',
+            }
+        elif self.path in ('/token-status-302', '/token-status-400', '/token-status-500'):
+            status = int(self.path.rsplit('-', 1)[1])
+            payload = {
+                'access_token': 'FAILED-ACCESS-SENTINEL',
+                'refresh_token': 'FAILED-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-description-only':
+            status = 400
+            payload = {'error_description': 'DESCRIPTION-ONLY-SENTINEL'}
+        elif self.path == '/token-unsafe-code':
+            status = 400
+            payload = {'error': 'UNSAFE-ERROR-CODE-SENTINEL'}
+        elif self.path == '/token-malformed-json':
+            payload = None
+            raw_payload = b'{\"access_token\":\"MALFORMED-OAUTH-SENTINEL\"'
+        elif self.path == '/token-non-record':
+            payload = None
+            raw_payload = b'[\"NONRECORD-OAUTH-SENTINEL\"]'
+        elif self.path == '/token-missing-access':
+            payload = {
+                'refresh_token': 'MISSING-ACCESS-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-empty-access':
+            payload = {
+                'access_token': '',
+                'refresh_token': 'EMPTY-ACCESS-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-nonstring-access':
+            payload = {
+                'access_token': ['NONSTRING-ACCESS-SENTINEL'],
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-refresh':
+            payload = {
+                'access_token': 'INVALID-REFRESH-ACCESS-SENTINEL',
+                'refresh_token': 42,
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-type':
+            payload = {
+                'access_token': 'INVALID-TYPE-ACCESS-SENTINEL',
+                'token_type': ['Bearer'],
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-unsupported-type':
+            payload = {
+                'access_token': 'UNSUPPORTED-TYPE-ACCESS-SENTINEL',
+                'token_type': 'mac',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-expiry':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-ACCESS-SENTINEL',
+                'expires_in': 0,
+            }
+        elif self.path == '/token-invalid-expiry-type':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-TYPE-ACCESS-SENTINEL',
+                'expires_in': '3600',
+            }
+        elif self.path == '/token-invalid-expiry-high':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-HIGH-ACCESS-SENTINEL',
+                'expires_in': 315360001,
+            }
+        elif self.path == '/token-valid-shaped':
+            payload = {
+                'access_token': 'VALID-SHAPED-ACCESS',
+                'refresh_token': 'VALID-SHAPED-REFRESH',
+                'token_type': 'Bearer',
+                'expires_in': 1800,
             }
         elif 'grant_type=refresh_token' in body:
             payload = {
@@ -408,8 +571,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'refresh_token': 'REFRESH-TOKEN-SENTINEL',
                 'expires_in': 3600,
             }
-        encoded = json.dumps(payload).encode('utf-8')
-        self.send_response(400 if self.path.startswith('/token-error-') else 200)
+        encoded = raw_payload if raw_payload is not None else json.dumps(payload).encode('utf-8')
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()

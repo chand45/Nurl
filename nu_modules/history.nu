@@ -130,10 +130,27 @@ def sanitize-history-headers [headers: any, label: string] {
 }
 
 def sanitize-history-request [request: record] {
+    let method = ($request.method? | default null)
+    if $method == null or ($method | describe) != "string" or ($method | str trim | is-empty) {
+        fail-command "History request method must be a non-empty string"
+    }
+    let url = ($request.url? | default null)
+    if $url == null or ($url | describe) != "string" or ($url | str trim | is-empty) {
+        fail-command "History request URL must be a non-empty string"
+    }
+    let headers_replayable = ($request.headers_replayable? | default null)
+    if $headers_replayable != null and ($headers_replayable | describe) != "bool" {
+        fail-command "History request headers_replayable must be a boolean"
+    }
     let header_context = (
         sanitize-history-headers ($request.headers? | default {}) "History request"
     )
-    mut safe_request = ($request | upsert headers $header_context.headers)
+    mut safe_request = {
+        method: $method
+        url: $url
+        headers: $header_context.headers
+        body: ($request.body? | default null)
+    }
     let auth = ($request.auth? | default null)
     if $auth != null {
         if not (($auth | describe) | str starts-with "record") {
@@ -153,10 +170,33 @@ def sanitize-history-request [request: record] {
 }
 
 def sanitize-history-response [response: record] {
+    let status = ($response.status? | default null)
+    if $status == null or ($status | describe) != "int" or $status < 100 or $status > 599 {
+        fail-command "History response status must be an integer between 100 and 599"
+    }
+    let status_text = ($response.status_text? | default null)
+    if $status_text == null or ($status_text | describe) != "string" {
+        fail-command "History response status_text must be a string"
+    }
+    let time_ms = ($response.time_ms? | default null)
+    if $time_ms == null or ($time_ms | describe) not-in ["int" "float"] or $time_ms < 0 {
+        fail-command "History response time_ms must be a non-negative number"
+    }
+    let size_bytes = ($response.size_bytes? | default null)
+    if $size_bytes == null or ($size_bytes | describe) != "int" or $size_bytes < 0 {
+        fail-command "History response size_bytes must be a non-negative integer"
+    }
     let header_context = (
         sanitize-history-headers ($response.headers? | default {}) "History response"
     )
-    $response | upsert headers $header_context.headers
+    {
+        status: $status
+        status_text: $status_text
+        headers: $header_context.headers
+        body: ($response.body? | default null)
+        time_ms: $time_ms
+        size_bytes: $size_bytes
+    }
 }
 
 # Save request/response to history

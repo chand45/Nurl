@@ -118,12 +118,15 @@ request, interpolates variables, or touches `.nuon` files.
 
 ## 14. Direct history saves could bypass credential sanitization  (FIXED)
 - **Symptom:** a caller could pass inline auth or sensitive headers to `api history save`, then
-  recover the values through history bytes, index, show/get, or export.
+  recover the values through history bytes, index, show/get, or export. Arbitrary top-level or
+  nested credential-shaped metadata could also bypass field-specific sanitization.
 - **Fix:** `api history save` is now the shared persistence boundary for live and synthetic saves.
-  It canonicalizes named refs, makes inline auth non-replayable, masks sensitive request/response
-  headers, and rejects unknown or malformed auth before creating or modifying history state.
+  It constructs allowlisted request/response records, validates field shapes and named refs from
+  local credential metadata, makes inline auth non-replayable, masks sensitive headers, and omits
+  unknown metadata before creating or modifying history state. Response bodies remain unchanged.
 - **Re-check:** run the direct-save cases in `tests/test_auth_replay.nu`; verify no sentinel exists
-  in persisted bytes or any public history projection and unsafe auth causes no mutation.
+  in persisted bytes or any public history projection, legacy fixtures are not migrated, and
+  invalid schemas/refs/auth cause no mutation.
 
 ## 15. Query API keys could alter URL structure  (FIXED)
 - **Symptom:** reserved characters in a query API-key name or value could create extra parameters,
@@ -135,8 +138,13 @@ request, interpolates variables, or touches `.nuon` files.
 
 ## 16. OAuth provider descriptions could echo credentials  (FIXED)
 - **Symptom:** token or refresh failures emitted an untrusted provider `error_description`, which
-  could contain a client secret, access token, or refresh token.
-- **Fix:** OAuth failures omit provider descriptions and report only a validated provider error
-  code and safe HTTP status. A refresh provider error is not retried as a new token request.
+  could contain a client secret, access token, or refresh token. Non-2xx responses with
+  success-shaped JSON were also accepted, while malformed 2xx token records were insufficiently
+  validated.
+- **Fix:** OAuth rejects all non-2xx responses before token use/persistence and validates the
+  required and optional fields of every accepted 2xx token record. Failures omit response
+  descriptions/bodies and report only a validated provider code (or `unknown_error`) plus status.
+  A refresh provider error is not retried as a new token request or allowed to overwrite old tokens.
 - **Re-check:** run the initial-token and refresh error cases in `tests/test_auth_replay.nu`; they
-  assert secret-free, non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.
+  cover 3xx/4xx/5xx success-shaped bodies and malformed 2xx shapes, asserting secret-free,
+  non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.
