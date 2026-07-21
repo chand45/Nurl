@@ -200,10 +200,10 @@ srv.listen(0,"127.0.0.1",()=>{fs.writeFileSync(pf,srv.address().port.toString())
     # Start server as background job (no blocking)
     job spawn { ^node ($server_script | into string) ($counter_file | into string) "2" ($port_file | into string) }
 
-    # Wait for server to write its port (up to 5 seconds)
+    # Wait for the hosted runner to schedule the background server.
     mut port = 0
     mut tries = 0
-    while ($port == 0 and $tries < 50) {
+    while ($port == 0 and $tries < 150) {
         sleep 0.1sec
         $tries = $tries + 1
         if ($port_file | path exists) {

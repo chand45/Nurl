@@ -409,7 +409,7 @@ if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-unframed" ] || [ "$request_number" -e
   printf "\033[31mcurl: (7) deterministic transport failure%s\033[0m\n" "$sensitive_arguments" >&2
   exit 7
 fi
-printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODY"
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
   -e "s/%{http_code}/200/g" \
@@ -477,7 +477,7 @@ fi
 if [ -n "$output_path" ]; then
   printf "BODY" > "$output_path"
 else
-  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+  printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODY"
 fi
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
@@ -538,7 +538,7 @@ echo request >> "$NURL_FAKE_CURL_LOG"
 if [ -n "$output_path" ]; then
   printf "BODY" > "$output_path"
 else
-  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
+  printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
 fi
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \

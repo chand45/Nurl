@@ -456,9 +456,9 @@ def start-posix-oauth-server [tmp: string] {
     let count_file = ($tmp | path join "oauth-count.txt")
     let wire_file = ($tmp | path join "oauth-wire.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
-    let python = if (which python3 | is-not-empty) {
+    let python = if not (which python3 | is-empty) {
         "python3"
-    } else if (which python | is-not-empty) {
+    } else if not (which python | is-empty) {
         "python"
     } else {
         error make {msg: "Python is required for the POSIX OAuth2 test endpoint"}
