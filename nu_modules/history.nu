@@ -388,7 +388,7 @@ export def "api history resend" [
         fail-command $"History entry '($id)' used non-replayable ($auth_type) authentication; pass --auth to resend it"
     }
     let explicit_headers = $headers != null
-    if ($entry.request.headers_replayable? | default true) == false and not $explicit_headers {
+    if (($entry.request.headers_replayable? | default true) == false) and (not $explicit_headers) {
         fail-command $"History entry '($id)' contains redacted sensitive headers; pass --headers to resend it"
     }
     let effective_headers = if $explicit_headers { $headers } else { $entry.request.headers }

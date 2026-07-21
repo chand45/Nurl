@@ -1,0 +1,150 @@
+name: Security compatibility
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  focused-security:
+    name: Security / ${{ matrix.os }} / Nushell ${{ matrix.nu_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            nu_version: 0.89.0
+            asset: nu-0.89.0-x86_64-pc-windows-msvc.zip
+            sha256: 285c9d2962ca003480015e61bf70b1f48783092b8daf143ddffce13ef98bf052
+            runner: tests/run-security-compat.nu
+          - os: windows-latest
+            nu_version: 0.114.1
+            asset: nu-0.114.1-x86_64-pc-windows-msvc.zip
+            sha256: 71a88cb74f51a9fdd91003273fb1f3361d7b393fb3a03014f43e5f111df9666f
+            runner: tests/run-security.nu
+          - os: ubuntu-latest
+            nu_version: 0.89.0
+            asset: nu-0.89.0-x86_64-unknown-linux-gnu.tar.gz
+            sha256: 3e9c9a238dce63010b2115b870db8ef40bf9e67fadb5e7e820eb576d41c85815
+            runner: tests/run-security-compat.nu
+          - os: ubuntu-latest
+            nu_version: 0.114.1
+            asset: nu-0.114.1-x86_64-unknown-linux-gnu.tar.gz
+            sha256: 8802b26edcdf1a64477567b5ce909fbae3d72d731c8f0847892ea16c6fa73c53
+            runner: tests/run-security.nu
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install verified Nushell
+        shell: pwsh
+        env:
+          NU_VERSION: ${{ matrix.nu_version }}
+          NU_ASSET: ${{ matrix.asset }}
+          NU_SHA256: ${{ matrix.sha256 }}
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP $env:NU_ASSET
+          $install = Join-Path $env:RUNNER_TEMP "nushell"
+          Invoke-WebRequest "https://github.com/nushell/nushell/releases/download/$env:NU_VERSION/$env:NU_ASSET" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:NU_SHA256) {
+            throw "Nushell checksum mismatch: expected $env:NU_SHA256, got $actual"
+          }
+          New-Item -ItemType Directory -Force $install | Out-Null
+          if ($env:NU_ASSET.EndsWith(".zip")) {
+            Expand-Archive -Path $archive -DestinationPath $install
+            $nu = Get-ChildItem $install -Recurse -File -Filter "nu.exe" | Select-Object -First 1
+          } else {
+            tar -xzf $archive -C $install
+            $nu = Get-ChildItem $install -Recurse -File -Filter "nu" | Select-Object -First 1
+            chmod +x $nu.FullName
+          }
+          if ($null -eq $nu) {
+            throw "Nushell executable was not present in $env:NU_ASSET"
+          }
+          "NU_EXE=$($nu.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify runtime
+        shell: pwsh
+        run: |
+          $actual = (& $env:NU_EXE --version).Trim()
+          if ($actual -ne "${{ matrix.nu_version }}") {
+            throw "Expected Nushell ${{ matrix.nu_version }}, got $actual"
+          }
+
+      - name: Source Nurl
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file -c "source api.nu"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run focused credential security suite
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file "${{ matrix.runner }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  current-suite:
+    name: Full suite / Nushell 0.114.1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install verified Nushell 0.114.1
+        shell: pwsh
+        run: |
+          $asset = "nu-0.114.1-x86_64-unknown-linux-gnu.tar.gz"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          $install = Join-Path $env:RUNNER_TEMP "nushell"
+          Invoke-WebRequest "https://github.com/nushell/nushell/releases/download/0.114.1/$asset" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne "8802b26edcdf1a64477567b5ce909fbae3d72d731c8f0847892ea16c6fa73c53") {
+            throw "Nushell checksum mismatch"
+          }
+          New-Item -ItemType Directory -Force $install | Out-Null
+          tar -xzf $archive -C $install
+          $nu = Get-ChildItem $install -Recurse -File -Filter "nu" | Select-Object -First 1
+          chmod +x $nu.FullName
+          "NU_EXE=$($nu.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run full current-runtime suite
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  command-discovery:
+    name: Command discovery / Nushell 0.114.1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install verified Nushell 0.114.1
+        shell: pwsh
+        run: |
+          $asset = "nu-0.114.1-x86_64-unknown-linux-gnu.tar.gz"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          $install = Join-Path $env:RUNNER_TEMP "nushell"
+          Invoke-WebRequest "https://github.com/nushell/nushell/releases/download/0.114.1/$asset" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne "8802b26edcdf1a64477567b5ce909fbae3d72d731c8f0847892ea16c6fa73c53") {
+            throw "Nushell checksum mismatch"
+          }
+          New-Item -ItemType Directory -Force $install | Out-Null
+          tar -xzf $archive -C $install
+          $nu = Get-ChildItem $install -Recurse -File -Filter "nu" | Select-Object -First 1
+          chmod +x $nu.FullName
+          "NU_EXE=$($nu.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate command coverage and help
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file .github/skills/validate-nurl-api/scripts/discover-commands.nu --check-help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

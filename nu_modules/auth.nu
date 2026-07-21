@@ -2,7 +2,7 @@
 # Handles Bearer, Basic, API Key, and OAuth2 authentication
 
 use command-error.nu [fail-command]
-use string-compat.nu [ascii-upcase]
+use string-compat.nu [ascii-upcase optional-get]
 
 # Truncate a string to max length with ellipsis
 def truncate-value [value: any, max_len: int = 40] {
@@ -57,7 +57,7 @@ export def "api auth bearer set" [
 # Get bearer token by name
 export def "api auth bearer get" [name: string] {
     let secrets = (load-secrets)
-    $secrets.tokens | get -o $name | get -o bearer
+    $secrets.tokens | optional-get $name | optional-get bearer
 }
 
 # Delete bearer token
@@ -92,7 +92,7 @@ export def "api auth basic set" [
 # Get basic auth credentials
 export def "api auth basic get" [name: string] {
     let secrets = (load-secrets)
-    $secrets.basic_auth | get -o $name
+    $secrets.basic_auth | optional-get $name
 }
 
 # Delete basic auth
@@ -137,7 +137,7 @@ export def "api auth apikey set" [
 # Get API key
 export def "api auth apikey get" [name: string] {
     let secrets = (load-secrets)
-    $secrets.api_keys | get -o $name
+    $secrets.api_keys | optional-get $name
 }
 
 # Delete API key
@@ -187,14 +187,14 @@ def acquire-oauth2-token [
     --force
 ] {
     let secrets = (load-secrets)
-    let config = ($secrets.oauth | get -o $name)
+    let config = ($secrets.oauth | optional-get $name)
 
     if $config == null {
         fail-command $"OAuth2 '($name)' not configured"
     }
 
     # Check if we have a valid token
-    if not $force and ($config.access_token? | default null) != null {
+    if (not $force) and ($config.access_token? | default null) != null {
         let expires_at = ($config.expires_at? | default null)
         if $expires_at != null {
             let expiry = ($expires_at | into datetime)
@@ -209,15 +209,13 @@ def acquire-oauth2-token [
 
     # Request new token using client credentials
     let body = $"grant_type=client_credentials&client_id=($config.client_id)&client_secret=($config.client_secret)"
-    let scope_param = if ($config.scope | default "" | is-not-empty) {
+    let scope_param = if not ($config.scope | default "" | is-empty) {
         $"&scope=($config.scope)"
     } else { "" }
 
-    let output = (curl -s -X POST $config.token_url
-        -H "Content-Type: application/x-www-form-urlencoded"
-        -d $"($body)($scope_param)"
-        --write-out "\n%{http_code}"
-        | complete)
+    let output = (do {
+        curl -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $"($body)($scope_param)" --write-out "\n%{http_code}"
+    } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 token request failed")
     let response = $parsed.response
@@ -253,7 +251,7 @@ export def "api auth oauth2 token" [
 
 def refresh-oauth2-token [name: string] {
     let secrets = (load-secrets)
-    let config = ($secrets.oauth | get -o $name)
+    let config = ($secrets.oauth | optional-get $name)
 
     if $config == null {
         fail-command $"OAuth2 '($name)' not configured"
@@ -266,11 +264,9 @@ def refresh-oauth2-token [name: string] {
 
     let body = $"grant_type=refresh_token&refresh_token=($refresh_token)&client_id=($config.client_id)&client_secret=($config.client_secret)"
 
-    let output = (curl -s -X POST $config.token_url
-        -H "Content-Type: application/x-www-form-urlencoded"
-        -d $body
-        --write-out "\n%{http_code}"
-        | complete)
+    let output = (do {
+        curl -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $body --write-out "\n%{http_code}"
+    } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 refresh failed")
     let response = $parsed.response
@@ -333,7 +329,7 @@ def parse-oauth-provider-response [output: record, failure_message: string] {
     if $status < 200 or $status >= 300 {
         fail-oauth-provider-error $decoded.value $status
     }
-    if not $decoded.valid or not (($decoded.value | describe) | str starts-with "record") {
+    if (not $decoded.valid) or (not (($decoded.value | describe) | str starts-with "record")) {
         fail-oauth-invalid-response $status "expected a JSON object"
     }
 
@@ -416,7 +412,7 @@ def fail-oauth-invalid-response [status: int, reason: string] {
 def auth-field [auth_spec: record, names: list<string>] {
     for name in $names {
         if $name in ($auth_spec | columns) {
-            return {present: true, name: $name, value: ($auth_spec | get -o $name)}
+            return {present: true, name: $name, value: ($auth_spec | optional-get $name)}
         }
     }
     {present: false, name: "", value: null}
@@ -435,8 +431,8 @@ def auth-reference [auth_spec: record, names: list<string>, label: string] {
 
 def get-saved-auth-record [bucket: string, name: string, label: string] {
     let secrets = (load-secrets)
-    let saved = ($secrets | get -o $bucket)
-    let config = if $saved == null { null } else { $saved | get -o $name }
+    let saved = ($secrets | optional-get $bucket)
+    let config = if $saved == null { null } else { $saved | optional-get $name }
     if $config == null {
         fail-command $"($label) '($name)' not found"
     }
@@ -452,11 +448,11 @@ def require-auth-string [
     label: string
     --allow-empty
 ] {
-    let value = ($config | get -o $field)
+    let value = ($config | optional-get $field)
     if $value == null or ($value | describe) != "string" {
         fail-command $"($label) is malformed"
     }
-    if not $allow_empty and ($value | str trim | is-empty) {
+    if (not $allow_empty) and ($value | str trim | is-empty) {
         fail-command $"($label) is malformed"
     }
     $value
@@ -515,7 +511,7 @@ def resolve-inline-apikey-shape [auth_spec: record] {
     let query_mode = $param.present or $location == "QUERY"
 
     if $query_mode {
-        if not $param.present or ($param.value | describe) != "string" or ($param.value | str trim | is-empty) {
+        if (not $param.present) or ($param.value | describe) != "string" or ($param.value | str trim | is-empty) {
             fail-command "Inline API key query authentication requires a non-empty parameter name"
         }
         {type: "apikey_query", param_name: $param.value}
@@ -536,7 +532,7 @@ def validate-oauth-reference [name: string] {
     require-auth-string $config "client_secret" $label | ignore
     require-auth-string $config "token_url" $label | ignore
     for field in ["access_token" "refresh_token"] {
-        let value = ($config | get -o $field)
+        let value = ($config | optional-get $field)
         if $value != null and (
             ($value | describe) != "string" or ($value | str trim | is-empty)
         ) {

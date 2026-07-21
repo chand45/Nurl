@@ -1,16 +1,23 @@
 # Public command error and OAuth2 stream-contract regressions.
 
 def run-command-process [root: string, command: string] {
-    let script_path = ($nu.temp-dir | path join $"nurl-command-error-(random uuid).nu")
+    let script_path = (test-temp-dir | path join $"nurl-command-error-(random uuid).nu")
+    let config_path = (test-temp-dir | path join $"nurl-command-config-(random uuid).nu")
+    let env_config_path = (test-temp-dir | path join $"nurl-command-env-(random uuid).nu")
     let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
     [
         $"use ($module_path | to nuon) *"
         $"$env.API_ROOT = ($root | to nuon)"
+        "$env.NO_COLOR = '1'"
         $command
     ] | str join "\n" | save -f $script_path
+    "$env.config.use_ansi_coloring = false" | save -f $config_path
+    "# Isolated test environment." | save -f $env_config_path
 
-    let result = (^$nu.current-exe --no-config-file $script_path | complete)
-    rm -f $script_path
+    let result = (test-complete-result (do {
+        ^$nu.current-exe --config $config_path --env-config $env_config_path $script_path
+    } | complete))
+    rm -f $script_path $config_path $env_config_path
     $result
 }
 
@@ -118,6 +125,8 @@ try {
             $contentLength = 0
             $authorization = ''
             $apiKey = ''
+            $trace = ''
+            $password = ''
             while (($line = $reader.ReadLine()) -ne '') {
                 if ($line -match '(?i)^Content-Length:\\s*(\\d+)') {
                     $contentLength = [int]$Matches[1]
@@ -127,6 +136,12 @@ try {
                 }
                 if ($line -match '(?i)^(?:X-API-Key|X[.]Nurl[+]Key):\\s*(.*)$') {
                     $apiKey = $Matches[1]
+                }
+                if ($line -match '(?i)^X-Safe-Trace:\\s*(.*)$') {
+                    $trace = $Matches[1]
+                }
+                if ($line -match '(?i)^(?:Password|Passwd|Pwd|X-Password|X-Passwd|X-Pwd):\\s*(.*)$') {
+                    $password = $Matches[1]
                 }
             }
             $body = ''
@@ -255,7 +270,7 @@ try {
                 $contentType = 'application/json'
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
-                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + [Environment]::NewLine)
+                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + \"`t\" + $trace + \"`t\" + $password + [Environment]::NewLine)
                 if ($requestPath -eq '/slow') {
                     Start-Sleep -Seconds 3
                 }
@@ -316,6 +331,17 @@ try {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
                 'X-Debug-Auth: Bearer RESPONSE-BEARER-SENTINEL' + $crlf
+            } elseif ($requestPath -eq '/password-response-headers') {
+                'Password: RESPONSE-PASSWORD-SENTINEL' + $crlf +
+                'Passwd: RESPONSE-PASSWD-SENTINEL' + $crlf +
+                'Pwd: RESPONSE-PWD-SENTINEL' + $crlf +
+                'X-Password: RESPONSE-X-PASSWORD-SENTINEL' + $crlf +
+                'X-Passwd: RESPONSE-X-PASSWD-SENTINEL' + $crlf +
+                'X-Pwd: RESPONSE-X-PWD-SENTINEL' + $crlf +
+                'Password-Hint: safe-password-hint' + $crlf +
+                'X-Pwd-Reset-Status: safe-pwd-reset' + $crlf +
+                'Bypass-Word: safe-bypass-word' + $crlf +
+                'X-Control-Header: exact-control-value' + $crlf
             } elseif ($requestPath -eq '/duplicate-headers') {
                 'X-Duplicate: first' + $crlf +
                 'X-Duplicate: second' + $crlf +
@@ -411,7 +437,7 @@ $process.Id"
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file | complete)
+    let launched = (test-complete-result (do { ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -581,8 +607,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def send_protected(self):
         authorization = self.headers.get('Authorization', '')
         api_key = self.headers.get('X.Nurl+Key', self.headers.get('X-API-Key', ''))
+        trace = self.headers.get('X-Safe-Trace', '')
+        password = ''
+        for name in ('Password', 'Passwd', 'Pwd', 'X-Password', 'X-Passwd', 'X-Pwd'):
+            if self.headers.get(name) is not None:
+                password = self.headers.get(name, '')
+                break
         with open(wire_file, 'a', encoding='utf-8') as handle:
-            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\n')
+            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\t' + trace + '\\t' + password + '\\n')
         if self.path in ('/slow', '/timeout'):
             time.sleep(3)
         if self.path == '/acl-slow':
@@ -673,6 +705,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly')
             self.send_header('X-Session-Token', 'RESPONSE-TOKEN-SENTINEL')
             self.send_header('X-Debug-Auth', 'Bearer RESPONSE-BEARER-SENTINEL')
+        if self.path == '/password-response-headers':
+            self.send_header('Password', 'RESPONSE-PASSWORD-SENTINEL')
+            self.send_header('Passwd', 'RESPONSE-PASSWD-SENTINEL')
+            self.send_header('Pwd', 'RESPONSE-PWD-SENTINEL')
+            self.send_header('X-Password', 'RESPONSE-X-PASSWORD-SENTINEL')
+            self.send_header('X-Passwd', 'RESPONSE-X-PASSWD-SENTINEL')
+            self.send_header('X-Pwd', 'RESPONSE-X-PWD-SENTINEL')
+            self.send_header('Password-Hint', 'safe-password-hint')
+            self.send_header('X-Pwd-Reset-Status', 'safe-pwd-reset')
+            self.send_header('Bypass-Word', 'safe-bypass-word')
+            self.send_header('X-Control-Header', 'exact-control-value')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -705,7 +748,7 @@ print(process.pid)
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file | complete)
+    let launched = (test-complete-result (do { ^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -736,10 +779,11 @@ def start-command-error-server [tmp: string] {
     }
 
     $server.port = (open $server.port_file --raw | str trim | into int)
+    let ready_url = $"http://127.0.0.1:($server.port)/ready"
     mut ready_ok = false
     mut ready_stderr = ""
     for _ in 1..40 {
-        let ready = (^curl -s --max-time 2 $"http://127.0.0.1:($server.port)/ready" | complete)
+        let ready = (test-complete-result (do { ^curl -s --max-time 2 $ready_url } | complete))
         $ready_stderr = $ready.stderr
         if $ready.exit_code == 0 and ($ready.stdout | str trim) == "ready" {
             $ready_ok = true
@@ -929,7 +973,7 @@ def command-error-wire-events [server: record] {
     open $server.wire_file --raw
     | lines
     | where {|line| not ($line | is-empty) }
-    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>.*)$'
+    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>[^\t]*)\t(?<trace>[^\t]*)\t(?<password>.*)$'
 }
 
 def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {

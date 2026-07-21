@@ -33,3 +33,12 @@ export def ascii-upcase []: string -> string {
 export def ascii-equal-ignore-case [left: string, right: string]: nothing -> bool {
     ($left | ascii-upcase) == ($right | ascii-upcase)
 }
+
+export def optional-get [key: any] {
+    let value = $in
+    try {
+        $value | get $key
+    } catch {
+        null
+    }
+}

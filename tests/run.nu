@@ -30,6 +30,8 @@ source test_chain.nu
 source test_resource_paths.nu
 source test_command_errors.nu
 source test_auth_replay.nu
+source test_credential_boundaries.nu
+source test_credential_blackbox.nu
 source test_surface_contracts.nu
 source test_secure_header_capture.nu
 source test_transport_failures.nu
@@ -65,6 +67,8 @@ let all_results = (
         ...(run-suite-resource-paths)
         ...(run-suite-command-errors)
         ...(run-suite-auth-replay)
+        ...(run-suite-credential-boundaries)
+        ...(run-suite-credential-blackbox)
         ...(run-suite-surface-contracts)
         ...(run-suite-secure-header-capture)
         ...(run-suite-transport-failures)

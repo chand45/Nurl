@@ -642,7 +642,7 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
         $curl_args
     }
     let final_args = ($transfer_args | append ["--write-out" $write_out])
-    let output = (curl ...$final_args $url | complete)
+    let output = (do { curl ...$final_args $url } | complete)
     if (($output.stderr | describe) | str starts-with "binary") {
         if $output.exit_code != 0 {
             return {
@@ -776,6 +776,32 @@ def as-binary [value: any] {
     }
 }
 
+def legacy-bytes-at-range-semantics [] {
+    (0x[00 01] | bytes at 0..<1 | bytes length) == 0
+}
+
+def bytes-before [value: binary, end: int] {
+    if $end == 0 {
+        return 0x[]
+    }
+    if (legacy-bytes-at-range-semantics) {
+        $value | bytes at 0..$end
+    } else {
+        $value | bytes at 0..<$end
+    }
+}
+
+def bytes-between [value: binary, start: int, end: int] {
+    if $start == $end {
+        return 0x[]
+    }
+    if (legacy-bytes-at-range-semantics) {
+        $value | bytes at $start..$end
+    } else {
+        $value | bytes at $start..<$end
+    }
+}
+
 def parse-curl-response-fileless [included_output: any, metadata: record] {
     let bytes = (as-binary $included_output)
     let total_size = ($bytes | bytes length)
@@ -800,12 +826,12 @@ def parse-curl-response-fileless [included_output: any, metadata: record] {
     let header_bytes = if $header_size == 0 {
         0x[]
     } else {
-        $bytes | bytes at 0..<$header_size
+        bytes-before $bytes $header_size
     }
     let body_bytes = if $body_size == 0 {
         0x[]
     } else {
-        $bytes | bytes at $header_size..<$body_end
+        bytes-between $bytes $header_size $body_end
     }
     let trailer_bytes = if $body_end == $total_size {
         0x[]
@@ -1161,23 +1187,25 @@ def execute-request [
             $history_request_record
         }
         let response = if $binary_save == "" { $parsed | reject _raw_body } else { $parsed }
+        let public_response = (
+            $response | update headers (redact-sensitive-headers $response.headers)
+        )
         if $binary_save != "" {
             commit-binary-response $attempt_path $binary_save
         }
 
         if not $no_history {
-            let history_response = ($response | update headers (redact-sensitive-headers $response.headers))
-            api history save $history_request_record $history_response | ignore
+            api history save $history_request_record $public_response | ignore
         }
 
         let result = {
             request: $public_request_record
-            response: $response
+            response: $public_response
             timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
         }
         if $binary_save != "" {
             if not $quiet_binary_status {
-                print $"(ansi green)Downloaded: ($binary_save) (($response.size_bytes)B)(ansi reset)"
+                print ((ansi green) + "Downloaded: " + $binary_save + " (" + ($response.size_bytes | into string) + "B)" + (ansi reset))
             }
             return $result
         }
@@ -1667,7 +1695,7 @@ export def "api send" [
             let tests_quiet = ($raw or ($output != "pretty"))
             let test_results = (run-tests $result $request.tests --quiet=$tests_quiet)
             $final_result = ($result | upsert tests_passed $test_results.all_passed)
-            if not $tests_quiet and not $test_results.all_passed {
+            if (not $tests_quiet) and (not $test_results.all_passed) {
                 let fail_msg = ("Warning: " + ($test_results.failed | into string) + " tests failed")
                 print ((ansi yellow) + $fail_msg + (ansi reset))
             }
@@ -1854,7 +1882,7 @@ export def "api request show" [
         if ($found | is-empty) { null } else { $found | first }
     }
 
-    if $request_file == null or not ($request_file | path exists) {
+    if ($request_file == null) or (not ($request_file | path exists)) {
         let scope = if $collection != "" { $"collection '($collection)'" } else { "any collection" }
         fail-command $"Request '($name)' not found in ($scope)"
     }
@@ -1910,7 +1938,7 @@ export def "api request update" [
     if $body != null or $body_file != null {
         let body_content = if $body_file != null and $body_file != "" {
             $file_body_content
-        } else if $body != null and not ($body | is-empty) {
+        } else if ($body != null) and (not ($body | is-empty)) {
             $body
         } else {
             null

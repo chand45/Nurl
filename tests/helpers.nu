@@ -5,10 +5,21 @@ use test-assert.nu [assert "assert equal" "assert not"]
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
+def test-temp-dir [] {
+    $nu.temp-dir? | default ($nu.temp-path? | default ".")
+}
+
+def test-complete-result [result: record] {
+    $result
+    | upsert stdout ($result.stdout? | default "")
+    | upsert stderr ($result.stderr? | default "")
+    | upsert exit_code ($result.exit_code? | default 1)
+}
+
 # Create a unique temp directory and return its absolute path.
 def make-temp-dir [prefix: string = "test"] {
     let id = (random uuid | str substring 0..12)
-    let tmp = ($nu.temp-dir | path join $"nurl-($prefix)-($id)")
+    let tmp = (test-temp-dir | path join $"nurl-($prefix)-($id)")
     mkdir $tmp
     $tmp | path expand
 }

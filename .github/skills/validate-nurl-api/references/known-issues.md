@@ -173,3 +173,13 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run the independent password policy case in `tests/test_auth_replay.nu`; its
   literal expectation tables cover URL variants, request/response headers, history/read/export
   boundaries, resend mask rejection, safe lookalikes, and managed query-key rotation.
+
+## 19. Live sensitive response headers could escape through typed outputs  (FIXED)
+- **Symptom:** response-header values were sanitized for history and human rendering but remained
+  available in `--raw`, `--output headers|json`, and `--select`.
+- **Fix:** recognized sensitive response headers are now masked before constructing the public
+  result record. The record shape, body/status values, exact safe headers, trailers, redirects,
+  and output-mode types remain unchanged.
+- **Re-check:** run `tests/test_credential_boundaries.nu` and `tests/test_secure_header_capture.nu`;
+  they exercise the live curl parser through typed/human/machine outputs, history/index/read/export,
+  trailers, redirects, exact password-family names, and safe boundary lookalikes.

@@ -387,7 +387,9 @@ let ct = (api get "https://api.example.com/" --select headers.Content-Type)
 Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`.
 `--output raw` preserves the response payload text exactly, including JSON scalar syntax and
 whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
-takes precedence over `--output`. With `--dry-run`, the curl preview is returned instead of an
+takes precedence over `--output`. Recognized sensitive response headers are masked in the public
+result before `--raw`, `--output headers|json`, `--select`, or human rendering, while non-sensitive
+header names, values, and result types remain unchanged. With `--dry-run`, the curl preview is returned instead of an
 HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
 OAuth token endpoint. They render bearer/OAuth authorization, basic credentials, API-key values,
 and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
@@ -617,7 +619,8 @@ Caller-supplied URLs are also checked after interpolation and before authenticat
 work. URL userinfo and exact, case-insensitive credential parameter names in queries or fragments
 (including percent-encoded token, client-secret, API-key, and `password`/`passwd`/`pwd` aliases)
 are rejected; ordinary names that merely contain those words are preserved. The same exact password
-aliases and their `X-` header forms are masked in request/response headers. Query parameters added
+aliases and their `X-` header forms are masked in request/response headers, including live typed
+responses and machine output modes. Query parameters added
 by Nurl managed auth are constructed only after this check, so named query API keys remain supported
 even with a sensitive parameter name, and history stores the safe caller URL plus auth reference.
 Pre-existing history remains readable without migration, but an old entry with an unsafe URL cannot
