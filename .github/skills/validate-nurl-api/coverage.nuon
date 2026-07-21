@@ -97,7 +97,7 @@
   { command: "api history clear",        kind: command,  group: history,         test: "DESTRUCTIVE: back up history/ first, or run in a throwaway API_ROOT. api history clear --force" }
   { command: "api history export",       kind: command,  group: history,         test: "let out = ($nu.temp-dir | path join $'nurl-hist-(random uuid).json'); api history export --format json --output $out; rm -f $out" }
   { command: "api history rebuild-index",kind: command,  group: history,         test: "let tmp = ($nu.temp-dir | path join $'nurl-rebuild-(random uuid)'); mkdir $tmp; with-env {API_ROOT: $tmp} { api init | ignore; api history save {method: GET, url: 'https://example.invalid', headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} | ignore; rm ($tmp | path join history index.nuon); api history rebuild-index }; rm -rf $tmp" }
-  { command: "api history save",         kind: internal, group: history,         test: "shared live/direct persistence boundary: explicit schemas, local named-ref validation, and secret sanitization; covered directly by tests/test_auth_replay.nu" }
+  { command: "api history save",         kind: internal, group: history,         test: "shared live/direct persistence boundary: explicit schemas, local named-ref and secret-URL validation, and header sanitization; covered directly by tests/test_auth_replay.nu" }
   { command: "api history get",          kind: internal, group: history,         test: "helper: fetch one entry by id; covered via `api history show`/`resend`" }
 
   # ---- chaining (chain.nu) -------------------------------------------------

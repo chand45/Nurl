@@ -4,7 +4,7 @@
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case]
-use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header]
+use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 
 # Get history directory
 def get-history-dir [] {
@@ -138,6 +138,7 @@ def sanitize-history-request [request: record] {
     if $url == null or ($url | describe) != "string" or ($url | str trim | is-empty) {
         fail-command "History request URL must be a non-empty string"
     }
+    validate-secret-safe-url $url | ignore
     let headers_replayable = ($request.headers_replayable? | default null)
     if $headers_replayable != null and ($headers_replayable | describe) != "bool" {
         fail-command "History request headers_replayable must be a boolean"

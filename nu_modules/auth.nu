@@ -556,23 +556,121 @@ def validate-oauth-reference [name: string] {
     }
 }
 
+def normalize-sensitive-name [name: string] {
+    $name
+    | ascii-upcase
+    | str replace --all --regex '[-.\s]+' "_"
+}
+
+def sensitive-credential-name [name: string] {
+    let normalized = (normalize-sensitive-name $name)
+    $normalized in [
+        "ACCESS_TOKEN"
+        "ACCESSTOKEN"
+        "REFRESH_TOKEN"
+        "REFRESHTOKEN"
+        "CLIENT_SECRET"
+        "CLIENTSECRET"
+        "AUTH_TOKEN"
+        "AUTHTOKEN"
+        "AUTHORIZATION_TOKEN"
+        "AUTHORIZATIONTOKEN"
+        "BEARER_TOKEN"
+        "BEARERTOKEN"
+        "ID_TOKEN"
+        "IDTOKEN"
+        "TOKEN"
+        "API_KEY"
+        "APIKEY"
+        "API_TOKEN"
+        "APITOKEN"
+        "X_API_KEY"
+        "X_API_TOKEN"
+        "X_AUTH_TOKEN"
+        "X_ACCESS_TOKEN"
+        "X_TOKEN"
+        "KEY"
+    ]
+}
+
+def validate-url-parameter-name [raw_name: string, location: string] {
+    let percent_residue = (
+        $raw_name | str replace --all --regex '%[0-9A-Fa-f]{2}' ""
+    )
+    if ($percent_residue | str contains "%") {
+        fail-command $"Malformed percent encoding in URL ($location) parameter name"
+    }
+    let decoded_result = try {
+        {value: ($raw_name | url decode), error: null}
+    } catch {
+        {value: null, error: true}
+    }
+    if $decoded_result.error != null {
+        fail-command $"Malformed percent encoding in URL ($location) parameter name"
+    }
+    if (sensitive-credential-name $decoded_result.value) {
+        let safe_name = (normalize-sensitive-name $decoded_result.value)
+        fail-command $"Unsafe URL ($location) parameter '($safe_name)' may contain credentials; use Nurl managed authentication with a named reference"
+    }
+}
+
+def validate-url-parameter-list [parameters: string, location: string] {
+    for parameter in ($parameters | split row "&") {
+        let raw_name = ($parameter | split row -n 2 "=" | first)
+        validate-url-parameter-name $raw_name $location
+    }
+}
+
+export def validate-secret-safe-url [url: string] {
+    let absolute_authority = ($url | parse -r '^[A-Za-z][A-Za-z0-9+.-]*://(?<authority>[^/?#]*)')
+    let relative_authority = ($url | parse -r '^//(?<authority>[^/?#]*)')
+    let authority = if not ($absolute_authority | is-empty) {
+        $absolute_authority | first | get authority
+    } else if not ($relative_authority | is-empty) {
+        $relative_authority | first | get authority
+    } else {
+        null
+    }
+    if $authority != null and ($authority | str contains "@") {
+        fail-command "Unsafe URL userinfo may contain credentials; use Nurl managed authentication with a named reference"
+    }
+
+    let fragment_parts = ($url | split row -n 2 "#")
+    let before_fragment = ($fragment_parts | first)
+    let query_parts = ($before_fragment | split row -n 2 "?")
+    if ($query_parts | length) == 2 {
+        validate-url-parameter-list ($query_parts | last) "query"
+    }
+
+    if ($fragment_parts | length) == 2 {
+        let fragment = ($fragment_parts | last)
+        if (
+            ($fragment | str contains "=")
+            or ($fragment | str contains "?")
+            or ($fragment | str contains "&")
+        ) {
+            for component in ($fragment | split row --regex '[?&]') {
+                let raw_name = ($component | split row -n 2 "=" | first)
+                validate-url-parameter-name $raw_name "fragment"
+            }
+        }
+    }
+
+    $url
+}
+
 export def sensitive-header [name: string, value: any] {
-    let normalized = ($name | ascii-upcase)
+    let normalized = (normalize-sensitive-name $name)
     let sensitive_name = (
         $normalized in [
             "AUTHORIZATION"
-            "PROXY-AUTHORIZATION"
+            "PROXY_AUTHORIZATION"
             "COOKIE"
-            "SET-COOKIE"
-            "X-API-KEY"
-            "API-KEY"
-            "APIKEY"
-            "X-AUTH-TOKEN"
-            "X-ACCESS-TOKEN"
-            "X-API-TOKEN"
-            "X-TOKEN"
+            "SET_COOKIE"
+            "X_TOKEN"
         ]
-        or ($normalized =~ '(^|[-_])(TOKEN|SECRET|SESSION|API[-_]?KEY)([-_]|$)')
+        or (sensitive-credential-name $name)
+        or ($normalized =~ '(^|_)(TOKEN|SECRET|SESSION|API_?KEY)(_|$)')
     )
     $sensitive_name or (($value | into string) =~ '(?i)^\s*(bearer|basic)\s+')
 }

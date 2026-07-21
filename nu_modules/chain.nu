@@ -3,6 +3,7 @@
 
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use http.nu ["api request"]
+use auth.nu [validate-secret-safe-url]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
@@ -66,10 +67,6 @@ export def "api chain run" [
     for step in $steps {
         $step_num = $step_num + 1
 
-        if not $quiet {
-            print $"(ansi blue)Step ($step_num): ($step.request? | default 'inline request')(ansi reset)"
-        }
-
         # Get request configuration and determine collection context
         mut step_collection = $collection
         let request_config = if ($step.request? | default null) != null {
@@ -103,6 +100,11 @@ export def "api chain run" [
 
         # Interpolate URL with collection context
         let url = (api vars interpolate ($request_config.url? | default "") -v $all_vars -c $step_collection)
+        validate-secret-safe-url $url | ignore
+
+        if not $quiet {
+            print $"(ansi blue)Step ($step_num): ($step.request? | default 'inline request')(ansi reset)"
+        }
 
         # Interpolate headers with collection context
         let headers = if ($request_config.headers? | default null) != null {

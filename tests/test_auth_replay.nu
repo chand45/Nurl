@@ -55,6 +55,19 @@ def assert-safe-preview [
     }
 }
 
+def assert-unsafe-url-error [
+    result: record
+    label: string
+    sentinel: string
+    expected: string
+] {
+    assert ($result.exit_code != 0) $"unsafe URL unexpectedly succeeded: ($label)"
+    assert equal ($result.stdout | str trim) "" $"unsafe URL wrote stdout: ($label)"
+    assert ($result.stderr | str contains $expected) $"unsafe URL error was not actionable: ($label): ($result.stderr)"
+    assert equal $result.stderr ($result.stderr | ansi strip) $"unsafe URL error emitted ANSI: ($label)"
+    assert (not ($result.stderr | str contains $sentinel)) $"unsafe URL error exposed its value: ($label)"
+}
+
 def auth-test-server [infra: string] {
     let server_result = try {
         {server: (start-command-error-server $infra), error: null}
@@ -683,6 +696,268 @@ def test-public-history-save-sanitizes-at-boundary [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-secret-bearing-urls-fail-preflight [] {
+    let root = (make-temp-dir "secret-url-preflight")
+    let infra = (make-temp-dir "secret-url-preflight-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let sentinel = "URL-CREDENTIAL-SENTINEL"
+        let response = {
+            status: 200
+            status_text: OK
+            headers: {}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        }
+
+        let unsafe_cases = [
+            {
+                label: userinfo
+                url: $"http://url-user:($sentinel)@127.0.0.1:($server.port)/userinfo"
+                expected: "Unsafe URL userinfo"
+            }
+            {
+                label: access-token
+                url: $"($base)/query?access_token=($sentinel)"
+                expected: "Unsafe URL query parameter 'ACCESS_TOKEN'"
+            }
+            {
+                label: masked-access-token
+                url: $"($base)/query?access_token=******"
+                expected: "Unsafe URL query parameter 'ACCESS_TOKEN'"
+            }
+            {
+                label: encoded-mixed-case
+                url: $"($base)/query?AcCeSs%5FtOkEn=($sentinel)"
+                expected: "Unsafe URL query parameter 'ACCESS_TOKEN'"
+            }
+            {
+                label: duplicate-token
+                url: $"($base)/query?ok=1&token=($sentinel)&token=second"
+                expected: "Unsafe URL query parameter 'TOKEN'"
+            }
+            {
+                label: refresh-token
+                url: $"($base)/query?refresh_token=($sentinel)"
+                expected: "Unsafe URL query parameter 'REFRESH_TOKEN'"
+            }
+            {
+                label: api-key-alias
+                url: $"($base)/query?X%2DAPI%2DKEY=($sentinel)"
+                expected: "Unsafe URL query parameter 'X_API_KEY'"
+            }
+            {
+                label: key-alias
+                url: $"($base)/query?key=($sentinel)"
+                expected: "Unsafe URL query parameter 'KEY'"
+            }
+            {
+                label: auth-token-alias
+                url: $"($base)/query?authorizationToken=($sentinel)"
+                expected: "Unsafe URL query parameter 'AUTHORIZATIONTOKEN'"
+            }
+            {
+                label: fragment-secret
+                url: $"($base)/fragment#client%5Fsecret=($sentinel)"
+                expected: "Unsafe URL fragment parameter 'CLIENT_SECRET'"
+            }
+            {
+                label: fragment-route-token
+                url: $"($base)/fragment#/callback?BeArEr-ToKeN=($sentinel)"
+                expected: "Unsafe URL fragment parameter 'BEARER_TOKEN'"
+            }
+            {
+                label: malformed-query-name
+                url: $"($base)/query?access%2token=($sentinel)"
+                expected: "Malformed percent encoding in URL query parameter name"
+            }
+            {
+                label: malformed-fragment-name
+                url: $"($base)/fragment#client%GGsecret=($sentinel)"
+                expected: "Malformed percent encoding in URL fragment parameter name"
+            }
+            {
+                label: malformed-utf8-name
+                url: $"($base)/query?%FF=($sentinel)"
+                expected: "Malformed percent encoding in URL query parameter name"
+            }
+        ]
+
+        for case in $unsafe_cases {
+            let before = (command-error-snapshot $root)
+            let request = {method: GET, url: $case.url, headers: {}, body: null}
+            let result = (run-command-process $root $"api history save ($request | to nuon) ($response | to nuon)")
+            assert-unsafe-url-error $result $"history save ($case.label)" $sentinel $case.expected
+            assert equal (command-error-snapshot $root) $before $"unsafe direct history save mutated state: ($case.label)"
+            assert equal (open $server.count_file --raw | str trim | into int) 0
+            assert equal (command-error-wire-events $server | length) 0
+        }
+
+        api auth oauth2 configure url-preflight-oauth --client-id safe-client --client-secret "URL-OAUTH-CLIENT-SECRET" --token-url $"($base)/token" | ignore
+        let unsafe_saved_url = $"($base)/saved?refresh_token=($sentinel)"
+        api request create unsafe-url-saved GET $unsafe_saved_url --collection default --auth {type: oauth2, ref: url-preflight-oauth} | ignore
+        let unsafe_template_url = $base + "/interpolated?{{unsafe_name}}={{unsafe_value}}"
+        api request create unsafe-url-interpolated GET $unsafe_template_url --collection default --auth {type: oauth2, ref: url-preflight-oauth} | ignore
+        let save_path = ($root | path join "url-preflight-output.txt")
+        let binary_path = ($root | path join "url-preflight-output.bin")
+        "SAVE-UNCHANGED" | save $save_path
+        "BINARY-UNCHANGED" | save $binary_path
+
+        let direct_userinfo_url = $"http://live-user:($sentinel)@127.0.0.1:($server.port)/direct"
+        let generic_fragment_url = $"($base)/generic#access_token=($sentinel)"
+        let chain_steps = [{
+            method: GET
+            url: $"($base)/chain#client_secret=($sentinel)"
+            auth: {type: oauth2, ref: url-preflight-oauth}
+        }]
+        let live_cases = [
+            {
+                label: direct-verb-userinfo
+                command: $"api get ($direct_userinfo_url | to nuon) --auth {type: oauth2, ref: url-preflight-oauth} --save ($save_path | to nuon) --output none"
+                expected: "Unsafe URL userinfo"
+            }
+            {
+                label: generic-fragment
+                command: $"api request -m GET ($generic_fragment_url | to nuon) --auth {type: oauth2, ref: url-preflight-oauth} --output none"
+                expected: "Unsafe URL fragment parameter 'ACCESS_TOKEN'"
+            }
+            {
+                label: saved-query
+                command: $"api send unsafe-url-saved --collection default --binary-save ($binary_path | to nuon) --output none"
+                expected: "Unsafe URL query parameter 'REFRESH_TOKEN'"
+            }
+            {
+                label: saved-export-query
+                command: "api request export unsafe-url-saved --collection default"
+                expected: "Unsafe URL query parameter 'REFRESH_TOKEN'"
+            }
+            {
+                label: saved-interpolated-query
+                command: $"api send unsafe-url-interpolated --collection default --vars {unsafe_name: access_token, unsafe_value: ($sentinel | to nuon)} --output none"
+                expected: "Unsafe URL query parameter 'ACCESS_TOKEN'"
+            }
+            {
+                label: chain-fragment
+                command: $"api chain run ($chain_steps | to nuon) | ignore"
+                expected: "Unsafe URL fragment parameter 'CLIENT_SECRET'"
+            }
+        ]
+        for case in $live_cases {
+            let before = (command-error-snapshot $root)
+            let result = (run-command-process $root $case.command)
+            assert-unsafe-url-error $result $case.label $sentinel $case.expected
+            assert equal (command-error-snapshot $root) $before $"unsafe live URL mutated state: ($case.label)"
+            assert equal (open $server.count_file --raw | str trim | into int) 0 $"unsafe live URL acquired an OAuth token: ($case.label)"
+            assert equal (command-error-wire-events $server | length) 0 $"unsafe live URL reached the protected server: ($case.label)"
+        }
+
+        let safe_urls = [
+            $"($base)/safe-boundary?access_token_count=1&monkey=2&keynote=3&tokenizer=4"
+            $"($base)/safe-boundary?value=%61ccess_token&%E4%B8%96%E7%95%8C=ok&dup=1&dup=2"
+            $"($base)/safe-boundary?label=%E4%B8%96%E7%95%8C#access-token-section"
+            $"($base)/safe-boundary?#ordinary-fragment"
+        ]
+        mut safe_ids = []
+        for url in $safe_urls {
+            let before_ids = (auth-history-ids)
+            let result = (api get $url --raw)
+            assert equal $result.response.status 200 $"safe URL failed: ($url)"
+            let entry = (auth-new-history $before_ids)
+            assert equal $entry.request.url $url "safe URL was not preserved exactly"
+            assert (not ($entry.request.url | str contains "******")) "safe URL persisted a mask as data"
+            $safe_ids = ($safe_ids | append $entry.id)
+        }
+
+        api auth apikey set managed-url-query "MANAGED-URL-KEY-SENTINEL" --query access_token | ignore
+        let managed_url = $"($base)/managed-query?ordinary=1#managed-fragment"
+        let managed_before = (auth-history-ids)
+        api get $managed_url --auth {type: api_key, ref: managed-url-query} --raw | ignore
+        let managed_entry = (auth-new-history $managed_before)
+        assert equal $managed_entry.request.url $managed_url "managed query auth changed the persisted caller URL"
+        assert-history-auth $managed_entry "api_key" "managed-url-query" ["MANAGED-URL-KEY-SENTINEL"]
+        let managed_wire = (command-error-wire-events $server | last)
+        assert ($managed_wire.path | str contains "access_token=MANAGED-URL-KEY-SENTINEL") "managed query auth was not sent"
+        assert (not ($managed_wire.path | str contains "#")) "managed query auth sent the URL fragment"
+
+        let preview = (run-command-process $root $"api get ($managed_url | to nuon) --auth {type: api_key, ref: managed-url-query} --dry-run")
+        assert-safe-preview $preview "managed sensitive-name query preview" ["MANAGED-URL-KEY-SENTINEL"] ["access_token=******"]
+        let resend_before = (command-error-wire-events $server | length)
+        api history resend $managed_entry.id --raw | ignore
+        assert equal (command-error-wire-events $server | length) ($resend_before + 1) "managed query auth history did not replay"
+
+        let safe_id = ($safe_ids | first)
+        let safe_url = ($safe_urls | first)
+        let json_export = ($root | path join "safe-history.json")
+        let csv_export = ($root | path join "safe-history.csv")
+        let readers = [
+            "api history list | to nuon"
+            "api history search safe-boundary | to nuon"
+            $"api history show ($safe_id | to nuon) | to nuon"
+            $"api history get ($safe_id | to nuon) | to nuon"
+            $"api history export --format json --output ($json_export | to nuon)"
+            $"api history export --format csv --output ($csv_export | to nuon)"
+        ]
+        for command in $readers {
+            let result = (run-command-process $root $command)
+            assert equal $result.exit_code 0 $"safe history reader/export failed: ($command): ($result.stderr)"
+            assert equal ($result.stderr | str trim) ""
+            assert (not ($result.stdout | str contains $sentinel)) $"safe history surface exposed a rejected URL value: ($command)"
+        }
+        let safe_public_bytes = $"(open $json_export --raw)\n(open $csv_export --raw)"
+        assert ($safe_public_bytes | str contains $safe_url) "safe history exports did not preserve the URL"
+        assert (not ($safe_public_bytes | str contains $sentinel)) "safe history export contained a rejected URL value"
+        assert (not ($safe_public_bytes | str contains "******")) "safe history export persisted a mask as URL data"
+
+        let legacy_id = "20200102-000000-unsafe-url"
+        let legacy_date = "2020-01-02"
+        let legacy_dir = ($root | path join "history" $legacy_date)
+        mkdir $legacy_dir
+        let legacy_path = ($legacy_dir | path join $"($legacy_id).nuon")
+        let legacy_url = $"($base)/legacy?access_token=($sentinel)"
+        {
+            id: $legacy_id
+            timestamp: "2020-01-02T00:00:00Z"
+            environment: null
+            request: {method: GET, url: $legacy_url, headers: {}, body: null}
+            response: $response
+        } | to nuon | save $legacy_path
+        let index_path = ($root | path join "history" "index.nuon")
+        let index = (open $index_path)
+        ($index | append {
+            id: $legacy_id
+            timestamp: "2020-01-02T00:00:00Z"
+            method: GET
+            url: $legacy_url
+            status: 200
+            time_ms: 1
+            date_dir: $legacy_date
+        }) | to nuon | save -f $index_path
+        for command in [
+            $"api history resend ($legacy_id | to nuon) --raw"
+            $"api history resend ($legacy_id | to nuon) --dry-run"
+        ] {
+            let legacy_before = (command-error-snapshot $root)
+            let legacy_wire_before = (command-error-wire-events $server | length)
+            let legacy_result = (run-command-process $root $command)
+            assert-unsafe-url-error $legacy_result "legacy history resend" $sentinel "Unsafe URL query parameter 'ACCESS_TOKEN'"
+            assert equal (command-error-snapshot $root) $legacy_before "legacy unsafe URL resend migrated or rewrote history"
+            assert equal (command-error-wire-events $server | length) $legacy_wire_before "legacy unsafe URL resend reached the network"
+        }
+        assert equal (api history get $legacy_id | get request.url) $legacy_url "legacy unsafe URL read compatibility changed"
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
 def test-legacy-and-invalid-auth-history [] {
     let root = (make-temp-dir "auth-replay-invalid")
     let infra = (make-temp-dir "auth-replay-invalid-server")
@@ -1177,6 +1452,7 @@ export def run-suite-auth-replay [] {
         (run-test "named auth refs replay with rotation and override precedence" { test-named-auth-history-replay-and-rotation })
         (run-test "inline auth history requires an explicit replay override" { test-inline-auth-is-nonreplayable })
         (run-test "public history save sanitizes auth and headers at the persistence boundary" { test-public-history-save-sanitizes-at-boundary })
+        (run-test "credential-bearing URLs fail before auth, network, output, or history side effects" { test-secret-bearing-urls-fail-preflight })
         (run-test "legacy history replays while missing, deleted, malformed, and unknown auth fail safely" { test-legacy-and-invalid-auth-history })
         (run-test "dry-run, send, export, and history previews mask all supported auth" { test-auth-preview-and-export-secrecy })
         (run-test "OAuth provider errors expose only stable safe codes across request surfaces" { test-oauth-provider-errors-are-secret-safe })

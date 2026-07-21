@@ -148,3 +148,16 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run the initial-token and refresh error cases in `tests/test_auth_replay.nu`; they
   cover 3xx/4xx/5xx success-shaped bodies and malformed 2xx shapes, asserting secret-free,
   non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.
+
+## 17. Credential-bearing URLs could bypass safe history auth metadata  (FIXED)
+- **Symptom:** URL userinfo or recognized credential query/fragment parameters were copied into
+  history entries and the index, exposed by readers/exports, and reused by resend.
+- **Fix:** one shared classifier now rejects userinfo and exact sensitive parameter names after
+  interpolation and strict percent decoding, before wire auth, OAuth acquisition, network, output,
+  or history mutation. It does not inspect arbitrary paths, parameter values, or bodies. Managed
+  query auth is appended afterward and remains replayable through its safe named reference.
+- **Compatibility:** existing history bytes are not migrated and remain readable, but resend
+  revalidates the stored URL and refuses unsafe legacy entries before network access.
+- **Re-check:** run the secret-URL preflight case in `tests/test_auth_replay.nu`; it covers direct
+  save, direct/saved/chain execution, safe lookalike names, managed query auth, all history readers
+  and exports, malformed encodings, and a byte-stable legacy resend rejection.
