@@ -660,15 +660,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == '/trailers':
             self.connection.sendall(
-                b'HTTP/1.1 200 OK\r\n'
-                b'Content-Type: text/plain\r\n'
-                b'Transfer-Encoding: chunked\r\n'
-                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\r\n\r\n'
-                b'4\r\nBODY\r\n0\r\n'
-                b'X-Mixed-Trailer: first\r\n'
-                b'x-MiXeD-TrAiLeR: second\r\n'
-                b'x-TrAiLeR-CaSe: trailer-value\r\n'
-                b'Set-Cookie: trailer-secret-sentinel\r\n\r\n'
+                b'HTTP/1.1 200 OK\\r\\n'
+                b'Content-Type: text/plain\\r\\n'
+                b'Transfer-Encoding: chunked\\r\\n'
+                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\\r\\n\\r\\n'
+                b'4\\r\\nBODY\\r\\n0\\r\\n'
+                b'X-Mixed-Trailer: first\\r\\n'
+                b'x-MiXeD-TrAiLeR: second\\r\\n'
+                b'x-TrAiLeR-CaSe: trailer-value\\r\\n'
+                b'Set-Cookie: trailer-secret-sentinel\\r\\n\\r\\n'
             )
             return
         if self.path == '/early-hints':
