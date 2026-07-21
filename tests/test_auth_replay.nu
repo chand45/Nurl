@@ -958,6 +958,264 @@ def test-secret-bearing-urls-fail-preflight [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-password-credential-name-policy [] {
+    let root = (make-temp-dir "password-credential-policy")
+    let infra = (make-temp-dir "password-credential-policy-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let url_sentinel = "URL-PASSWORD-SENTINEL"
+        let response = {
+            status: 200
+            status_text: OK
+            headers: {}
+            body: null
+            time_ms: 1
+            size_bytes: 0
+        }
+
+        # Literal policy expectations intentionally do not reuse production helpers or lists.
+        let unsafe_url_cases = [
+            {label: password-raw, suffix: $"?password=($url_sentinel)#safe", expected: "PASSWORD"}
+            {label: password-encoded, suffix: $"?pass%77ord=($url_sentinel)", expected: "PASSWORD"}
+            {label: password-mixed, suffix: $"?PaSsWoRd=($url_sentinel)", expected: "PASSWORD"}
+            {label: password-duplicate, suffix: $"?ok=1&password=($url_sentinel)&password=second", expected: "PASSWORD"}
+            {label: password-fragment, suffix: $"#password=($url_sentinel)", expected: "PASSWORD"}
+            {label: passwd-raw, suffix: $"?passwd=($url_sentinel)", expected: "PASSWD"}
+            {label: passwd-encoded-fragment, suffix: $"#route?pass%77d=($url_sentinel)", expected: "PASSWD"}
+            {label: pwd-mixed, suffix: $"?PwD=($url_sentinel)", expected: "PWD"}
+            {label: pwd-encoded-fragment, suffix: $"#p%77d=($url_sentinel)", expected: "PWD"}
+            {label: access-token, suffix: $"?access_token=($url_sentinel)", expected: "ACCESS_TOKEN"}
+            {label: refresh-token, suffix: $"?refresh%5Ftoken=($url_sentinel)", expected: "REFRESH_TOKEN"}
+            {label: client-secret, suffix: $"#ClIeNt-SeCrEt=($url_sentinel)", expected: "CLIENT_SECRET"}
+            {label: auth-token, suffix: $"?authToken=($url_sentinel)", expected: "AUTHTOKEN"}
+            {label: bearer-token, suffix: $"?bearer_token=($url_sentinel)", expected: "BEARER_TOKEN"}
+            {label: token, suffix: $"?token=($url_sentinel)", expected: "TOKEN"}
+            {label: api-key, suffix: $"?api%5Fkey=($url_sentinel)", expected: "API_KEY"}
+            {label: x-api-key, suffix: $"?X-API-Key=($url_sentinel)", expected: "X_API_KEY"}
+            {label: key, suffix: $"?key=($url_sentinel)", expected: "KEY"}
+        ]
+        for case in $unsafe_url_cases {
+            let before = (command-error-snapshot $root)
+            let request = {
+                method: GET
+                url: $"($base)/password-policy($case.suffix)"
+                headers: {}
+                body: null
+            }
+            let result = (run-command-process $root $"api history save ($request | to nuon) ($response | to nuon)")
+            assert-unsafe-url-error $result $"password URL policy ($case.label)" $url_sentinel $"Unsafe URL"
+            assert ($result.stderr | str contains $case.expected) $"password URL error omitted safe name: ($case.label)"
+            assert equal (command-error-snapshot $root) $before $"password URL policy mutated state: ($case.label)"
+        }
+        for case in [
+            {label: malformed-password, suffix: $"?pass%2word=($url_sentinel)", expected: "Malformed percent encoding"}
+            {label: malformed-pwd-fragment, suffix: $"#p%GGwd=($url_sentinel)", expected: "Malformed percent encoding"}
+        ] {
+            let before = (command-error-snapshot $root)
+            let request = {method: GET, url: $"($base)/password-malformed($case.suffix)", headers: {}, body: null}
+            let result = (run-command-process $root $"api history save ($request | to nuon) ($response | to nuon)")
+            assert-unsafe-url-error $result $case.label $url_sentinel $case.expected
+            assert equal (command-error-snapshot $root) $before $"malformed password URL mutated state: ($case.label)"
+        }
+        api auth oauth2 configure password-url-oauth --client-id safe-client --client-secret "PASSWORD-URL-OAUTH-SECRET" --token-url $"($base)/token" | ignore
+        let unsafe_live_url = $"($base)/password-live?password=($url_sentinel)"
+        let unsafe_output = ($root | path join "password-url-output.txt")
+        "UNCHANGED" | save $unsafe_output
+        let unsafe_live_before = (command-error-snapshot $root)
+        let unsafe_live = (run-command-process $root $"api get ($unsafe_live_url | to nuon) --auth {type: oauth2, ref: password-url-oauth} --save ($unsafe_output | to nuon) --output none")
+        assert-unsafe-url-error $unsafe_live "live password URL" $url_sentinel "Unsafe URL query parameter 'PASSWORD'"
+        assert equal (command-error-snapshot $root) $unsafe_live_before "live password URL mutated state"
+        assert equal (open $server.count_file --raw | str trim | into int) 0 "live password URL acquired an OAuth token"
+        assert equal (command-error-wire-events $server | length) 0 "live password URL reached the protected server"
+
+        let safe_url_cases = [
+            $"($base)/safe-password?password_hint=allowed"
+            $"($base)/safe-password?compass=allowed"
+            $"($base)/safe-password?pwd_reset_status=allowed"
+            $"($base)/safe-password?passwd_count=1"
+            $"($base)/safe-password?bypass-word=allowed#password-section"
+        ]
+        mut safe_url_ids = []
+        for url in $safe_url_cases {
+            let before_ids = (auth-history-ids)
+            api get $url --raw | ignore
+            let entry = (auth-new-history $before_ids)
+            assert equal $entry.request.url $url "safe password lookalike URL changed"
+            $safe_url_ids = ($safe_url_ids | append $entry.id)
+        }
+
+        let header_cases = [
+            {name: Password, secret: "HEADER-PASSWORD-SENTINEL"}
+            {name: password, secret: "HEADER-PASSWORD-CASE-SENTINEL"}
+            {name: Passwd, secret: "HEADER-PASSWD-SENTINEL"}
+            {name: Pwd, secret: "HEADER-PWD-SENTINEL"}
+            {name: X-Password, secret: "HEADER-X-PASSWORD-SENTINEL"}
+            {name: X_PASSWORD, secret: "HEADER-X-PASSWORD-UNDERSCORE-SENTINEL"}
+            {name: X-Passwd, secret: "HEADER-X-PASSWD-SENTINEL"}
+            {name: x_passwd, secret: "HEADER-X-PASSWD-CASE-SENTINEL"}
+            {name: X-Pwd, secret: "HEADER-X-PWD-SENTINEL"}
+            {name: x_pwd, secret: "HEADER-X-PWD-CASE-SENTINEL"}
+        ]
+        mut sensitive_header_ids = []
+        for case in $header_cases {
+            let headers = ({} | upsert $case.name $case.secret | upsert X-Keep exact)
+            for surface in [
+                {label: direct, command: $"api get (($base + '/header-preview') | to nuon) --headers ($headers | to nuon) --dry-run"}
+                {label: generic, command: $"api request -m GET (($base + '/header-preview') | to nuon) --headers ($headers | to nuon) --dry-run"}
+            ] {
+                let preview = (run-command-process $root $surface.command)
+                assert-safe-preview $preview $"($surface.label) password header ($case.name)" [$case.secret] [$"($case.name): ******" "X-Keep: exact"]
+            }
+
+            let request = {method: GET, url: $"($base)/direct-history-header", headers: $headers, body: null}
+            let direct_id = (api history save $request $response)
+            let direct_entry = (api history get $direct_id)
+            assert equal ($direct_entry.request.headers | get $case.name) "******" $"direct save did not mask ($case.name)"
+            assert equal $direct_entry.request.headers.X-Keep exact
+            assert equal $direct_entry.request.headers_replayable false
+            assert (not (($direct_entry | to nuon) | str contains $case.secret)) $"direct save persisted ($case.name)"
+            $sensitive_header_ids = ($sensitive_header_ids | append $direct_id)
+        }
+
+        let saved_secret = "SAVED-X-PASSWORD-SENTINEL"
+        let live_secret = "LIVE-X-PWD-SENTINEL"
+        let live_before = (auth-history-ids)
+        api get $"($base)/live-password-header" --headers {X-Pwd: $live_secret, X-Keep: exact} --raw | ignore
+        let live_entry = (auth-new-history $live_before)
+        assert equal $live_entry.request.headers.X-Pwd "******"
+        assert equal $live_entry.request.headers.X-Keep exact
+        assert equal $live_entry.request.headers_replayable false
+        assert (not (($live_entry | to nuon) | str contains $live_secret))
+
+        api request create password-header GET $"($base)/saved-password-header" --headers {X-Password: $saved_secret, X-Keep: exact} --collection default | ignore
+        for surface in [
+            {label: send, command: "api send password-header --collection default --dry-run"}
+            {label: export, command: "api request export password-header --collection default"}
+        ] {
+            let preview = (run-command-process $root $surface.command)
+            assert-safe-preview $preview $"($surface.label) password header" [$saved_secret] ["X-Password: ******" "X-Keep: exact"]
+        }
+        let saved_before = (auth-history-ids)
+        api send password-header --collection default --raw | ignore
+        let saved_entry = (auth-new-history $saved_before)
+        assert equal $saved_entry.request.headers.X-Password "******"
+        assert equal $saved_entry.request.headers_replayable false
+        assert (not (($saved_entry | to nuon) | str contains $saved_secret))
+
+        let response_secret = "RESPONSE-X-PWD-SENTINEL"
+        let response_with_password = ($response | update headers {X-Pwd: $response_secret, X-Safe: exact})
+        let response_id = (api history save {method: GET, url: $"($base)/response-password-header", headers: {}, body: null} $response_with_password)
+        let response_entry = (api history get $response_id)
+        assert equal $response_entry.response.headers.X-Pwd "******"
+        assert equal $response_entry.response.headers.X-Safe exact
+        assert (not (($response_entry | to nuon) | str contains $response_secret))
+
+        for case in [
+            {name: Password-Hint, value: exact-hint}
+            {name: Bypass-Word, value: exact-bypass}
+            {name: X-Pwd-Reset-Status, value: exact-reset}
+            {name: Compass, value: exact-compass}
+        ] {
+            let headers = ({} | upsert $case.name $case.value)
+            let preview = (run-command-process $root $"api get (($base + '/safe-header') | to nuon) --headers ($headers | to nuon) --dry-run")
+            assert equal $preview.exit_code 0
+            assert equal ($preview.stderr | str trim) ""
+            assert ($preview.stdout | str contains $"($case.name): ($case.value)") $"safe header was masked: ($case.name)"
+            let before_ids = (auth-history-ids)
+            api get $"($base)/safe-header" --headers $headers --raw | ignore
+            let entry = (auth-new-history $before_ids)
+            assert equal ($entry.request.headers | get $case.name) $case.value $"safe header changed: ($case.name)"
+            assert equal ($entry.request.headers_replayable? | default true) true $"safe header became non-replayable: ($case.name)"
+        }
+
+        let blocked_id = ($sensitive_header_ids | first)
+        let wire_before = (command-error-wire-events $server | length)
+        let blocked = (run-command-process $root $"api history resend ($blocked_id | to nuon) --raw")
+        assert ($blocked.exit_code != 0)
+        assert equal ($blocked.stdout | str trim) ""
+        assert ($blocked.stderr | str contains "pass --headers")
+        assert equal $blocked.stderr ($blocked.stderr | ansi strip)
+        assert equal (command-error-wire-events $server | length) $wire_before "password mask was replayed"
+        let replacement_before = (auth-history-ids)
+        api history resend $blocked_id --headers {X-Keep: replacement} --raw | ignore
+        assert equal (command-error-wire-events $server | length) ($wire_before + 1)
+        let replacement_entry = (auth-new-history $replacement_before)
+        assert equal $replacement_entry.request.headers.X-Keep replacement
+        assert (not (($replacement_entry | to nuon) | str contains "******")) "replacement replay persisted a password mask"
+
+        let managed_a = "MANAGED-PASSWORD-A-SENTINEL"
+        let managed_b = "MANAGED-PASSWORD-B-SENTINEL"
+        api auth apikey set managed-password $managed_a --query password | ignore
+        api request create managed-password GET $"($base)/managed-password?existing=1#client-fragment" --auth {type: api_key, ref: managed-password} --collection default | ignore
+        let managed_before = (auth-history-ids)
+        api send managed-password --collection default --raw | ignore
+        let managed_entry = (auth-new-history $managed_before)
+        let managed_initial_wire = (command-error-wire-events $server | last)
+        assert-query-auth-event $managed_initial_wire "/managed-password" "password" $managed_a
+        assert-history-auth $managed_entry "api_key" "managed-password" [$managed_a $managed_b]
+        api auth apikey set managed-password $managed_b --query password | ignore
+        let rotation_before = (command-error-wire-events $server | length)
+        let resend_before_ids = (auth-history-ids)
+        api history resend $managed_entry.id --raw | ignore
+        assert equal (command-error-wire-events $server | length) ($rotation_before + 1)
+        assert-query-auth-event (command-error-wire-events $server | last) "/managed-password" "password" $managed_b
+        assert-history-auth (auth-new-history $resend_before_ids) "api_key" "managed-password" [$managed_a $managed_b]
+        for surface in [
+            {label: direct, command: $"api get (($base + '/managed-password?existing=1#client-fragment') | to nuon) --auth {type: api_key, ref: managed-password} --dry-run"}
+            {label: send, command: "api send managed-password --collection default --dry-run"}
+            {label: export, command: "api request export managed-password --collection default"}
+            {label: resend, command: $"api history resend ($managed_entry.id | to nuon) --dry-run"}
+        ] {
+            let preview = (run-command-process $root $surface.command)
+            assert-safe-preview $preview $"managed password query ($surface.label)" [$managed_a $managed_b] ["existing=1&password=******#client-fragment"]
+        }
+
+        let json_export = ($root | path join "password-policy-history.json")
+        let csv_export = ($root | path join "password-policy-history.csv")
+        let public_readers = [
+            "api history list | to nuon"
+            "api history search password | to nuon"
+            $"api history show ($saved_entry.id | to nuon) | to nuon"
+            $"api history get ($saved_entry.id | to nuon) | to nuon"
+            $"api history export --format json --output ($json_export | to nuon)"
+            $"api history export --format csv --output ($csv_export | to nuon)"
+        ]
+        let forbidden = ($header_cases | get secret | append [$saved_secret $live_secret $response_secret $url_sentinel $managed_a $managed_b])
+        for command in $public_readers {
+            let result = (run-command-process $root $command)
+            assert equal $result.exit_code 0 $"password history reader failed: ($command): ($result.stderr)"
+            assert equal ($result.stderr | str trim) ""
+            for secret in $forbidden {
+                assert (not ($result.stdout | str contains $secret)) $"password history reader exposed a value: ($command)"
+            }
+        }
+        let index_bytes = (open ($root | path join "history" "index.nuon") --raw)
+        let export_bytes = $"(open $json_export --raw)\n(open $csv_export --raw)"
+        let history_bytes = (
+            command-error-snapshot ($root | path join "history")
+            | where type == file
+            | get content
+            | compact
+            | str join "\n"
+        )
+        for secret in $forbidden {
+            assert (not ($index_bytes | str contains $secret)) "password policy index exposed a value"
+            assert (not ($export_bytes | str contains $secret)) "password policy export exposed a value"
+            assert (not ($history_bytes | str contains $secret)) "password policy raw history exposed a value"
+        }
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
 def test-legacy-and-invalid-auth-history [] {
     let root = (make-temp-dir "auth-replay-invalid")
     let infra = (make-temp-dir "auth-replay-invalid-server")
@@ -1453,6 +1711,7 @@ export def run-suite-auth-replay [] {
         (run-test "inline auth history requires an explicit replay override" { test-inline-auth-is-nonreplayable })
         (run-test "public history save sanitizes auth and headers at the persistence boundary" { test-public-history-save-sanitizes-at-boundary })
         (run-test "credential-bearing URLs fail before auth, network, output, or history side effects" { test-secret-bearing-urls-fail-preflight })
+        (run-test "password URL, header, and managed query aliases share one exact safety policy" { test-password-credential-name-policy })
         (run-test "legacy history replays while missing, deleted, malformed, and unknown auth fail safely" { test-legacy-and-invalid-auth-history })
         (run-test "dry-run, send, export, and history previews mask all supported auth" { test-auth-preview-and-export-secrecy })
         (run-test "OAuth provider errors expose only stable safe codes across request surfaces" { test-oauth-provider-errors-are-secret-safe })

@@ -161,3 +161,15 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run the secret-URL preflight case in `tests/test_auth_replay.nu`; it covers direct
   save, direct/saved/chain execution, safe lookalike names, managed query auth, all history readers
   and exports, malformed encodings, and a byte-stable legacy resend rejection.
+
+## 18. Password aliases were absent from URL and header credential classification  (FIXED)
+- **Symptom:** exact `password` URL parameters and `X-Password` request headers could persist or
+  appear in previews because token/key/client-secret names were classified but password aliases
+  were not.
+- **Fix:** the shared normalized exact-name policy includes `password`, `passwd`, and `pwd`, plus
+  their exact `X-`/`X_` header forms. URL matching remains exact after percent decoding, so
+  lookalikes such as `password_hint`, `compass`, and `pwd_reset_status` remain valid. Managed query
+  auth may intentionally use `password` because Nurl appends and masks it after caller-URL preflight.
+- **Re-check:** run the independent password policy case in `tests/test_auth_replay.nu`; its
+  literal expectation tables cover URL variants, request/response headers, history/read/export
+  boundaries, resend mask rejection, safe lookalikes, and managed query-key rotation.

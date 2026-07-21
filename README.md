@@ -615,11 +615,13 @@ transmitting mask text from a sensitive stored request header.
 
 Caller-supplied URLs are also checked after interpolation and before authentication or network
 work. URL userinfo and exact, case-insensitive credential parameter names in queries or fragments
-(including percent-encoded token, client-secret, and API-key aliases) are rejected; ordinary names
-that merely contain those words are preserved. Query parameters added by Nurl managed auth are
-constructed only after this check, so named query API keys remain supported and history stores the
-safe caller URL plus auth reference. Pre-existing history remains readable without migration, but
-an old entry with an unsafe URL cannot be resent.
+(including percent-encoded token, client-secret, API-key, and `password`/`passwd`/`pwd` aliases)
+are rejected; ordinary names that merely contain those words are preserved. The same exact password
+aliases and their `X-` header forms are masked in request/response headers. Query parameters added
+by Nurl managed auth are constructed only after this check, so named query API keys remain supported
+even with a sensitive parameter name, and history stores the safe caller URL plus auth reference.
+Pre-existing history remains readable without migration, but an old entry with an unsafe URL cannot
+be resent.
 
 ### Request Chaining
 

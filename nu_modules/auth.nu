@@ -590,6 +590,12 @@ def sensitive-credential-name [name: string] {
         "X_ACCESS_TOKEN"
         "X_TOKEN"
         "KEY"
+        "PASSWORD"
+        "PASSWD"
+        "PWD"
+        "X_PASSWORD"
+        "X_PASSWD"
+        "X_PWD"
     ]
 }
 
