@@ -604,6 +604,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def do_PUT(self):
+        self.send_protected()
+
     def send_protected(self):
         authorization = self.headers.get('Authorization', '')
         api_key = self.headers.get('X.Nurl+Key', self.headers.get('X-API-Key', ''))
