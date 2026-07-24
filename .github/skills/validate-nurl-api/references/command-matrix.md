@@ -80,7 +80,7 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api auth oauth2 delete | `api auth oauth2 delete tmpcred` | Removed. |
 | api auth show | `api auth bearer set tmpcred abc; api auth show --full; api auth bearer delete tmpcred` | Shows credential type/status and the isolated `tmpcred` value; never run `--full` against real secrets in captured logs. |
 | api auth list | `api auth list` | Lists configured credentials by type. |
-| **Applied auth** | add `-a {type: bearer, token_ref: tmpcred}` to `api get`/`api send` | Request carries an `Authorization` header; redact its value in captured output. |
+| **Applied auth** | add named bearer/basic/API-key/OAuth2 refs to `api get`/`api send`; repeat with `--dry-run` | Real requests carry resolved wire auth. Caller URLs with userinfo or exact sensitive query/fragment names fail after interpolation but before auth/network work; exact `password`/`passwd`/`pwd` names are included without substring matching. Query API-key names and values added by managed auth are RFC 3986 query-component encoded exactly once, including an explicitly configured sensitive name. Preview masks every credential and password-boundary header, preserves the encoded API-key name, and does not acquire OAuth tokens. OAuth rejects every non-2xx response and malformed 2xx token record before use/persistence; failures expose only a safe code/status, never provider body fields. |
 
 ## requests
 | Command | Invocation | Expected |
@@ -116,18 +116,19 @@ Full lifecycle on a temp request, cleaned up at the end.
 | api request show | `api request show tmp-req -c jsonplaceholder` | Prints method/url/headers. |
 | api request update | `api request update tmp-req --method POST -c jsonplaceholder` | Method now `POST`. |
 | api request delete | `api request delete tmp-req -c jsonplaceholder --force` | Removed. |
-| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is the interpolated curl dry-run, stderr is empty, and neither network nor history is touched. |
+| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is one interpolated, credential-masked curl line, stderr is empty, and neither network, OAuth, history, nor saved state is touched. |
 
 ## history
 | Command | Invocation | Expected |
 |---|---|---|
 | api history list | `api get .../posts/1; api history list` | New entry at the top. |
 | api history show | `api history show (api history list \| first \| get id)` | Prints full request/response. |
-| api history resend | `api history resend <id>` | Re-executes; POST bodies re-sent as a string (no double-encode). Transport failure has empty stdout and propagates nonzero. `-e` is **inert**. |
+| api history resend | `api history resend <id>` | Re-executes; POST bodies are not double-encoded. Named auth refs are re-resolved, inline auth requires an explicit `--auth` override, legacy no-auth entries remain unauthenticated, and `--dry-run` stays masked/side-effect-free. Transport failure has empty stdout and propagates nonzero. `-e` is **inert**. |
 | api history search | `api history search posts` | Matching entries. |
 | api history clear | `api history clear` | Removes only date directories older than `history_retention_days`; use `--before YYYY-MM-DD` for an explicit cutoff or `--all --force` to remove everything. Run destructive variants in a throwaway `API_ROOT`. |
 | api history export | `let out = ($nu.temp-dir \| path join $"nurl-hist-(random uuid).json"); api history export --format json --output $out; rm -f $out` | `--format` accepts case-sensitive `json` or `csv`; other values fail before output creation. This writes the isolated JSON export and then removes it. |
 | api history rebuild-index | `let tmp = ($nu.temp-dir \| path join $"nurl-rebuild-(random uuid)"); mkdir $tmp; with-env {API_ROOT: $tmp} { api init \| ignore; api history save {method: GET, url: "https://example.invalid", headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} \| ignore; rm ($tmp \| path join history index.nuon); api history rebuild-index }; rm -rf $tmp` | Exit 0, stdout reports one indexed entry, stderr is empty, and the isolated `history/index.nuon` contains that synthetic entry. |
+| api history save | In an isolated `API_ROOT`, save synthetic request/response records containing inline auth, sensitive headers, credential-shaped unknown metadata, and userinfo/sensitive URL parameters; also exercise valid and invalid named refs. Inspect history bytes, index, list/search/show/get, JSON/CSV export, and replay. | The shared live/direct boundary writes only canonical request/response fields, preserves response-body and safe URL semantics, stores non-replayable auth metadata and masked sensitive headers, and omits unknown metadata. Named refs and caller URLs are validated before mutation. Invalid schemas/refs/auth/URLs fail with empty stdout and unchanged state. Legacy unsafe URLs remain readable without migration but cannot resend. |
 
 ## chaining
 | Command | Invocation | Expected |
@@ -150,6 +151,8 @@ parse/throw, then exit; do full interaction in a real terminal.
 - **variables:** `api vars get-merged`, `api vars interpolate`, `api vars interpolate-record`,
   `api vars extract` — covered by `api vars test`, live `api send`, and `api chain exec`.
 - **auth:** `api auth get-config` — covered when a request applies auth.
-- **history:** `api history save`, `api history get` — covered by any live request / `history show`.
+- **history:** `api history save` — the persistence boundary is covered directly by the
+  synthetic-save security regression and transitively by live requests; `api history get` is
+  covered by `history show` and the same regression.
 - **display:** `api headers`, `api table`, `api explore`, `api pretty`, `api summary` — covered
   by request output rendering; `api pretty` serializes Nushell tables as JSON arrays.

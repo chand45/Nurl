@@ -1,16 +1,23 @@
 # Public command error and OAuth2 stream-contract regressions.
 
 def run-command-process [root: string, command: string] {
-    let script_path = ($nu.temp-dir | path join $"nurl-command-error-(random uuid).nu")
+    let script_path = (test-temp-dir | path join $"nurl-command-error-(random uuid).nu")
+    let config_path = (test-temp-dir | path join $"nurl-command-config-(random uuid).nu")
+    let env_config_path = (test-temp-dir | path join $"nurl-command-env-(random uuid).nu")
     let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
     [
         $"use ($module_path | to nuon) *"
         $"$env.API_ROOT = ($root | to nuon)"
+        "$env.NO_COLOR = '1'"
         $command
     ] | str join "\n" | save -f $script_path
+    "$env.config.use_ansi_coloring = false" | save -f $config_path
+    "# Isolated test environment." | save -f $env_config_path
 
-    let result = (^$nu.current-exe --no-config-file $script_path | complete)
-    rm -f $script_path
+    let result = (test-complete-result (do {
+        ^$nu.current-exe --config $config_path --env-config $env_config_path $script_path
+    } | complete))
+    rm -f $script_path $config_path $env_config_path
     $result
 }
 
@@ -117,12 +124,24 @@ try {
             $requestLine = $reader.ReadLine()
             $contentLength = 0
             $authorization = ''
+            $apiKey = ''
+            $trace = ''
+            $password = ''
             while (($line = $reader.ReadLine()) -ne '') {
                 if ($line -match '(?i)^Content-Length:\\s*(\\d+)') {
                     $contentLength = [int]$Matches[1]
                 }
                 if ($line -match '(?i)^Authorization:\\s*(.*)$') {
                     $authorization = $Matches[1]
+                }
+                if ($line -match '(?i)^(?:X-API-Key|X[.]Nurl[+]Key):\\s*(.*)$') {
+                    $apiKey = $Matches[1]
+                }
+                if ($line -match '(?i)^X-Safe-Trace:\\s*(.*)$') {
+                    $trace = $Matches[1]
+                }
+                if ($line -match '(?i)^(?:Password|Passwd|Pwd|X-Password|X-Passwd|X-Pwd):\\s*(.*)$') {
+                    $password = $Matches[1]
                 }
             }
             $body = ''
@@ -136,10 +155,103 @@ try {
             if ($requestLine -match ' /ready ') {
                 $payload = 'ready'
                 $contentType = 'text/plain'
-            } elseif ($requestLine -match ' /token ') {
+            } elseif ($requestLine -match ' /token(?:-[a-z0-9-]+)? ') {
+                $requestPath = ($requestLine -split ' ')[1]
                 $count = [int]([System.IO.File]::ReadAllText($CountFile)) + 1
                 [System.IO.File]::WriteAllText($CountFile, [string]$count)
-                if ($body -match 'grant_type=refresh_token') {
+                $tokenStatus = 200
+                if ($requestPath -eq '/token-error-initial') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error = 'invalid_client'
+                        error_description = 'CLIENT-SECRET-ERROR-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-error-refresh') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error = 'invalid_grant'
+                        error_description = 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL'
+                    }
+                } elseif ($requestPath -in @('/token-status-302', '/token-status-400', '/token-status-500')) {
+                    $tokenStatus = [int](($requestPath -split '-')[-1])
+                    $response = @{
+                        access_token = 'FAILED-ACCESS-SENTINEL'
+                        refresh_token = 'FAILED-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-description-only') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error_description = 'DESCRIPTION-ONLY-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-unsafe-code') {
+                    $tokenStatus = 400
+                    $response = @{
+                        error = 'UNSAFE-ERROR-CODE-SENTINEL'
+                    }
+                } elseif ($requestPath -eq '/token-malformed-json') {
+                    $payload = '{\"access_token\":\"MALFORMED-OAUTH-SENTINEL\"'
+                    $response = $null
+                } elseif ($requestPath -eq '/token-non-record') {
+                    $payload = '[\"NONRECORD-OAUTH-SENTINEL\"]'
+                    $response = $null
+                } elseif ($requestPath -eq '/token-missing-access') {
+                    $response = @{
+                        refresh_token = 'MISSING-ACCESS-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-empty-access') {
+                    $response = @{
+                        access_token = ''
+                        refresh_token = 'EMPTY-ACCESS-REFRESH-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-nonstring-access') {
+                    $response = @{
+                        access_token = @('NONSTRING-ACCESS-SENTINEL')
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-refresh') {
+                    $response = @{
+                        access_token = 'INVALID-REFRESH-ACCESS-SENTINEL'
+                        refresh_token = 42
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-type') {
+                    $response = @{
+                        access_token = 'INVALID-TYPE-ACCESS-SENTINEL'
+                        token_type = @('Bearer')
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-unsupported-type') {
+                    $response = @{
+                        access_token = 'UNSUPPORTED-TYPE-ACCESS-SENTINEL'
+                        token_type = 'mac'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-ACCESS-SENTINEL'
+                        expires_in = 0
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry-type') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-TYPE-ACCESS-SENTINEL'
+                        expires_in = '3600'
+                    }
+                } elseif ($requestPath -eq '/token-invalid-expiry-high') {
+                    $response = @{
+                        access_token = 'INVALID-EXPIRY-HIGH-ACCESS-SENTINEL'
+                        expires_in = 315360001
+                    }
+                } elseif ($requestPath -eq '/token-valid-shaped') {
+                    $response = @{
+                        access_token = 'VALID-SHAPED-ACCESS'
+                        refresh_token = 'VALID-SHAPED-REFRESH'
+                        token_type = 'Bearer'
+                        expires_in = 1800
+                    }
+                } elseif ($body -match 'grant_type=refresh_token') {
                     $response = @{
                         access_token = 'ACCESS-TOKEN-REFRESHED-SENTINEL'
                         refresh_token = 'REFRESH-TOKEN-REFRESHED-SENTINEL'
@@ -152,11 +264,13 @@ try {
                         expires_in = 3600
                     }
                 }
-                $payload = $response | ConvertTo-Json -Compress
+                if ($null -ne $response) {
+                    $payload = $response | ConvertTo-Json -Compress
+                }
                 $contentType = 'application/json'
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
-                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + [Environment]::NewLine)
+                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + \"`t\" + $trace + \"`t\" + $password + [Environment]::NewLine)
                 if ($requestPath -eq '/slow') {
                     Start-Sleep -Seconds 3
                 }
@@ -212,11 +326,22 @@ try {
                 [System.Text.Encoding]::UTF8.GetBytes($payload)
             }
             $crlf = \"`r`n\"
-            $statusLine = if ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
+            $statusLine = if ($requestPath -like '/token*') { 'HTTP/1.1 ' + $tokenStatus + ' OAuth Response' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
                 'X-Debug-Auth: Bearer RESPONSE-BEARER-SENTINEL' + $crlf
+            } elseif ($requestPath -eq '/password-response-headers') {
+                'Password: RESPONSE-PASSWORD-SENTINEL' + $crlf +
+                'Passwd: RESPONSE-PASSWD-SENTINEL' + $crlf +
+                'Pwd: RESPONSE-PWD-SENTINEL' + $crlf +
+                'X-Password: RESPONSE-X-PASSWORD-SENTINEL' + $crlf +
+                'X-Passwd: RESPONSE-X-PASSWD-SENTINEL' + $crlf +
+                'X-Pwd: RESPONSE-X-PWD-SENTINEL' + $crlf +
+                'Password-Hint: safe-password-hint' + $crlf +
+                'X-Pwd-Reset-Status: safe-pwd-reset' + $crlf +
+                'Bypass-Word: safe-bypass-word' + $crlf +
+                'X-Control-Header: exact-control-value' + $crlf
             } elseif ($requestPath -eq '/duplicate-headers') {
                 'X-Duplicate: first' + $crlf +
                 'X-Duplicate: second' + $crlf +
@@ -312,7 +437,7 @@ $process.Id"
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file | complete)
+    let launched = (test-complete-result (do { ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -331,9 +456,9 @@ def start-posix-oauth-server [tmp: string] {
     let count_file = ($tmp | path join "oauth-count.txt")
     let wire_file = ($tmp | path join "oauth-wire.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
-    let python = if (which python3 | is-not-empty) {
+    let python = if not (which python3 | is-empty) {
         "python3"
-    } else if (which python | is-not-empty) {
+    } else if not (which python | is-empty) {
         "python"
     } else {
         error make {msg: "Python is required for the POSIX OAuth2 test endpoint"}
@@ -362,7 +487,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_protected()
 
     def do_POST(self):
-        if self.path != '/token':
+        if self.path != '/token' and not self.path.startswith('/token-'):
             self.send_protected()
             return
         global count
@@ -371,7 +496,96 @@ class Handler(http.server.BaseHTTPRequestHandler):
         count += 1
         with open(count_file, 'w', encoding='utf-8') as handle:
             handle.write(str(count))
-        if 'grant_type=refresh_token' in body:
+        status = 200
+        raw_payload = None
+        if self.path == '/token-error-initial':
+            status = 400
+            payload = {
+                'error': 'invalid_client',
+                'error_description': 'CLIENT-SECRET-ERROR-SENTINEL',
+            }
+        elif self.path == '/token-error-refresh':
+            status = 400
+            payload = {
+                'error': 'invalid_grant',
+                'error_description': 'CLIENT-SECRET-REFRESH-ERROR-SENTINEL ACCESS-TOKEN-ERROR-SENTINEL REFRESH-TOKEN-ERROR-SENTINEL',
+            }
+        elif self.path in ('/token-status-302', '/token-status-400', '/token-status-500'):
+            status = int(self.path.rsplit('-', 1)[1])
+            payload = {
+                'access_token': 'FAILED-ACCESS-SENTINEL',
+                'refresh_token': 'FAILED-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-description-only':
+            status = 400
+            payload = {'error_description': 'DESCRIPTION-ONLY-SENTINEL'}
+        elif self.path == '/token-unsafe-code':
+            status = 400
+            payload = {'error': 'UNSAFE-ERROR-CODE-SENTINEL'}
+        elif self.path == '/token-malformed-json':
+            payload = None
+            raw_payload = b'{\"access_token\":\"MALFORMED-OAUTH-SENTINEL\"'
+        elif self.path == '/token-non-record':
+            payload = None
+            raw_payload = b'[\"NONRECORD-OAUTH-SENTINEL\"]'
+        elif self.path == '/token-missing-access':
+            payload = {
+                'refresh_token': 'MISSING-ACCESS-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-empty-access':
+            payload = {
+                'access_token': '',
+                'refresh_token': 'EMPTY-ACCESS-REFRESH-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-nonstring-access':
+            payload = {
+                'access_token': ['NONSTRING-ACCESS-SENTINEL'],
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-refresh':
+            payload = {
+                'access_token': 'INVALID-REFRESH-ACCESS-SENTINEL',
+                'refresh_token': 42,
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-type':
+            payload = {
+                'access_token': 'INVALID-TYPE-ACCESS-SENTINEL',
+                'token_type': ['Bearer'],
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-unsupported-type':
+            payload = {
+                'access_token': 'UNSUPPORTED-TYPE-ACCESS-SENTINEL',
+                'token_type': 'mac',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-invalid-expiry':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-ACCESS-SENTINEL',
+                'expires_in': 0,
+            }
+        elif self.path == '/token-invalid-expiry-type':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-TYPE-ACCESS-SENTINEL',
+                'expires_in': '3600',
+            }
+        elif self.path == '/token-invalid-expiry-high':
+            payload = {
+                'access_token': 'INVALID-EXPIRY-HIGH-ACCESS-SENTINEL',
+                'expires_in': 315360001,
+            }
+        elif self.path == '/token-valid-shaped':
+            payload = {
+                'access_token': 'VALID-SHAPED-ACCESS',
+                'refresh_token': 'VALID-SHAPED-REFRESH',
+                'token_type': 'Bearer',
+                'expires_in': 1800,
+            }
+        elif 'grant_type=refresh_token' in body:
             payload = {
                 'access_token': 'ACCESS-TOKEN-REFRESHED-SENTINEL',
                 'refresh_token': 'REFRESH-TOKEN-REFRESHED-SENTINEL',
@@ -383,8 +597,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'refresh_token': 'REFRESH-TOKEN-SENTINEL',
                 'expires_in': 3600,
             }
-        encoded = json.dumps(payload).encode('utf-8')
-        self.send_response(200)
+        encoded = raw_payload if raw_payload is not None else json.dumps(payload).encode('utf-8')
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
@@ -392,8 +606,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_protected(self):
         authorization = self.headers.get('Authorization', '')
+        api_key = self.headers.get('X.Nurl+Key', self.headers.get('X-API-Key', ''))
+        trace = self.headers.get('X-Safe-Trace', '')
+        password = ''
+        for name in ('Password', 'Passwd', 'Pwd', 'X-Password', 'X-Passwd', 'X-Pwd'):
+            if self.headers.get(name) is not None:
+                password = self.headers.get(name, '')
+                break
         with open(wire_file, 'a', encoding='utf-8') as handle:
-            handle.write(self.path + '\\t' + authorization + '\\n')
+            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\t' + trace + '\\t' + password + '\\n')
         if self.path in ('/slow', '/timeout'):
             time.sleep(3)
         if self.path == '/acl-slow':
@@ -439,15 +660,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == '/trailers':
             self.connection.sendall(
-                b'HTTP/1.1 200 OK\r\n'
-                b'Content-Type: text/plain\r\n'
-                b'Transfer-Encoding: chunked\r\n'
-                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\r\n\r\n'
-                b'4\r\nBODY\r\n0\r\n'
-                b'X-Mixed-Trailer: first\r\n'
-                b'x-MiXeD-TrAiLeR: second\r\n'
-                b'x-TrAiLeR-CaSe: trailer-value\r\n'
-                b'Set-Cookie: trailer-secret-sentinel\r\n\r\n'
+                b'HTTP/1.1 200 OK\\r\\n'
+                b'Content-Type: text/plain\\r\\n'
+                b'Transfer-Encoding: chunked\\r\\n'
+                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\\r\\n\\r\\n'
+                b'4\\r\\nBODY\\r\\n0\\r\\n'
+                b'X-Mixed-Trailer: first\\r\\n'
+                b'x-MiXeD-TrAiLeR: second\\r\\n'
+                b'x-TrAiLeR-CaSe: trailer-value\\r\\n'
+                b'Set-Cookie: trailer-secret-sentinel\\r\\n\\r\\n'
             )
             return
         if self.path == '/early-hints':
@@ -484,6 +705,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly')
             self.send_header('X-Session-Token', 'RESPONSE-TOKEN-SENTINEL')
             self.send_header('X-Debug-Auth', 'Bearer RESPONSE-BEARER-SENTINEL')
+        if self.path == '/password-response-headers':
+            self.send_header('Password', 'RESPONSE-PASSWORD-SENTINEL')
+            self.send_header('Passwd', 'RESPONSE-PASSWD-SENTINEL')
+            self.send_header('Pwd', 'RESPONSE-PWD-SENTINEL')
+            self.send_header('X-Password', 'RESPONSE-X-PASSWORD-SENTINEL')
+            self.send_header('X-Passwd', 'RESPONSE-X-PASSWD-SENTINEL')
+            self.send_header('X-Pwd', 'RESPONSE-X-PWD-SENTINEL')
+            self.send_header('Password-Hint', 'safe-password-hint')
+            self.send_header('X-Pwd-Reset-Status', 'safe-pwd-reset')
+            self.send_header('Bypass-Word', 'safe-bypass-word')
+            self.send_header('X-Control-Header', 'exact-control-value')
         self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -516,7 +748,7 @@ print(process.pid)
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file | complete)
+    let launched = (test-complete-result (do { ^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -547,10 +779,11 @@ def start-command-error-server [tmp: string] {
     }
 
     $server.port = (open $server.port_file --raw | str trim | into int)
+    let ready_url = $"http://127.0.0.1:($server.port)/ready"
     mut ready_ok = false
     mut ready_stderr = ""
     for _ in 1..40 {
-        let ready = (^curl -s --max-time 2 $"http://127.0.0.1:($server.port)/ready" | complete)
+        let ready = (test-complete-result (do { ^curl -s --max-time 2 $ready_url } | complete))
         $ready_stderr = $ready.stderr
         if $ready.exit_code == 0 and ($ready.stdout | str trim) == "ready" {
             $ready_ok = true
@@ -740,7 +973,7 @@ def command-error-wire-events [server: record] {
     open $server.wire_file --raw
     | lines
     | where {|line| not ($line | is-empty) }
-    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>.*)$'
+    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>[^\t]*)\t(?<trace>[^\t]*)\t(?<password>.*)$'
 }
 
 def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {

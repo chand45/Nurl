@@ -105,3 +105,81 @@ request, interpolates variables, or touches `.nuon` files.
   output. HTTP 4xx and final 5xx remain typed exit-0 responses.
 - **Re-check:** run `tests/test_transport_failures.nu`; it covers direct, saved, resend, binary, and
   chain surfaces, negative preflight, exact attempts, redaction, and destination preservation.
+
+## 13. Auth previews leaked secrets and authenticated history resent without auth  (FIXED)
+- **Symptom:** basic/API-key dry-run and request export rendered wire credentials. History omitted
+  auth metadata, so default resend silently downgraded authenticated requests to unauthenticated.
+- **Fix:** auth preparation now has separate display, wire, and canonical replay projections.
+  Preview/export masks supported auth and sensitive headers without OAuth acquisition. Named refs
+  are stored without secrets and re-resolved on resend; inline auth is stored as non-replayable and
+  requires an explicit `--auth` override.
+- **Re-check:** run `tests/test_auth_replay.nu`; it covers rotation, override precedence, legacy
+  history, invalid refs, no-side-effect failures, query fragments, and the preview/export matrix.
+
+## 14. Direct history saves could bypass credential sanitization  (FIXED)
+- **Symptom:** a caller could pass inline auth or sensitive headers to `api history save`, then
+  recover the values through history bytes, index, show/get, or export. Arbitrary top-level or
+  nested credential-shaped metadata could also bypass field-specific sanitization.
+- **Fix:** `api history save` is now the shared persistence boundary for live and synthetic saves.
+  It constructs allowlisted request/response records, validates field shapes and named refs from
+  local credential metadata, makes inline auth non-replayable, masks sensitive headers, and omits
+  unknown metadata before creating or modifying history state. Response bodies remain unchanged.
+- **Re-check:** run the direct-save cases in `tests/test_auth_replay.nu`; verify no sentinel exists
+  in persisted bytes or any public history projection, legacy fixtures are not migrated, and
+  invalid schemas/refs/auth cause no mutation.
+
+## 15. Query API keys could alter URL structure  (FIXED)
+- **Symptom:** reserved characters in a query API-key name or value could create extra parameters,
+  truncate the credential at `#`, or otherwise change request semantics.
+- **Fix:** query API-key names and wire values are RFC 3986 query-component encoded exactly once.
+  Existing queries and fragment placement are preserved; previews encode the name and mask the value.
+- **Re-check:** run `tests/test_auth_replay.nu`; its local server covers `&`, `=`, `#`, `%`, `+`,
+  spaces, Unicode, existing/empty queries, fragments, rotation, override, saved requests, and chains.
+
+## 16. OAuth provider descriptions could echo credentials  (FIXED)
+- **Symptom:** token or refresh failures emitted an untrusted provider `error_description`, which
+  could contain a client secret, access token, or refresh token. Non-2xx responses with
+  success-shaped JSON were also accepted, while malformed 2xx token records were insufficiently
+  validated.
+- **Fix:** OAuth rejects all non-2xx responses before token use/persistence and validates the
+  required and optional fields of every accepted 2xx token record. Failures omit response
+  descriptions/bodies and report only a validated provider code (or `unknown_error`) plus status.
+  A refresh provider error is not retried as a new token request or allowed to overwrite old tokens.
+- **Re-check:** run the initial-token and refresh error cases in `tests/test_auth_replay.nu`; they
+  cover 3xx/4xx/5xx success-shaped bodies and malformed 2xx shapes, asserting secret-free,
+  non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.
+
+## 17. Credential-bearing URLs could bypass safe history auth metadata  (FIXED)
+- **Symptom:** URL userinfo or recognized credential query/fragment parameters were copied into
+  history entries and the index, exposed by readers/exports, and reused by resend.
+- **Fix:** one shared classifier now rejects userinfo and exact sensitive parameter names after
+  interpolation and strict percent decoding, before wire auth, OAuth acquisition, network, output,
+  or history mutation. It does not inspect arbitrary paths, parameter values, or bodies. Managed
+  query auth is appended afterward and remains replayable through its safe named reference.
+- **Compatibility:** existing history bytes are not migrated and remain readable, but resend
+  revalidates the stored URL and refuses unsafe legacy entries before network access.
+- **Re-check:** run the secret-URL preflight case in `tests/test_auth_replay.nu`; it covers direct
+  save, direct/saved/chain execution, safe lookalike names, managed query auth, all history readers
+  and exports, malformed encodings, and a byte-stable legacy resend rejection.
+
+## 18. Password aliases were absent from URL and header credential classification  (FIXED)
+- **Symptom:** exact `password` URL parameters and `X-Password` request headers could persist or
+  appear in previews because token/key/client-secret names were classified but password aliases
+  were not.
+- **Fix:** the shared normalized exact-name policy includes `password`, `passwd`, and `pwd`, plus
+  their exact `X-`/`X_` header forms. URL matching remains exact after percent decoding, so
+  lookalikes such as `password_hint`, `compass`, and `pwd_reset_status` remain valid. Managed query
+  auth may intentionally use `password` because Nurl appends and masks it after caller-URL preflight.
+- **Re-check:** run the independent password policy case in `tests/test_auth_replay.nu`; its
+  literal expectation tables cover URL variants, request/response headers, history/read/export
+  boundaries, resend mask rejection, safe lookalikes, and managed query-key rotation.
+
+## 19. Live sensitive response headers could escape through typed outputs  (FIXED)
+- **Symptom:** response-header values were sanitized for history and human rendering but remained
+  available in `--raw`, `--output headers|json`, and `--select`.
+- **Fix:** recognized sensitive response headers are now masked before constructing the public
+  result record. The record shape, body/status values, exact safe headers, trailers, redirects,
+  and output-mode types remain unchanged.
+- **Re-check:** run `tests/test_credential_boundaries.nu` and `tests/test_secure_header_capture.nu`;
+  they exercise the live curl parser through typed/human/machine outputs, history/index/read/export,
+  trailers, redirects, exact password-family names, and safe boundary lookalikes.

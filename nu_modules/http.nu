@@ -3,7 +3,8 @@
 
 use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use auth.nu ["api auth get-config"]
+use auth.nu [prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
+use history.nu ["api history save"]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
@@ -31,55 +32,6 @@ def resolve-request-file [requests_dir: string, name: string, --optional-suffix]
 
 def list-request-files [requests_dir: string] {
     list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
-}
-
-# Internal function to save history (avoids module scoping issues)
-def save-to-history [request: record, response: record] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let history_dir = ($root | path join "history")
-
-    if not ($history_dir | path exists) {
-        mkdir $history_dir
-    }
-
-    let date_dir = ($history_dir | path join (date now | format date "%Y-%m-%d"))
-    if not ($date_dir | path exists) {
-        mkdir $date_dir
-    }
-
-    let id = $"(date now | format date '%Y%m%d-%H%M%S')-(random chars --length 6)"
-    let config_path = ($root | path join "config.nuon")
-    let current_env = if ($config_path | path exists) {
-        (open $config_path).default_environment? | default null
-    } else { null }
-
-    let entry = {
-        id: $id
-        timestamp: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-        environment: $current_env
-        request: $request
-        response: $response
-    }
-
-    $entry | to nuon | save ($date_dir | path join $"($id).nuon")
-
-    # Update history index (B1) — inline to avoid cross-module dependency
-    let index_path = ($history_dir | path join "index.nuon")
-    let existing_index = if ($index_path | path exists) {
-        try { open $index_path } catch { [] }
-    } else { [] }
-    let new_summary = {
-        id: $id
-        timestamp: $entry.timestamp
-        method: ($request.method? | default "")
-        url: ($request.url? | default "")
-        status: ($response.status? | default 0)
-        time_ms: ($response.time_ms? | default 0)
-        date_dir: ($date_dir | path basename)
-    }
-    ($existing_index | append $new_summary | sort-by timestamp -r) | to nuon | save -f $index_path
-
-    $id
 }
 
 # Get default headers from config
@@ -147,12 +99,32 @@ def read-body-file [body_file: string] {
     }
 }
 
-def resolve-request-auth [auth: record, --dry-run] {
-    if $dry_run and ($auth.type? | default "none") == "oauth2" {
-        {type: "bearer", token: "redacted"}
+def encode-query-component [value: string] {
+    $value
+    | url encode
+    | str replace --all "/" "%2F"
+    | str replace --all ":" "%3A"
+    | str replace --all "%2D" "-"
+    | str replace --all "%5F" "_"
+    | str replace --all "%7E" "~"
+}
+
+def append-query-auth [url: string, name: string, value: string, --masked] {
+    let parts = ($url | split row "#")
+    let base = ($parts | first)
+    let fragment = if ($parts | length) > 1 {
+        "#" + ($parts | skip 1 | str join "#")
     } else {
-        api auth get-config $auth
+        ""
     }
+    let separator = if ($base | str contains "?") {
+        if ($base | str ends-with "?") or ($base | str ends-with "&") { "" } else { "&" }
+    } else {
+        "?"
+    }
+    let encoded_name = (encode-query-component $name)
+    let encoded_value = if $masked { "******" } else { encode-query-component $value }
+    $"($base)($separator)($encoded_name)=($encoded_value)($fragment)"
 }
 
 # Resolve body from multiple input sources (inline record/string, file)
@@ -282,7 +254,7 @@ def build-curl-args-for-display [
     ]
 
     # Add headers
-    for header in ($headers | transpose key value) {
+    for header in (redact-sensitive-headers $headers | transpose key value) {
         $args = ($args | append ["-H" $"($header.key): ($header.value)"])
     }
 
@@ -309,7 +281,12 @@ def build-curl-args-for-display [
 
     # Add body if provided
     if $body != null and $body != "" {
-        $args = ($args | append ["-d" $body])
+        let display_body = try {
+            $body | from json | to json --raw
+        } catch {
+            $body
+        }
+        $args = ($args | append ["-d" $display_body])
     }
 
     $args
@@ -665,7 +642,7 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
         $curl_args
     }
     let final_args = ($transfer_args | append ["--write-out" $write_out])
-    let output = (curl ...$final_args $url | complete)
+    let output = (do { curl ...$final_args $url } | complete)
     if (($output.stderr | describe) | str starts-with "binary") {
         if $output.exit_code != 0 {
             return {
@@ -799,6 +776,32 @@ def as-binary [value: any] {
     }
 }
 
+def legacy-bytes-at-range-semantics [] {
+    (0x[00 01] | bytes at 0..<1 | bytes length) == 0
+}
+
+def bytes-before [value: binary, end: int] {
+    if $end == 0 {
+        return 0x[]
+    }
+    if (legacy-bytes-at-range-semantics) {
+        $value | bytes at 0..$end
+    } else {
+        $value | bytes at 0..<$end
+    }
+}
+
+def bytes-between [value: binary, start: int, end: int] {
+    if $start == $end {
+        return 0x[]
+    }
+    if (legacy-bytes-at-range-semantics) {
+        $value | bytes at $start..$end
+    } else {
+        $value | bytes at $start..<$end
+    }
+}
+
 def parse-curl-response-fileless [included_output: any, metadata: record] {
     let bytes = (as-binary $included_output)
     let total_size = ($bytes | bytes length)
@@ -823,12 +826,12 @@ def parse-curl-response-fileless [included_output: any, metadata: record] {
     let header_bytes = if $header_size == 0 {
         0x[]
     } else {
-        $bytes | bytes at 0..<$header_size
+        bytes-before $bytes $header_size
     }
     let body_bytes = if $body_size == 0 {
         0x[]
     } else {
-        $bytes | bytes at $header_size..<$body_end
+        bytes-between $bytes $header_size $body_end
     }
     let trailer_bytes = if $body_end == $total_size {
         0x[]
@@ -905,16 +908,6 @@ def parse-curl-response-internal [output: string] {
 
 export def parse-curl-response [output: string] {
     parse-curl-response-internal $output | reject _raw_body
-}
-
-def redact-sensitive-response-headers [headers: record] {
-    $headers | transpose key value | reduce -f {} {|header, redacted|
-        let sensitive = (
-            ($header.key =~ '(?i)(authorization|cookie|token|secret|api-key|session)')
-            or (($header.value | into string) =~ '(?i)^bearer ')
-        )
-        $redacted | upsert $header.key (if $sensitive { "******" } else { $header.value })
-    }
 }
 
 def transport-secret-values [headers: record, auth: any] {
@@ -1045,7 +1038,7 @@ def execute-request [
     url: string
     --headers (-H): record = {}
     --body (-b): string = ""
-    --auth (-a): record = {}
+    --auth-spec: record = {}
     --no-interpolate   # Skip variable interpolation
     --no-history       # Don't save to history
     --dry-run (-d)     # Output curl command instead of executing
@@ -1066,12 +1059,22 @@ def execute-request [
     } else {
         api vars interpolate $url -c $collection -v $extra_vars
     }
+    validate-secret-safe-url $final_url | ignore
+    let auth_context = (prepare-auth-context $auth_spec --display-only=$dry_run)
+    let display_auth = ($auth_context.display? | default {})
+    let wire_auth = ($auth_context.wire? | default null)
+    let history_auth = ($auth_context.history? | default null)
 
     let final_headers = if $no_interpolate {
         $all_headers
     } else {
         api vars interpolate-record $all_headers -c $collection -v $extra_vars
     }
+    let has_sensitive_request_headers = (
+        $final_headers
+        | transpose key value
+        | any {|header| sensitive-header $header.key $header.value }
+    )
 
     let final_body = if $no_interpolate or $body == "" {
         $body
@@ -1079,19 +1082,23 @@ def execute-request [
         api vars interpolate $body -c $collection -v $extra_vars
     }
 
-    # Handle API key in query string
-    mut request_url = $final_url
-    if ($auth.type? == "apikey_query") {
-        let separator = if ($request_url | str contains "?") { "&" } else { "?" }
-        $request_url = $"($request_url)($separator)($auth.param_name)=($auth.key)"
-    }
-
     # Handle dry-run mode
     if $dry_run {
-        let display_args = (build-curl-args-for-display $method $request_url $final_headers $final_body $auth)
-        let curl_command = (curl-args-to-string $display_args $request_url)
+        let display_url = if ($display_auth.type? | default "none") == "apikey_query" {
+            append-query-auth $final_url $display_auth.param_name $display_auth.key --masked
+        } else {
+            $final_url
+        }
+        let display_args = (build-curl-args-for-display $method $display_url $final_headers $final_body $display_auth)
+        let curl_command = (curl-args-to-string $display_args $display_url)
         print $curl_command
         return null
+    }
+
+    let request_url = if ($wire_auth.type? | default "none") == "apikey_query" {
+        append-query-auth $final_url $wire_auth.param_name $wire_auth.key
+    } else {
+        $final_url
     }
 
     # Normal and binary requests share one retry policy. Binary attempts are isolated until commit.
@@ -1103,9 +1110,9 @@ def execute-request [
         $attempt = $attempt + 1
         let attempt_path = if $binary_save == "" { "" } else { binary-attempt-path $binary_save }
         let base_args = if $binary_save == "" {
-            build-curl-args $method $request_url $final_headers $final_body $auth
+            build-curl-args $method $request_url $final_headers $final_body $wire_auth
         } else {
-            build-curl-args-binary $method $request_url $final_headers $attempt_path $final_body $auth
+            build-curl-args-binary $method $request_url $final_headers $attempt_path $final_body $wire_auth
         }
         let curl_args = if $follow_redirects { $base_args | append "-L" } else { $base_args }
         let capture = try {
@@ -1129,7 +1136,7 @@ def execute-request [
                 if $retry_delay > 0 { sleep ($retry_delay | into duration --unit sec) }
                 continue
             }
-            fail-transport $output.exit_code $attempt $max_attempts $output.stderr $final_headers $auth
+            fail-transport $output.exit_code $attempt $max_attempts $output.stderr $final_headers $wire_auth
         }
 
         let parse_result = try {
@@ -1157,10 +1164,10 @@ def execute-request [
             continue
         }
 
-        let request_record = {
+        let public_request_record = {
             method: $method
             url: $final_url
-            headers: $final_headers
+            headers: (redact-sensitive-headers $final_headers)
             body: (if $binary_save != "" {
                 null
             } else if $final_body != "" {
@@ -1169,24 +1176,36 @@ def execute-request [
                 null
             })
         }
+        let history_request_record = if $history_auth == null {
+            $public_request_record
+        } else {
+            $public_request_record | insert auth $history_auth
+        }
+        let history_request_record = if $has_sensitive_request_headers {
+            $history_request_record | insert headers_replayable false
+        } else {
+            $history_request_record
+        }
         let response = if $binary_save == "" { $parsed | reject _raw_body } else { $parsed }
+        let public_response = (
+            $response | update headers (redact-sensitive-headers $response.headers)
+        )
         if $binary_save != "" {
             commit-binary-response $attempt_path $binary_save
         }
 
         if not $no_history {
-            let history_response = ($response | update headers (redact-sensitive-response-headers $response.headers))
-            save-to-history $request_record $history_response
+            api history save $history_request_record $public_response | ignore
         }
 
         let result = {
-            request: $request_record
-            response: $response
+            request: $public_request_record
+            response: $public_response
             timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
         }
         if $binary_save != "" {
             if not $quiet_binary_status {
-                print $"(ansi green)Downloaded: ($binary_save) (($response.size_bytes)B)(ansi reset)"
+                print ((ansi green) + "Downloaded: " + $binary_save + " (" + ($response.size_bytes | into string) + "B)" + (ansi reset))
             }
             return $result
         }
@@ -1270,7 +1289,7 @@ def display-response [
     # Response headers (verbose or --include)
     if $verbose or $include {
         print ""
-        for hdr in (redact-sensitive-response-headers ($response.headers? | default {}) | transpose key value) {
+        for hdr in (redact-sensitive-headers ($response.headers? | default {}) | transpose key value) {
             print $"(ansi cyan)< ($hdr.key): ($hdr.value)(ansi reset)"
         }
     }
@@ -1371,9 +1390,8 @@ export def "api get" [
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request "GET" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request "GET" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
@@ -1410,15 +1428,13 @@ export def "api post" [
         } else {
             resolve-body -b $body -f $body_file
         }
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
-
         # Override Content-Type header for form encoding
         let req_headers = if not ($form | is-empty) {
             $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request "POST" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request "POST" $url -H $req_headers -b $final_body --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
@@ -1456,14 +1472,12 @@ export def "api put" [
         } else {
             resolve-body -b $body -f $body_file
         }
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
-
         let req_headers = if not ($form | is-empty) {
             $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request "PUT" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request "PUT" $url -H $req_headers -b $final_body --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
@@ -1501,14 +1515,12 @@ export def "api patch" [
         } else {
             resolve-body -b $body -f $body_file
         }
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
-
         let req_headers = if not ($form | is-empty) {
             $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request "PATCH" $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request "PATCH" $url -H $req_headers -b $final_body --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
@@ -1535,8 +1547,7 @@ export def "api delete" [
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
-        let result = (execute-request "DELETE" $url -H $headers -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay)
+        let result = (execute-request "DELETE" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include ""
     }
@@ -1575,14 +1586,12 @@ export def "api request" [
         } else {
             resolve-body -b $body -f $body_file
         }
-        let resolved_auth = (resolve-request-auth $auth --dry-run=$dry_run)
-
         let req_headers = if not ($form | is-empty) {
             $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request $method $url -H $req_headers -b $final_body -a $resolved_auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request $method $url -H $req_headers -b $final_body --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
@@ -1669,16 +1678,15 @@ export def "api send" [
         } else {
             ""
         }
-        let auth = if not ($auth | is-empty) {
-            resolve-request-auth $auth --dry-run=$dry_run
+        let effective_auth = if not ($auth | is-empty) {
+            $auth
         } else if ($request.auth? | default null) != null {
-            resolve-request-auth $request.auth --dry-run=$dry_run
+            $request.auth
         } else {
             {}
         }
-
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body -a $auth --dry-run=$dry_run -c $coll_name -v $vars --no-history=$no_history --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request ($request.method? | default "GET") $request.url -H $headers -b $body --auth-spec $effective_auth --dry-run=$dry_run -c $coll_name -v $vars --no-history=$no_history --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
 
         # Run tests if defined (C7)
@@ -1687,7 +1695,7 @@ export def "api send" [
             let tests_quiet = ($raw or ($output != "pretty"))
             let test_results = (run-tests $result $request.tests --quiet=$tests_quiet)
             $final_result = ($result | upsert tests_passed $test_results.all_passed)
-            if not $tests_quiet and not $test_results.all_passed {
+            if (not $tests_quiet) and (not $test_results.all_passed) {
                 let fail_msg = ("Warning: " + ($test_results.failed | into string) + " tests failed")
                 print ((ansi yellow) + $fail_msg + (ansi reset))
             }
@@ -1874,7 +1882,7 @@ export def "api request show" [
         if ($found | is-empty) { null } else { $found | first }
     }
 
-    if $request_file == null or not ($request_file | path exists) {
+    if ($request_file == null) or (not ($request_file | path exists)) {
         let scope = if $collection != "" { $"collection '($collection)'" } else { "any collection" }
         fail-command $"Request '($name)' not found in ($scope)"
     }
@@ -1930,7 +1938,7 @@ export def "api request update" [
     if $body != null or $body_file != null {
         let body_content = if $body_file != null and $body_file != "" {
             $file_body_content
-        } else if $body != null and not ($body | is-empty) {
+        } else if ($body != null) and (not ($body | is-empty)) {
             $body
         } else {
             null
@@ -1998,6 +2006,7 @@ export def "api head" [
     --auth (-a): record = {}             # Authentication config
     --raw (-r)                           # Return raw result without display
     --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
     --debug                              # Show verbose debug output
     --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
     --select (-s): string = ""           # Select a field (dot-path)
@@ -2006,10 +2015,10 @@ export def "api head" [
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
-    require-curl-capability
+    require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let resolved_auth = (api auth get-config $auth)
-        let result = (execute-request "HEAD" $url -H $headers -a $resolved_auth --no-history=$no_history)
+        let result = (execute-request "HEAD" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run)
+        if $result == null { return null }
         if $raw or $output != "pretty" or $select != "" {
             apply-output-selection $result $output $select $raw $verbose $include $save
         } else {
@@ -2026,6 +2035,7 @@ export def "api options" [
     --auth (-a): record = {}             # Authentication config
     --raw (-r)                           # Return raw result without display
     --no-history                         # Don't save to history
+    --dry-run (-d)                       # Output curl command instead of executing
     --debug                              # Show verbose debug output
     --output (-o): string = "pretty"     # Output mode: pretty|body|raw|json|headers|status|none
     --select (-s): string = ""           # Select a field (dot-path)
@@ -2034,10 +2044,10 @@ export def "api options" [
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
-    require-curl-capability
+    require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let resolved_auth = (api auth get-config $auth)
-        let result = (execute-request "OPTIONS" $url -H $headers -a $resolved_auth --no-history=$no_history)
+        let result = (execute-request "OPTIONS" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run)
+        if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
 }

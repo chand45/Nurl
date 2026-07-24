@@ -1,7 +1,7 @@
 # Fileless response-header transport security, compatibility, and latency regressions.
 
 def response-header-artifact-roots [extra_roots: list = []] {
-    mut roots = [$nu.temp-dir]
+    mut roots = [(test-temp-dir)]
     if $nu.os-info.name == "windows" {
         let local = ($env.LOCALAPPDATA? | default "")
         if not ($local | is-empty) {
@@ -255,7 +255,7 @@ public static class FakeCurl
                 sensitiveArguments += " Basic " + args[index + 1];
             }
         }
-        if (mode == "supported-oauth" && String.IsNullOrEmpty(format))
+        if (mode == "supported-oauth" && format.IndexOf("%{time_total}", StringComparison.Ordinal) < 0)
         {
             if (!String.IsNullOrEmpty(log))
             {
@@ -266,7 +266,8 @@ public static class FakeCurl
             {
                 token = "SUPPORTED-ACCESS";
             }
-            Console.Out.Write("{\"access_token\":\"" + token + "\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}");
+            string tokenMetadata = format.Replace("%{http_code}", "200");
+            Console.Out.Write("{\"access_token\":\"" + token + "\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}" + tokenMetadata);
             return 0;
         }
         if (!String.IsNullOrEmpty(log))
@@ -408,7 +409,7 @@ if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-unframed" ] || [ "$request_number" -e
   printf "\033[31mcurl: (7) deterministic transport failure%s\033[0m\n" "$sensitive_arguments" >&2
   exit 7
 fi
-printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODY"
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
   -e "s/%{http_code}/200/g" \
@@ -476,7 +477,7 @@ fi
 if [ -n "$output_path" ]; then
   printf "BODY" > "$output_path"
 else
-  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODY"
+  printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODY"
 fi
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
@@ -520,17 +521,24 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ] && [ -z "$format" ]; then
-  echo token >> "$NURL_FAKE_CURL_LOG"
-  token=${NURL_FAKE_CURL_OAUTH_TOKEN:-SUPPORTED-ACCESS}
-  printf "%s" "{\"access_token\":\"$token\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}"
-  exit 0
+if [ "x$NURL_FAKE_CURL_MODE" = "xsupported-oauth" ]; then
+  case "$format" in
+    *"%{time_total}"*)
+      ;;
+    *)
+      echo token >> "$NURL_FAKE_CURL_LOG"
+      token=${NURL_FAKE_CURL_OAUTH_TOKEN:-SUPPORTED-ACCESS}
+      token_metadata=$(printf "%s" "$format" | sed -e "s/%{http_code}/200/g")
+      printf "%s%s" "{\"access_token\":\"$token\",\"refresh_token\":\"SUPPORTED-REFRESH\",\"expires_in\":3600}" "$token_metadata"
+      exit 0
+      ;;
+  esac
 fi
 echo request >> "$NURL_FAKE_CURL_LOG"
 if [ -n "$output_path" ]; then
   printf "BODY" > "$output_path"
 else
-  printf "HTTP/1.1 200 OK\r\nETag: \\"fake\\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
+  printf "HTTP/1.1 200 OK\r\nETag: \"fake\"\r\nContent-Length: 4\r\n\r\nBODYTRAILER_TEXT"
 fi
 metadata=$(printf "%s" "$format" | sed \
   -e "s/%{stderr}//g" \
@@ -612,11 +620,13 @@ def test-fileless-header-correctness-and-secrecy [] {
         let sensitive_command = (
             "let result = (api get "
             + (($base + "/sensitive-headers") | to nuon)
-            + " --raw); if ($result.response.headers | get 'Set-Cookie') != 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly' { error make {msg: 'cookie header was not parsed'} }; if ($result.response.headers | get 'X-Session-Token') != 'RESPONSE-TOKEN-SENTINEL' { error make {msg: 'token header was not parsed'} }; if ($result.response.headers | get 'X-Debug-Auth' | is-empty) { error make {msg: 'auth-like header was not parsed'} }; print 'sensitive response headers parsed'"
+            + " --raw); if ($result.response.headers | get 'Set-Cookie') != '******' { error make {msg: 'cookie header was not masked'} }; if ($result.response.headers | get 'X-Session-Token') != '******' { error make {msg: 'token header was not masked'} }; if ($result.response.headers | get 'X-Debug-Auth') != '******' { error make {msg: 'auth-like header was not masked'} }; print 'sensitive response headers parsed safely'"
         )
         let sensitive = (run-command-process $root $sensitive_command)
         assert equal $sensitive.exit_code 0 "sensitive response-header parse failed"
-        assert ($sensitive.stdout | str contains "sensitive response headers parsed") "sensitive headers were not available to the typed response"
+        assert ($sensitive.stdout | str contains "sensitive response headers parsed safely") "sensitive headers were not masked in the typed response"
+        assert (not ($"($sensitive.stdout)\n($sensitive.stderr)" | str contains "RESPONSE-COOKIE-SENTINEL")) "typed response exposed the cookie sentinel"
+        assert (not ($"($sensitive.stdout)\n($sensitive.stderr)" | str contains "RESPONSE-TOKEN-SENTINEL")) "typed response exposed the token sentinel"
 
         let displayed = (run-command-process $root $"api get (($base + '/sensitive-headers') | to nuon) --include --no-history")
         assert equal $displayed.exit_code 0 "redacted human response failed"
@@ -632,7 +642,7 @@ def test-fileless-header-correctness-and-secrecy [] {
         let trailers = (run-command-process $root (
             "let result = (api get "
             + (($base + "/trailers") | to nuon)
-            + " --raw); let headers = $result.response.headers; if $result.response.body != 'BODY' { error make {msg: 'trailers contaminated the body'} }; if ($headers | get 'x-TrAiLeR-CaSe') != 'trailer-value' { error make {msg: 'trailer spelling/value changed'} }; if ($headers | get 'x-MiXeD-TrAiLeR') != 'second' { error make {msg: 'mixed-case trailer duplicate changed'} }; if 'X-Mixed-Trailer' in ($headers | columns) { error make {msg: 'mixed-case trailer kept the earlier alias'} }; if ($headers | get 'Set-Cookie') != 'trailer-secret-sentinel' { error make {msg: 'sensitive trailer was not parsed'} }; print 'trailers separated and parsed'"
+            + " --raw); let headers = $result.response.headers; if $result.response.body != 'BODY' { error make {msg: 'trailers contaminated the body'} }; if ($headers | get 'x-TrAiLeR-CaSe') != 'trailer-value' { error make {msg: 'trailer spelling/value changed'} }; if ($headers | get 'x-MiXeD-TrAiLeR') != 'second' { error make {msg: 'mixed-case trailer duplicate changed'} }; if 'X-Mixed-Trailer' in ($headers | columns) { error make {msg: 'mixed-case trailer kept the earlier alias'} }; if ($headers | get 'Set-Cookie') != '******' { error make {msg: 'sensitive trailer was not masked'} }; print 'trailers separated and parsed safely'"
         ))
         assert equal $trailers.exit_code 0 $"response-trailer parse failed: ($trailers.stderr)"
         let trailer_history_id = (api history list --limit 1 | first | get id)
@@ -651,7 +661,7 @@ def test-fileless-header-correctness-and-secrecy [] {
             + (($base + "/case-headers") | to nuon)
             + " --raw --no-history); let headers = $result.response.headers; "
             + "if ($headers | get 'ETag') != '\"case-etag\"' { error make {msg: 'ETag spelling/value changed'} }; "
-            + "if ($headers | get 'WWW-Authenticate') != 'Bearer realm=\"nurl\"' { error make {msg: 'WWW-Authenticate spelling/value changed'} }; "
+            + "if ($headers | get 'WWW-Authenticate') != '******' { error make {msg: 'WWW-Authenticate spelling/value changed'} }; "
             + "if ($headers | get 'X-RateLimit-Remaining') != '42' { error make {msg: 'rate-limit spelling/value changed'} }; "
             + "if ($headers | get 'x-CuStOm-AcRoNyM') != 'mixed-value' { error make {msg: 'custom spelling/value changed'} }; "
             + "if ($headers | get 'Content-Type') != 'application/json' { error make {msg: 'ordinary header changed'} }; "
@@ -700,7 +710,7 @@ def test-fileless-header-correctness-and-secrecy [] {
         let redirected = (run-command-process $root (
             "let result = (api get "
             + (($base + "/redirect") | to nuon)
-            + " --follow-redirects --raw --no-history); if $result.response.status != 200 { error make {msg: 'redirect final status changed'} }; if ($result.response.headers | get 'Set-Cookie') != 'session=RESPONSE-COOKIE-SENTINEL; HttpOnly' { error make {msg: 'redirect final headers missing'} }; print 'redirect final response parsed'"
+            + " --follow-redirects --raw --no-history); if $result.response.status != 200 { error make {msg: 'redirect final status changed'} }; if ($result.response.headers | get 'Set-Cookie') != '******' { error make {msg: 'redirect final headers missing'} }; print 'redirect final response parsed safely'"
         ))
         assert equal $redirected.exit_code 0 $"redirect response-header parse failed: ($redirected.stderr)"
 

@@ -3,9 +3,11 @@
 
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use http.nu ["api request"]
+use auth.nu [validate-secret-safe-url]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
+use string-compat.nu [optional-get]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -33,9 +35,8 @@ def resolve-chain-file [chains_dir: string, name: string] {
 
 def validate-chain-steps [steps: list] {
     for step in $steps {
-        let request_name = ($step.request? | default null)
-        if $request_name != null {
-            validate-resource-name "request" $request_name --nested --scope "<collection>/requests" | ignore
+        if "request" in ($step | columns) {
+            validate-resource-name "request" $step.request --nested --scope "<collection>/requests" | ignore
         }
     }
 }
@@ -66,26 +67,24 @@ export def "api chain run" [
     for step in $steps {
         $step_num = $step_num + 1
 
-        if not $quiet {
-            print $"(ansi blue)Step ($step_num): ($step.request? | default 'inline request')(ansi reset)"
-        }
-
         # Get request configuration and determine collection context
         mut step_collection = $collection
-        let request_config = if ($step.request? | default null) != null {
+        let saved_request = "request" in ($step | columns)
+        let request_name = if $saved_request { $step.request } else { "" }
+        let request_config = if $saved_request {
             # Load saved request (and get collection name)
-            let loaded = (load-saved-request-with-collection $step.request)
+            let loaded = (load-saved-request-with-collection $request_name)
             if $loaded != null and $step_collection == "" {
-                $step_collection = ($loaded.collection? | default "")
+                $step_collection = ($loaded | optional-get "collection" | default "")
             }
-            $loaded.request? | default null
+            if $loaded == null { null } else { $loaded | optional-get "request" }
         } else {
             # Use inline request config
             $step
         }
 
         if $request_config == null {
-            let message = $"Request not found: ($step.request)"
+            let message = $"Request not found: ($request_name)"
             if not $quiet {
                 print -e $message
             }
@@ -98,36 +97,46 @@ export def "api chain run" [
         }
 
         # Merge context variables with step-specific variables
-        let step_vars = ($step.use? | default {})
+        let step_vars = ($step | optional-get "use" | default {})
         let all_vars = ($context | merge $step_vars)
 
         # Interpolate URL with collection context
-        let url = (api vars interpolate ($request_config.url? | default "") -v $all_vars -c $step_collection)
+        let request_url = ($request_config | get "url")
+        let url = (api vars interpolate $request_url -v $all_vars -c $step_collection)
+        validate-secret-safe-url $url | ignore
+
+        if not $quiet {
+            let display_name = if $saved_request { $request_name } else { "inline request" }
+            print $"(ansi blue)Step ($step_num): ($display_name)(ansi reset)"
+        }
 
         # Interpolate headers with collection context
-        let headers = if ($request_config.headers? | default null) != null {
-            api vars interpolate-record $request_config.headers -v $all_vars -c $step_collection
+        let request_headers = ($request_config | optional-get "headers")
+        let headers = if $request_headers != null {
+            api vars interpolate-record $request_headers -v $all_vars -c $step_collection
         } else {
             {}
         }
 
         # Interpolate body with collection context
-        let body = if ($request_config.body?.content? | default null) != null {
-            if ($request_config.body.content | describe | str starts-with "record") or ($request_config.body.content | describe | str starts-with "list") {
-                let interpolated = (api vars interpolate-record $request_config.body.content -v $all_vars -c $step_collection)
+        let request_body = ($request_config | optional-get "body")
+        let body_content = if $request_body == null { null } else { $request_body | optional-get "content" }
+        let body = if $body_content != null {
+            if ($body_content | describe | str starts-with "record") or ($body_content | describe | str starts-with "list") {
+                let interpolated = (api vars interpolate-record $body_content -v $all_vars -c $step_collection)
                 $interpolated | to json
             } else {
-                api vars interpolate ($request_config.body.content | into string) -v $all_vars -c $step_collection
+                api vars interpolate ($body_content | into string) -v $all_vars -c $step_collection
             }
         } else {
             ""
         }
 
         # Get auth config
-        let auth = ($request_config.auth? | default {})
+        let auth = ($request_config | optional-get "auth" | default {})
 
         # Execute request
-        let method = ($request_config.method? | default "GET")
+        let method = ($request_config | optional-get "method" | default "GET")
 
         if not $quiet {
             print $"  (ansi dark_gray)($method) ($url)(ansi reset)"
@@ -158,7 +167,7 @@ export def "api chain run" [
             $chain_error = $message
             $results = ($results | append {
                 step: $step_num
-                request: ($step.request? | default "inline")
+                request: (if $saved_request { $request_name } else { "inline" })
                 status: null
                 time_ms: 0
                 response: null
@@ -189,7 +198,10 @@ export def "api chain run" [
         }
 
         # Extract variables from response
-        let extract_config = ($step.extract? | default ($request_config.chain?.extract? | default null))
+        let step_extract = ($step | optional-get "extract")
+        let request_chain = ($request_config | optional-get "chain")
+        let chain_extract = if $request_chain == null { null } else { $request_chain | optional-get "extract" }
+        let extract_config = ($step_extract | default $chain_extract)
 
         if $extract_config != null {
             for item in ($extract_config | transpose key path) {
@@ -206,15 +218,16 @@ export def "api chain run" [
         # Add result to list
         $results = ($results | append {
             step: $step_num
-            request: ($step.request? | default "inline")
+            request: (if $saved_request { $request_name } else { "inline" })
             status: $result.response.status
             time_ms: $result.response.time_ms
             response: $result.response
         })
 
         # Check for delay between requests
-        if ($step.delay_ms? | default 0) > 0 {
-            sleep ($step.delay_ms | into duration --unit ms)
+        let delay_ms = ($step | optional-get "delay_ms" | default 0)
+        if $delay_ms > 0 {
+            sleep ($delay_ms | into duration --unit ms)
         }
     }
 
@@ -272,13 +285,13 @@ export def "api chain exec" [
         let chains_relative_with_suffix = ($root | path join "chains" $"($file).nuon")
         let chains_relative_with_suffix_type = (path-type-safe $chains_relative_with_suffix)
 
-        if ($direct_type | is-not-empty) and $direct_type != "dir" {
+        if (not ($direct_type | is-empty)) and $direct_type != "dir" {
             $file
-        } else if ($root_relative_type | is-not-empty) and $root_relative_type != "dir" {
+        } else if (not ($root_relative_type | is-empty)) and $root_relative_type != "dir" {
             $root_relative
-        } else if ($chains_relative_type | is-not-empty) and $chains_relative_type != "dir" {
+        } else if (not ($chains_relative_type | is-empty)) and $chains_relative_type != "dir" {
             $chains_relative
-        } else if ($chains_relative_with_suffix_type | is-not-empty) and $chains_relative_with_suffix_type != "dir" {
+        } else if (not ($chains_relative_with_suffix_type | is-empty)) and $chains_relative_with_suffix_type != "dir" {
             $chains_relative_with_suffix
         } else {
             fail-command $"Chain file not found: ($file)"

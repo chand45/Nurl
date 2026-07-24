@@ -100,7 +100,7 @@ def test-transport-failure-surfaces [] {
         {label: "head none output", command: $"api head ($url | to nuon) -H ($headers) --output none --save ($save_path | to nuon)"}
         {label: "options selection", command: $"api options ($url | to nuon) -H ($headers) --select status --save ($save_path | to nuon)"}
         {label: "saved raw output", command: ("api send saved --collection transport --output raw --save " + ($save_path | to nuon))}
-        {label: "history resend", command: ("api history resend " + ($history_id | to nuon) + " --raw")}
+        {label: "history resend", command: ("api history resend " + ($history_id | to nuon) + " --headers {} --raw")}
     ]
 
     let failure = try {

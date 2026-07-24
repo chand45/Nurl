@@ -4,12 +4,12 @@
 # Set the API root directory
 # When installed via install script, this will be ~/.nurl
 # When sourced from a cloned repo, this will use the repo directory
-$env.API_ROOT = if ($env.FILE_PWD? | is-not-empty) {
+$env.API_ROOT = if not ($env.FILE_PWD? | is-empty) {
     $env.FILE_PWD
-} else if (($env.USERPROFILE? | is-not-empty) and (($env.USERPROFILE | path join ".nurl") | path exists)) {
+} else if (not ($env.USERPROFILE? | is-empty)) and (($env.USERPROFILE | path join ".nurl") | path exists) {
     # Windows: check USERPROFILE\.nurl
     $env.USERPROFILE | path join ".nurl"
-} else if (($env.HOME? | is-not-empty) and (($env.HOME | path join ".nurl") | path exists)) {
+} else if (not ($env.HOME? | is-empty)) and (($env.HOME | path join ".nurl") | path exists) {
     # Unix: check HOME/.nurl
     $env.HOME | path join ".nurl"
 } else {

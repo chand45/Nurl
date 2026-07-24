@@ -2,6 +2,7 @@
 # Handles {{variable}} replacement and built-in dynamic variables
 
 use resource-path.nu [validate-resource-name resolve-under-base]
+use string-compat.nu [optional-get]
 
 # ============================================================================
 # Global Variables Management
@@ -415,19 +416,19 @@ export def "api vars extract" [
                 let index = ($base.0.capture1 | into int)
 
                 if $field != "" {
-                    $current = ($current | get -o $field)
+                    $current = ($current | optional-get $field)
                 }
                 if $current != null {
-                    $current = ($current | get -o $index)
+                    $current = ($current | optional-get $index)
                 }
             } else {
-                $current = ($current | get -o $part)
+                $current = ($current | optional-get $part)
             }
         } else if ($part =~ '^\d+$') {
             # Plain numeric index
-            $current = ($current | get -o ($part | into int))
+            $current = ($current | optional-get ($part | into int))
         } else {
-            $current = ($current | get -o $part)
+            $current = ($current | optional-get $part)
         }
     }
 

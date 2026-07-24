@@ -4,6 +4,7 @@
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case]
+use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 
 # Get history directory
 def get-history-dir [] {
@@ -114,11 +115,98 @@ def generate-history-id [] {
     $"($date_part)-($random_part)"
 }
 
+def sanitize-history-headers [headers: any, label: string] {
+    if not (($headers | describe) | str starts-with "record") {
+        fail-command $"($label) headers must be a record"
+    }
+    {
+        headers: (redact-sensitive-headers $headers)
+        had_sensitive: (
+            $headers
+            | transpose key value
+            | any {|header| sensitive-header $header.key $header.value }
+        )
+    }
+}
+
+def sanitize-history-request [request: record] {
+    let method = ($request.method? | default null)
+    if $method == null or ($method | describe) != "string" or ($method | str trim | is-empty) {
+        fail-command "History request method must be a non-empty string"
+    }
+    let url = ($request.url? | default null)
+    if $url == null or ($url | describe) != "string" or ($url | str trim | is-empty) {
+        fail-command "History request URL must be a non-empty string"
+    }
+    validate-secret-safe-url $url | ignore
+    let headers_replayable = ($request.headers_replayable? | default null)
+    if $headers_replayable != null and ($headers_replayable | describe) != "bool" {
+        fail-command "History request headers_replayable must be a boolean"
+    }
+    let header_context = (
+        sanitize-history-headers ($request.headers? | default {}) "History request"
+    )
+    mut safe_request = {
+        method: $method
+        url: $url
+        headers: $header_context.headers
+        body: ($request.body? | default null)
+    }
+    let auth = ($request.auth? | default null)
+    if $auth != null {
+        if not (($auth | describe) | str starts-with "record") {
+            fail-command "History request authentication must be a record"
+        }
+        let safe_auth = (auth-history-projection $auth)
+        if $safe_auth == null {
+            $safe_request = ($safe_request | reject auth)
+        } else {
+            $safe_request = ($safe_request | upsert auth $safe_auth)
+        }
+    }
+    if $header_context.had_sensitive or ($request.headers_replayable? | default true) == false {
+        $safe_request = ($safe_request | upsert headers_replayable false)
+    }
+    $safe_request
+}
+
+def sanitize-history-response [response: record] {
+    let status = ($response.status? | default null)
+    if $status == null or ($status | describe) != "int" or $status < 100 or $status > 599 {
+        fail-command "History response status must be an integer between 100 and 599"
+    }
+    let status_text = ($response.status_text? | default null)
+    if $status_text == null or ($status_text | describe) != "string" {
+        fail-command "History response status_text must be a string"
+    }
+    let time_ms = ($response.time_ms? | default null)
+    if $time_ms == null or ($time_ms | describe) not-in ["int" "float"] or $time_ms < 0 {
+        fail-command "History response time_ms must be a non-negative number"
+    }
+    let size_bytes = ($response.size_bytes? | default null)
+    if $size_bytes == null or ($size_bytes | describe) != "int" or $size_bytes < 0 {
+        fail-command "History response size_bytes must be a non-negative integer"
+    }
+    let header_context = (
+        sanitize-history-headers ($response.headers? | default {}) "History response"
+    )
+    {
+        status: $status
+        status_text: $status_text
+        headers: $header_context.headers
+        body: ($response.body? | default null)
+        time_ms: $time_ms
+        size_bytes: $size_bytes
+    }
+}
+
 # Save request/response to history
 export def "api history save" [
     request: record    # Request details
     response: record   # Response details
 ] {
+    let safe_request = (sanitize-history-request $request)
+    let safe_response = (sanitize-history-response $response)
     let dir = (ensure-history-dir)
     let date_dir = ($dir | path join (date now | format date "%Y-%m-%d"))
 
@@ -141,8 +229,8 @@ export def "api history save" [
         id: $id
         timestamp: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
         environment: $current_env
-        request: $request
-        response: $response
+        request: $safe_request
+        response: $safe_response
     }
 
     let file_name = $"($id).nuon"
@@ -154,10 +242,10 @@ export def "api history save" [
     append-to-history-index {
         id: $id
         timestamp: $entry.timestamp
-        method: ($request.method? | default "")
-        url: ($request.url? | default "")
-        status: ($response.status? | default 0)
-        time_ms: ($response.time_ms? | default 0)
+        method: ($safe_request.method? | default "")
+        url: ($safe_request.url? | default "")
+        status: ($safe_response.status? | default 0)
+        time_ms: ($safe_response.time_ms? | default 0)
         date_dir: ($date_dir | path basename)
     }
 
@@ -273,10 +361,10 @@ export def "api history resend" [
     id: string               # History entry ID
     --environment (-e): string = ""  # Override environment
     --auth (-a): record = {} # Authentication config (e.g., {type: bearer, token_ref: mytoken})
+    --headers (-H): record # Replace stored headers (required when sensitive headers were redacted)
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {
-    require-curl-capability --dry-run=$dry_run
     let entry = (find-history-entry $id)
 
     if $entry == null {
@@ -286,6 +374,26 @@ export def "api history resend" [
     # Switch environment if specified
     # Note: global env concept not supported; flag is kept for backward compat but is a no-op
     # (was: api env use $environment — command does not exist)
+
+    let explicit_auth = not ($auth | is-empty)
+    let stored_auth = ($entry.request.auth? | default null)
+    let effective_auth = if $explicit_auth {
+        $auth
+    } else if $stored_auth == null {
+        {}
+    } else if ($stored_auth.replayable? | default false) == true {
+        $stored_auth
+    } else {
+        let auth_type = ($stored_auth.type? | default "inline")
+        fail-command $"History entry '($id)' used non-replayable ($auth_type) authentication; pass --auth to resend it"
+    }
+    let explicit_headers = $headers != null
+    if (($entry.request.headers_replayable? | default true) == false) and (not $explicit_headers) {
+        fail-command $"History entry '($id)' contains redacted sensitive headers; pass --headers to resend it"
+    }
+    let effective_headers = if $explicit_headers { $headers } else { $entry.request.headers }
+
+    require-curl-capability --dry-run=$dry_run
 
     # Rebuild body record from stored body (avoid double-encoding)
     let body_record = if ($entry.request.body? | default null) != null {
@@ -300,7 +408,7 @@ export def "api history resend" [
     }
 
     # Execute request — pass body as record (api request handles to-json internally)
-    api request -m $entry.request.method $entry.request.url -b $body_record -H $entry.request.headers -a $auth --raw=$raw --dry-run=$dry_run
+    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --raw=$raw --dry-run=$dry_run
 }
 
 # Search history — uses index for URL/method; falls back to files for body search
