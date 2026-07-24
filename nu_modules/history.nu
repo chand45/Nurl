@@ -3,6 +3,7 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
+use resource-path.nu [resolve-under-base]
 use string-compat.nu [ascii-equal-ignore-case]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 
@@ -15,6 +16,42 @@ def get-history-dir [] {
 # Get history index file path (B1)
 def get-history-index-path [] {
     (get-history-dir) | path join "index.nuon"
+}
+
+# Parse legacy second-only and fractional RFC3339 timestamps to nanoseconds.
+# Invalid timestamps sort last but remain available to history readers.
+def history-timestamp-instant [timestamp: any] {
+    if ($timestamp | describe) != "string" or ($timestamp | str trim | is-empty) {
+        return null
+    }
+    if $timestamp !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$' {
+        return null
+    }
+
+    try {
+        $timestamp | into datetime | into int
+    } catch {
+        null
+    }
+}
+
+# Canonical newest-first ordering. Input order is the tie-breaker so an existing
+# index preserves the best available chronology for truly tied legacy entries.
+def sort-history-entries [] {
+    let entries = $in
+    let count = ($entries | length)
+    $entries
+    | enumerate
+    | each {|row|
+        let instant = (history-timestamp-instant ($row.item.timestamp? | default null))
+        $row.item | merge {
+            _history_timestamp_valid: ($instant != null)
+            _history_timestamp_instant: ($instant | default 0)
+            _history_tie_order: ($count - $row.index)
+        }
+    }
+    | sort-by _history_timestamp_valid _history_timestamp_instant _history_tie_order -r
+    | reject _history_timestamp_valid _history_timestamp_instant _history_tie_order
 }
 
 # Load history index — list of summary entries (B1)
@@ -31,7 +68,87 @@ def load-history-index [] {
 def append-to-history-index [summary: record] {
     let path = (get-history-index-path)
     let existing = (load-history-index)
-    ($existing | append $summary | sort-by timestamp -r) | to nuon | save -f $path
+    ($existing | append $summary | sort-history-entries) | to nuon | save -f $path
+}
+
+# Convert a persisted history entry to its index summary.
+def history-entry-summary [entry: record, date_dir: string] {
+    {
+        id: ($entry.id? | default "")
+        timestamp: ($entry.timestamp? | default "")
+        method: ($entry.request?.method? | default "")
+        url: ($entry.request?.url? | default "")
+        status: ($entry.response?.status? | default 0)
+        time_ms: ($entry.response?.time_ms? | default 0)
+        date_dir: $date_dir
+    }
+}
+
+# Scan files in deterministic ID order, preferring an existing index's order
+# when it can disambiguate tied legacy timestamps.
+def scan-history-summaries [existing: list = []] {
+    let dir = (get-history-dir)
+    let subdirs = try { ls $dir | where type == dir | get name | sort } catch { [] }
+    let scanned = $subdirs | each {|subdir|
+        let date_dir = ($subdir | path basename)
+        (try { ls $subdir | where name =~ '\.nuon$' | get name | sort } catch { [] })
+        | each {|file|
+            try {
+                history-entry-summary (open $file) $date_dir
+            } catch { null }
+        }
+        | where {|e| $e != null }
+    } | flatten | sort-by id
+
+    let existing_ids = $existing | each {|entry|
+        let id = ($entry.id? | default "")
+        if ($id | describe) == "string" { $id } else { "" }
+    } | uniq
+    if ($existing_ids | is-empty) {
+        return $scanned
+    }
+
+    let keyed_scanned = $scanned | each {|entry|
+        $entry | merge {_history_id_key: ($entry.id | encode base64)}
+    }
+    let scanned_by_id = ($keyed_scanned | group-by _history_id_key)
+    let hints = $existing_ids | each {|id|
+        {_history_id_key: ($id | encode base64)}
+    }
+    let hinted_ids = ($hints | group-by _history_id_key)
+    let preserved = $hints | each {|hint|
+        let matches = try {
+            $scanned_by_id | get $hint._history_id_key
+        } catch {
+            []
+        }
+        if ($matches | is-empty) {
+            null
+        } else {
+            $matches | first | reject _history_id_key
+        }
+    } | where {|entry| $entry != null }
+    let remaining = $keyed_scanned | where {|entry|
+        try {
+            $hinted_ids | get $entry._history_id_key | is-empty
+        } catch {
+            true
+        }
+    } | reject _history_id_key
+
+    $preserved | append $remaining
+}
+
+def rebuild-history-index [] {
+    let existing = (load-history-index)
+    let entries = (
+        scan-history-summaries $existing
+        | sort-history-entries
+    )
+
+    let path = (get-history-index-path)
+    $entries | to nuon | save -f $path
+    $entries
 }
 
 # Rebuild the full history index by scanning all date dirs + files (B1)
@@ -39,29 +156,7 @@ export def "api history rebuild-index" [] {
     let dir = (get-history-dir)
     if not ($dir | path exists) { return [] }
 
-    let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-    let entries = $subdirs | each {|subdir|
-        let date_dir = ($subdir | path basename)
-        (try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] })
-        | each {|file|
-            try {
-                let e = (open $file)
-                {
-                    id: ($e.id? | default "")
-                    timestamp: ($e.timestamp? | default "")
-                    method: ($e.request?.method? | default "")
-                    url: ($e.request?.url? | default "")
-                    status: ($e.response?.status? | default 0)
-                    time_ms: ($e.response?.time_ms? | default 0)
-                    date_dir: $date_dir
-                }
-            } catch { null }
-        }
-        | where {|e| $e != null }
-    } | flatten | sort-by timestamp -r
-
-    let path = (get-history-index-path)
-    $entries | to nuon | save -f $path
+    let entries = (rebuild-history-index)
     print $"(ansi green)Index rebuilt: ($entries | length) entries(ansi reset)"
     $entries
 }
@@ -72,28 +167,7 @@ def ensure-history-index [] {
     if not ($path | path exists) {
         let dir = (get-history-dir)
         if ($dir | path exists) {
-            # Silently rebuild
-            let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-            let entries = $subdirs | each {|subdir|
-                let date_dir = ($subdir | path basename)
-                (try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] })
-                | each {|file|
-                    try {
-                        let e = (open $file)
-                        {
-                            id: ($e.id? | default "")
-                            timestamp: ($e.timestamp? | default "")
-                            method: ($e.request?.method? | default "")
-                            url: ($e.request?.url? | default "")
-                            status: ($e.response?.status? | default 0)
-                            time_ms: ($e.response?.time_ms? | default 0)
-                            date_dir: $date_dir
-                        }
-                    } catch { null }
-                }
-                | where {|e| $e != null }
-            } | flatten | sort-by timestamp -r
-            $entries | to nuon | save -f $path
+            rebuild-history-index | ignore
         }
     }
 }
@@ -107,12 +181,61 @@ def ensure-history-dir [] {
     $dir
 }
 
-# Generate history entry ID
-def generate-history-id [] {
-    let now = (date now)
-    let date_part = ($now | format date "%Y%m%d-%H%M%S")
+# Generate history entry ID from the same persistence instant as the entry.
+def generate-history-id [instant: datetime] {
+    let date_part = ($instant | format date "%Y%m%d-%H%M%S")
     let random_part = (random chars --length 6)
     $"($date_part)-($random_part)"
+}
+
+def next-history-persistence-instant [captured_at: datetime] {
+    let captured_ns = ($captured_at | into int)
+    let valid_instants = (
+        load-history-index
+        | each {|entry| history-timestamp-instant ($entry.timestamp? | default null) }
+        | where {|instant| $instant != null }
+    )
+    let latest_ns = if ($valid_instants | is-empty) {
+        null
+    } else {
+        $valid_instants | math max
+    }
+
+    if $latest_ns != null and $captured_ns <= $latest_ns {
+        $captured_at + (($latest_ns - $captured_ns + 1) | into duration --unit ns)
+    } else {
+        $captured_at
+    }
+}
+
+def validate-history-limit [limit: int] {
+    if $limit < 0 {
+        fail-command $"History --limit must be non-negative, got ($limit)"
+    }
+}
+
+def history-list-time [timestamp: any] {
+    try {
+        $timestamp | into datetime | date to-timezone UTC | format date "%H:%M:%S"
+    } catch {
+        ""
+    }
+}
+
+def history-search-time [timestamp: any] {
+    if ($timestamp | describe) != "string" {
+        return ""
+    }
+    try {
+        $timestamp | into datetime | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"
+    } catch {
+        $timestamp
+    }
+}
+
+def history-entry-path [summary: record] {
+    let logical_name = $"(($summary.date_dir? | default ''))/(($summary.id? | default ''))"
+    resolve-under-base (get-history-dir) $logical_name "history entry" --nested --suffix ".nuon" --always-suffix --scope="history directory"
 }
 
 def sanitize-history-headers [headers: any, label: string] {
@@ -207,14 +330,17 @@ export def "api history save" [
 ] {
     let safe_request = (sanitize-history-request $request)
     let safe_response = (sanitize-history-response $response)
+    let captured_at = (date now | date to-timezone UTC)
     let dir = (ensure-history-dir)
-    let date_dir = ($dir | path join (date now | format date "%Y-%m-%d"))
+    ensure-history-index
+    let persisted_at = (next-history-persistence-instant $captured_at)
+    let date_dir = ($dir | path join ($persisted_at | format date "%Y-%m-%d"))
 
     if not ($date_dir | path exists) {
         mkdir $date_dir
     }
 
-    let id = (generate-history-id)
+    let id = (generate-history-id $persisted_at)
 
     # Get current environment
     let root = ($env.API_ROOT? | default (pwd))
@@ -227,7 +353,7 @@ export def "api history save" [
 
     let entry = {
         id: $id
-        timestamp: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
+        timestamp: ($persisted_at | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
         environment: $current_env
         request: $safe_request
         response: $safe_response
@@ -258,6 +384,9 @@ export def "api history list" [
     --filter (-f): string = ""   # Filter by method (method:GET), status (status:200), or URL substring
     --date (-d): string = ""     # Filter by date (YYYY-MM-DD)
 ] {
+    validate-history-limit $limit
+    if $limit == 0 { return [] }
+
     let dir = (get-history-dir)
 
     if not ($dir | path exists) {
@@ -269,7 +398,7 @@ export def "api history list" [
     ensure-history-index
 
     # Load from index and ensure newest-first order (sort guards against legacy unsorted indexes)
-    let all_entries = (load-history-index | sort-by timestamp -r)
+    let all_entries = (load-history-index | sort-history-entries)
 
     if ($all_entries | is-empty) {
         print "(ansi yellow)No history found(ansi reset)"
@@ -305,7 +434,7 @@ export def "api history list" [
     $filtered | first $limit | each {|entry|
         {
             id: ($entry.id? | default "")
-            timestamp: (($entry.timestamp? | default "") | str substring 11..19)
+            timestamp: (history-list-time ($entry.timestamp? | default null))
             method: ($entry.method? | default "???")
             status: ($entry.status? | default 0)
             url: ($entry.url? | default "" | str substring 0..50)
@@ -318,7 +447,7 @@ export def "api history list" [
 export def "api history show" [
     id: string  # History entry ID or partial ID
 ] {
-    let entry = (find-history-entry $id)
+    let entry = (resolve-history-entry $id)
 
     if $entry == null {
         fail-command $"History entry '($id)' not found"
@@ -327,8 +456,8 @@ export def "api history show" [
     $entry
 }
 
-# Find history entry by ID or partial ID
-def find-history-entry [id: string] {
+# Resolve exact IDs first, then accept only unique partial matches.
+def resolve-history-entry [id: string] {
     let dir = (get-history-dir)
 
     if not ($dir | path exists) {
@@ -338,22 +467,27 @@ def find-history-entry [id: string] {
     # Get all history files
     let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
     let all_files = $subdirs | each {|subdir|
-        try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] }
-    } | flatten
+        try { ls $subdir | where name =~ '\.nuon$' | get name | sort } catch { [] }
+    } | flatten | sort | each {|path|
+        {path: $path, id: ($path | path parse | get stem)}
+    }
 
     # Try exact match first
-    let exact_match = $all_files | where {|f| ($f | path basename) == $"($id).nuon" }
-    if not ($exact_match | is-empty) {
-        return (open ($exact_match | first))
+    let exact_matches = $all_files | where {|file| $file.id == $id }
+    let matches = if ($exact_matches | is-empty) {
+        $all_files | where {|file| $file.id | str contains $id }
+    } else {
+        $exact_matches
     }
-
-    # Try partial match
-    let partial_match = $all_files | where {|f| ($f | path basename) | str contains $id }
-    if ($partial_match | is-empty) {
+    let match_count = ($matches | length)
+    if $match_count == 0 {
         return null
     }
+    if $match_count > 1 {
+        fail-command ("History ID '" + $id + "' is ambiguous (" + ($match_count | into string) + " matches); use a longer or exact ID")
+    }
 
-    open ($partial_match | first)
+    open ($matches | first | get path)
 }
 
 # Resend a request from history
@@ -365,7 +499,7 @@ export def "api history resend" [
     --raw (-r)               # Return raw result
     --dry-run (-d)           # Output curl command instead of executing
 ] {
-    let entry = (find-history-entry $id)
+    let entry = (resolve-history-entry $id)
 
     if $entry == null {
         fail-command $"History entry '($id)' not found"
@@ -416,6 +550,9 @@ export def "api history search" [
     query: string            # Search query
     --limit (-l): int = 20   # Max results
 ] {
+    validate-history-limit $limit
+    if $limit == 0 { return [] }
+
     let dir = (get-history-dir)
 
     if not ($dir | path exists) {
@@ -425,7 +562,7 @@ export def "api history search" [
 
     ensure-history-index
 
-    let all_entries = (load-history-index | sort-by timestamp -r)
+    let all_entries = (load-history-index | sort-history-entries)
     if ($all_entries | is-empty) {
         print $"(ansi yellow)No results for '($query)'(ansi reset)"
         return []
@@ -442,7 +579,7 @@ export def "api history search" [
         return ($index_matches | each {|entry|
             {
                 id: ($entry.id? | default "")
-                timestamp: (($entry.timestamp? | default "") | str substring 0..19)
+                timestamp: (history-search-time ($entry.timestamp? | default null))
                 method: ($entry.method? | default "???")
                 status: ($entry.status? | default 0)
                 url: ($entry.url? | default "" | str substring 0..50)
@@ -450,18 +587,13 @@ export def "api history search" [
         })
     }
 
-    # Fall back to body search (open files, slow path)
-    let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-    let files = $subdirs | each {|subdir|
-        try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] }
-    } | flatten | sort -r
-
     mut results = []
 
-    for file in $files {
+    # Fall back to body search in the same canonical order as index searches.
+    for summary in $all_entries {
         if ($results | length) >= $limit { break }
 
-        let entry = try { open $file } catch { continue }
+        let entry = try { open (history-entry-path $summary) } catch { continue }
 
         let body_text = if ($entry.response.body? | default null) != null {
             try { $entry.response.body | to json } catch { "" }
@@ -470,7 +602,7 @@ export def "api history search" [
         if ($body_text | str contains -i $query) {
             $results = ($results | append {
                 id: $entry.id
-                timestamp: ($entry.timestamp | str substring 0..19)
+                timestamp: (history-search-time ($entry.timestamp? | default null))
                 method: ($entry.request.method? | default "???")
                 status: ($entry.response.status? | default 0)
                 url: ($entry.request.url? | default "" | str substring 0..50)
@@ -573,43 +705,48 @@ export def "api history export" [
     --output (-o): string = ""      # Output file path
     --limit (-l): int = 100         # Max entries
 ] {
+    validate-history-limit $limit
     let supported_formats = ["json" "csv"]
     if $format not-in $supported_formats {
         fail-command $"Unsupported history export format '($format)'. Expected one of: ($supported_formats | str join ', ')."
     }
-    let dir = (get-history-dir)
 
-    if not ($dir | path exists) {
-        print "(ansi yellow)No history to export(ansi reset)"
-        return
-    }
-
-    let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-    let files = $subdirs | each {|subdir|
-        try { ls $subdir | where name =~ '\.nuon$' | get name } catch { [] }
-    } | flatten | sort -r | first $limit
-
-    let entries = $files | each {|file|
-        try {
-            open $file
-        } catch {
-            null
+    let entries = if $limit == 0 {
+        []
+    } else {
+        let dir = (get-history-dir)
+        if not ($dir | path exists) {
+            print "(ansi yellow)No history to export(ansi reset)"
+            return
         }
-    } | where {|e| $e != null }
+        ensure-history-index
+        load-history-index
+        | sort-history-entries
+        | first $limit
+        | each {|summary|
+            try { open (history-entry-path $summary) } catch { null }
+        }
+        | where {|entry| $entry != null }
+    }
 
     let output_content = match $format {
         "json" => ($entries | to json)
         "csv" => {
-            $entries | each {|e|
+            let rows = $entries | each {|e|
                 {
-                    id: $e.id
-                    timestamp: $e.timestamp
-                    method: $e.request.method
-                    url: $e.request.url
-                    status: $e.response.status
-                    time_ms: $e.response.time_ms
+                    id: ($e.id? | default "")
+                    timestamp: ($e.timestamp? | default "")
+                    method: ($e.request?.method? | default "")
+                    url: ($e.request?.url? | default "")
+                    status: ($e.response?.status? | default 0)
+                    time_ms: ($e.response?.time_ms? | default 0)
                 }
-            } | to csv
+            }
+            if ($rows | is-empty) {
+                "id,timestamp,method,url,status,time_ms"
+            } else {
+                $rows | to csv
+            }
         }
         _ => { fail-command $"Unsupported history export format '($format)'" }
     }
@@ -624,5 +761,5 @@ export def "api history export" [
 
 # Get history entry by ID (returns record)
 export def "api history get" [id: string] {
-    find-history-entry $id
+    resolve-history-entry $id
 }

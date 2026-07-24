@@ -307,19 +307,22 @@ def test-history-export-format-contract [] {
     let output_dir = (make-temp-dir "history-format-output")
     $env.API_ROOT = $root
     api init | ignore
-    api history save {
-        method: "GET"
-        url: "https://example.invalid/history"
-        headers: {}
-        body: null
-    } {
-        status: 200
-        status_text: "OK"
-        headers: {}
-        body: {ok: true}
-        time_ms: 1
-        size_bytes: 11
-    } | ignore
+    let ids = 1..10 | each {|n|
+        api history save {
+            method: "GET"
+            url: $"https://example.invalid/history/($n)"
+            headers: {}
+            body: null
+        } {
+            status: 200
+            status_text: "OK"
+            headers: {}
+            body: {sequence: $n}
+            time_ms: 1
+            size_bytes: 11
+        }
+    }
+    let final_id = ($ids | last)
 
     let failure = try {
         let history_before = (command-error-snapshot ($root | path join "history"))
@@ -339,25 +342,114 @@ def test-history-export-format-contract [] {
         let unsupported_stdout = (run-command-process $root "api history export --format unsupported")
         surface-error $unsupported_stdout "Unsupported history export format" "history unsupported stdout"
 
-        let json_stdout = (run-command-process $root "api history export --format json")
-        assert equal $json_stdout.exit_code 0 "JSON history export failed"
-        assert equal ($json_stdout.stderr | str trim) "" "JSON history export wrote stderr"
-        assert equal ($json_stdout.stdout | from json | length) 1 "JSON history export did not contain the isolated entry"
+        let limit_cases = [
+            {name: "zero", limit: 0, expected: 0}
+            {name: "one", limit: 1, expected: 1}
+            {name: "exact", limit: 10, expected: 10}
+            {name: "overlarge", limit: 1000, expected: 10}
+        ]
+        let csv_columns = [id timestamp method url status time_ms]
 
-        let csv_stdout = (run-command-process $root "api history export --format csv")
-        assert equal $csv_stdout.exit_code 0 "CSV history export failed"
-        assert equal ($csv_stdout.stderr | str trim) "" "CSV history export wrote stderr"
-        assert (($csv_stdout.stdout | lines | first) | str contains "id,timestamp,method,url,status,time_ms") "CSV history export header changed"
+        for format in ["json" "csv"] {
+            for case in $limit_cases {
+                let stdout_result = (run-command-process $root $"api history export --format ($format) --limit ($case.limit)")
+                assert equal $stdout_result.exit_code 0 $"($format) stdout export with ($case.name) limit failed"
+                assert equal ($stdout_result.stderr | str trim) "" $"($format) stdout export with ($case.name) limit wrote stderr"
+                assert equal $stdout_result.stdout ($stdout_result.stdout | ansi strip) $"($format) stdout export contained ANSI"
+                let stdout_rows = if $format == "json" {
+                    $stdout_result.stdout | from json
+                } else {
+                    assert equal ($stdout_result.stdout | lines | first) "id,timestamp,method,url,status,time_ms" "CSV header changed"
+                    $stdout_result.stdout | from csv
+                }
+                assert equal ($stdout_rows | length) $case.expected $"($format) stdout export selected the wrong count for ($case.name)"
+                if $format == "csv" and $case.expected > 0 {
+                    assert equal ($stdout_rows | columns) $csv_columns "CSV fields changed"
+                }
+                if $case.expected > 0 {
+                    assert equal ($stdout_rows | first | get id) $final_id $"($format) stdout export did not put the final persisted ID first"
+                    if $format == "json" {
+                        let first = ($stdout_rows | first)
+                        assert equal ($first | columns) [id timestamp environment request response] "JSON full-entry schema changed"
+                        assert equal ($first.request | columns) [method url headers body] "JSON request schema changed"
+                        assert equal ($first.response | columns) [status status_text headers body time_ms size_bytes] "JSON response schema changed"
+                        assert equal ($first.response.status | describe) "int" "JSON status type changed"
+                        assert equal ($first.response.time_ms | describe) "int" "JSON time_ms type changed"
+                    } else {
+                        let first = ($stdout_rows | first)
+                        assert equal ($first.status | describe) "int" "CSV status type changed"
+                        assert equal ($first.time_ms | describe) "int" "CSV time_ms type changed"
+                    }
+                }
 
-        let json_file = ($output_dir | path join "valid.json")
-        let csv_file = ($output_dir | path join "valid.csv")
-        let json_result = (run-command-process $root $"api history export --format json --output ($json_file | to nuon)")
-        let csv_result = (run-command-process $root $"api history export --format csv --output ($csv_file | to nuon)")
-        assert equal $json_result.exit_code 0 "JSON history file export failed"
-        assert equal $csv_result.exit_code 0 "CSV history file export failed"
-        assert equal (open $json_file | length) 1 "JSON history file is incomplete"
-        assert equal (open $csv_file | length) 1 "CSV history file is incomplete"
+                let extension = if $format == "json" { "json" } else { "csv" }
+                let output_file = ($output_dir | path join $"($format)-($case.name).($extension)")
+                let file_result = (run-command-process $root $"api history export --format ($format) --limit ($case.limit) --output ($output_file | to nuon)")
+                assert equal $file_result.exit_code 0 $"($format) file export with ($case.name) limit failed"
+                assert equal ($file_result.stderr | str trim) "" $"($format) file export with ($case.name) limit wrote stderr"
+                assert ($output_file | path exists) $"($format) file export did not create output"
+                let output_raw = (open $output_file --raw)
+                assert equal $output_raw ($output_raw | ansi strip) $"($format) export file contained ANSI"
+                let file_rows = (open $output_file)
+                assert equal ($file_rows | length) $case.expected $"($format) file export selected the wrong count for ($case.name)"
+                if $format == "csv" {
+                    assert equal (open $output_file --raw | lines | first) "id,timestamp,method,url,status,time_ms" "CSV file header changed"
+                    if $case.expected > 0 {
+                        assert equal ($file_rows | columns) $csv_columns "CSV file fields changed"
+                    }
+                }
+                if $case.expected > 0 {
+                    assert equal ($file_rows | first | get id) $final_id $"($format) file export did not put the final persisted ID first"
+                }
+            }
+        }
         assert equal (command-error-snapshot ($root | path join "history")) $history_before "valid history export mutated history"
+
+        rm ($root | path join "history" "index.nuon")
+        api history rebuild-index | ignore
+        let rebuilt_history = (command-error-snapshot ($root | path join "history"))
+        for format in ["json" "csv"] {
+            let stdout_result = (run-command-process $root $"api history export --format ($format) --limit 1")
+            assert equal $stdout_result.exit_code 0 $"rebuilt ($format) stdout export failed"
+            assert equal ($stdout_result.stderr | str trim) "" $"rebuilt ($format) stdout export wrote stderr"
+            let stdout_rows = if $format == "json" {
+                $stdout_result.stdout | from json
+            } else {
+                $stdout_result.stdout | from csv
+            }
+            assert equal ($stdout_rows | first | get id) $final_id $"rebuilt ($format) stdout export changed newest entry"
+
+            let output_file = ($output_dir | path join $"rebuilt.($format)")
+            let file_result = (run-command-process $root $"api history export --format ($format) --limit 1 --output ($output_file | to nuon)")
+            assert equal $file_result.exit_code 0 $"rebuilt ($format) file export failed"
+            assert equal ($file_result.stderr | str trim) "" $"rebuilt ($format) file export wrote stderr"
+            assert equal (open $output_file | first | get id) $final_id $"rebuilt ($format) file export changed newest entry"
+        }
+        assert equal (command-error-snapshot ($root | path join "history")) $rebuilt_history "post-rebuild exports mutated history"
+
+        let sentinel = "INDEX-PATH-ESCAPE-SENTINEL"
+        let outside_file = ($root | path join "outside-history.nuon")
+        {value: $sentinel} | to nuon | save -f $outside_file
+        let index_path = ($root | path join "history" "index.nuon")
+        let unsafe_summary = {
+            id: "outside-history"
+            timestamp: "2999-01-01T00:00:00Z"
+            method: "GET"
+            url: "https://example.invalid/unsafe-index"
+            status: 200
+            time_ms: 1
+            date_dir: ".."
+        }
+        open $index_path | append $unsafe_summary | to nuon | save -f $index_path
+        let unsafe_index_before = (command-error-snapshot ($root | path join "history"))
+        let guarded_file = ($output_dir | path join "guarded-index.json")
+        let guarded_result = (run-command-process $root $"api history export --format json --output ($guarded_file | to nuon)")
+        assert equal $guarded_result.exit_code 0 "history export rejected rather than skipped an unsafe index path"
+        assert equal ($guarded_result.stderr | str trim) "" "unsafe index guard wrote stderr"
+        let guarded_raw = (open $guarded_file --raw)
+        assert (not ($guarded_raw | str contains $sentinel)) "history export read a path outside the history directory"
+        assert equal (open $guarded_file | length) 10 "unsafe index path changed the exported history count"
+        assert equal (command-error-snapshot ($root | path join "history")) $unsafe_index_before "unsafe index guard mutated history"
         null
     } catch {|error| $error }
 

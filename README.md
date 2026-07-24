@@ -605,7 +605,7 @@ api history resend 20260111-143208-xK9mPq
 # Override stored auth (also required for history created from inline credentials)
 api history resend 20260111-143208-xK9mPq -a { type: bearer, ref: mytoken }
 
-# Rebuild the history index (repairs or migrates existing history files)
+# Rebuild the history index from existing files without rewriting them
 api history rebuild-index
 
 # Clear old history
@@ -616,6 +616,19 @@ api history clear --all --force           # remove every history entry
 # Export history
 api history export --output history.json
 ```
+
+History uses one deterministic newest-first order for the index, list, search, and JSON/CSV export.
+New entries store RFC3339 UTC timestamps with nine fractional digits (for example,
+`2026-01-11T14:32:08.123456789Z`); existing second-only RFC3339 timestamps and IDs remain readable
+without migration. Mixed timestamps are compared as numeric instants rather than strings. If legacy
+entries have truly identical timestamps, an existing index order is retained when available; an
+index-free rebuild uses a deterministic fallback because the original chronology cannot be
+reconstructed.
+
+History IDs resolve exact matches first. Prefix, middle, and suffix fragments remain valid when they
+identify exactly one entry; ambiguous fragments fail and ask for a longer or exact ID before replay
+or other side effects. `--limit` on list, search, and export accepts zero (no entries) and values
+larger than the history size, while negative values fail before index or output changes.
 
 Re-resolving named auth on resend means credential rotation is honored automatically for bearer,
 SAML, basic, API-key header/query, and OAuth2 references. Named SAML history is canonical

@@ -53,7 +53,7 @@ def assert-public-command-error [root: string, command: string, expected: string
 
     assert ($result.exit_code != 0) $"logical failure unexpectedly exited 0: ($command)"
     assert equal ($result.stdout | str trim) "" $"logical failure wrote stdout: ($command)"
-    assert ($result.stderr | str contains $expected) $"stderr did not contain '($expected)': ($command)"
+    assert ($result.stderr | str contains $expected) $"stderr did not contain '($expected)': ($command); actual stderr: ($result.stderr)"
     assert equal $result.stderr ($result.stderr | ansi strip) "non-TTY stderr must not contain ANSI escapes"
     for forbidden in [" created" " deleted" " updated" " copied" "curl " "CLIENT-SECRET-SENTINEL" "ACCESS-TOKEN-SENTINEL"] {
         assert (not ($result.stderr | str contains $forbidden)) $"logical failure emitted forbidden text '($forbidden)': ($command)"
@@ -848,6 +848,27 @@ def test-public-command-error-contracts [] {
     let server = $server_result.server
     let failure = try {
         setup-command-error-workspace $root $server
+        api auth oauth2 configure history-ambiguity --client-id client-id --client-secret CLIENT-SECRET-SENTINEL --token-url $"http://127.0.0.1:($server.port)/token" | ignore
+        let ambiguity_dir = ($root | path join "history" "2026-01-01")
+        if not ($ambiguity_dir | path exists) { mkdir $ambiguity_dir }
+        for id in ["history-ambiguous-one" "history-ambiguous-two"] {
+            {
+                id: $id
+                timestamp: "2026-01-01T00:00:00Z"
+                environment: null
+                request: {
+                    method: "GET"
+                    url: $"http://127.0.0.1:($server.port)/ambiguous-selected"
+                    headers: {}
+                    body: null
+                    auth: {type: oauth2, ref: history-ambiguity, replayable: true}
+                }
+                response: {status: 200, status_text: "OK", headers: {}, body: null, time_ms: 1, size_bytes: 0}
+            } | to nuon | save -f ($ambiguity_dir | path join $"($id).nuon")
+        }
+        let index_path = ($root | path join "history" "index.nuon")
+        rm $index_path
+        let negative_output = ($root | path join "negative-history-export.json")
         let cases = [
             {command: "api collection create jsonplaceholder", expected: "Collection 'jsonplaceholder' already exists"}
             {command: "api collection show missing-valid-name", expected: "Collection 'missing-valid-name' not found"}
@@ -855,6 +876,8 @@ def test-public-command-error-contracts [] {
             {command: "api send missing-valid-name --collection jsonplaceholder --raw --no-history", expected: "Request 'missing-valid-name' not found"}
             {command: "api chain show missing-valid-name", expected: "Chain 'missing-valid-name' not found"}
             {command: "api history show missing-valid-name", expected: "History entry 'missing-valid-name' not found"}
+            {command: "api history show history-ambiguous", expected: "History ID 'history-ambiguous' is ambiguous (2 matches)"}
+            {command: "api history get history-ambiguous", expected: "History ID 'history-ambiguous' is ambiguous (2 matches)"}
             {command: "api auth oauth2 token missing-valid-name", expected: "OAuth2 'missing-valid-name' not configured"}
             {command: "api collection delete missing-valid-name --force", expected: "Collection 'missing-valid-name' not found"}
             {command: "api collection copy missing-valid-name target", expected: "Source collection 'missing-valid-name' not found"}
@@ -872,6 +895,10 @@ def test-public-command-error-contracts [] {
             {command: "api chain delete missing-valid-name --force", expected: "Chain 'missing-valid-name' not found"}
             {command: "api chain exec missing-valid-name --quiet", expected: "Chain file not found: missing-valid-name"}
             {command: "api history resend missing-valid-name --raw", expected: "History entry 'missing-valid-name' not found"}
+            {command: "api history resend history-ambiguous --raw", expected: "History ID 'history-ambiguous' is ambiguous (2 matches)"}
+            {command: "api history list --limit -1", expected: "History --limit must be non-negative, got -1"}
+            {command: "api history search anything --limit -1", expected: "History --limit must be non-negative, got -1"}
+            {command: $"api history export --limit -1 --output ($negative_output | to nuon)", expected: "History --limit must be non-negative, got -1"}
             {command: "api auth oauth2 refresh missing-valid-name", expected: "OAuth2 'missing-valid-name' not configured"}
             {command: "api auth oauth2 delete missing-valid-name", expected: "OAuth2 'missing-valid-name' not found"}
         ]
@@ -879,7 +906,10 @@ def test-public-command-error-contracts [] {
         for case in $cases {
             assert-public-command-error $root $case.command $case.expected
         }
-        assert equal (open $server.count_file --raw | str trim) "0" "missing request/config failures must not reach the local endpoint"
+        assert (not ($index_path | path exists)) "history errors rebuilt the missing index"
+        assert (not ($negative_output | path exists)) "negative history limit created export output"
+        assert equal (open $server.count_file --raw | str trim) "0" "logical failures acquired an OAuth2 token"
+        assert equal (command-error-wire-events $server | length) 0 "logical failures reached the local endpoint"
         null
     } catch {|error|
         $error

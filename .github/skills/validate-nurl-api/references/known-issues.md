@@ -183,3 +183,18 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run `tests/test_credential_boundaries.nu` and `tests/test_secure_header_capture.nu`;
   they exercise the live curl parser through typed/human/machine outputs, history/index/read/export,
   trailers, redirects, exact password-family names, and safe boundary lookalikes.
+
+## 20. Same-second history recency and partial IDs were nondeterministic  (FIXED)
+- **Symptom:** rapid saves shared a second-only timestamp, so list/search/rebuild order depended on a
+  random ID suffix, export used filename order, and an ambiguous partial ID silently selected one
+  entry. Negative limits leaked a low-level Nushell error.
+- **Fix:** new saves use monotonic nine-digit fractional RFC3339 UTC timestamps derived consistently
+  with their date directory and ID time component. One numeric newest-first ordering now drives the
+  index, list, search, rebuild, and JSON/CSV export. Exact IDs win; only unique prefix/middle/suffix
+  fragments resolve. Ambiguous fragments and negative limits use the shared clean error contract
+  before index, output, auth, network, or replay work. Legacy files remain unchanged and readable;
+  malformed timestamps sort deterministically last.
+- **Re-check:** run `tests/test_history.nu`, the history cases in `tests/test_command_errors.nu`, and
+  `tests/test_surface_contracts.nu`; they cover ten-entry no-sleep bursts, rebuilds, mixed/tied/
+  malformed timestamps, every export/limit surface, exact/unique/ambiguous IDs, and zero endpoint or
+  OAuth events on ambiguity.

@@ -14,6 +14,38 @@ def synth-res [status: int = 200] {
     {status: $status, status_text: (http-status-text $status), headers: {}, body: null, time_ms: 100, size_bytes: 50}
 }
 
+def history-fixture [id: string, timestamp: any, url: string] {
+    mut entry = {
+        id: $id
+        timestamp: $timestamp
+        environment: null
+        request: {method: "GET", url: $url, headers: {}, body: null}
+        response: {status: 200, status_text: "OK", headers: {}, body: {fixture: $id}, time_ms: 1, size_bytes: 1}
+    }
+    if $timestamp == null {
+        $entry = ($entry | reject timestamp)
+    }
+    $entry
+}
+
+def save-history-fixture [root: string, date_dir: string, entry: record] {
+    let dir = ($root | path join "history" $date_dir)
+    if not ($dir | path exists) { mkdir $dir }
+    $entry | to nuon | save -f ($dir | path join $"($entry.id).nuon")
+}
+
+def history-summary [entry: record, date_dir: string] {
+    {
+        id: $entry.id
+        timestamp: ($entry.timestamp? | default "")
+        method: $entry.request.method
+        url: $entry.request.url
+        status: $entry.response.status
+        time_ms: $entry.response.time_ms
+        date_dir: $date_dir
+    }
+}
+
 # -- B1: history index is maintained --------------------------------------------------
 
 def test-b1-index-created-on-save [] {
@@ -46,13 +78,12 @@ def test-b1-history-list-newest-first [] {
     let tmp = (make-temp-dir "b1-order")
     $env.API_ROOT = $tmp
     init-workspace
-    api history save (synth-req "https://example.com/posts/1") (synth-res 200)
-    sleep 1sec
-    api history save (synth-req "https://example.com/posts/2") (synth-res 200)
+    let first_id = (api history save (synth-req "https://example.com/posts/1") (synth-res 200))
+    let second_id = (api history save (synth-req "https://example.com/posts/2") (synth-res 200))
     let hist = (api history list -l 5)
     assert (($hist | length) >= 2) "should have at least 2 history entries"
-    let first_url = ($hist | first | get url)
-    assert ($first_url | str ends-with "/posts/2") ("Newest entry should be /posts/2, got: " + $first_url)
+    assert equal ($hist | get id | first) $second_id "newest entry should be the final persisted ID"
+    assert equal ($hist | get id | last) $first_id "oldest entry should be the first persisted ID"
     cleanup $tmp
 }
 
@@ -115,15 +146,142 @@ def test-b1-index-sorted-after-rebuild [] {
     let tmp = (make-temp-dir "b1-sorted")
     $env.API_ROOT = $tmp
     init-workspace
-    api history save (synth-req "https://example.com/posts/1") (synth-res 200)
-    sleep 1sec
-    api history save (synth-req "https://example.com/posts/2") (synth-res 200)
+    let first_id = (api history save (synth-req "https://example.com/posts/1") (synth-res 200))
+    let second_id = (api history save (synth-req "https://example.com/posts/2") (synth-res 200))
     api history rebuild-index
     let hist = (api history list -l 5)
     assert (($hist | length) >= 2)
-    let first_url = ($hist | first | get url)
-    let msg = "After rebuild, newest should be /posts/2, got: " + $first_url
-    assert ($first_url | str ends-with "/posts/2") $msg
+    assert equal ($hist | get id) [$second_id $first_id] "rebuild should preserve persistence order"
+    cleanup $tmp
+}
+
+def test-b1-burst-order-is-deterministic [] {
+    let tmp = (make-temp-dir "b1-burst")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let config_path = ($tmp | path join "config.nuon")
+    open $config_path | upsert default_environment "burst-env" | to nuon | save -f $config_path
+
+    let ids = 1..10 | each {|n|
+        api history save (synth-req $"https://example.com/request-($n)") (synth-res 200)
+    }
+    let expected = ($ids | reverse)
+    let entries = $ids | each {|id| api history get $id }
+    let instants = $entries | each {|entry| $entry.timestamp | into datetime | into int }
+    let index_path = ($tmp | path join "history" "index.nuon")
+    let index_before = (open $index_path --raw)
+
+    assert equal ($instants | uniq | length) 10 "burst timestamps must be unique"
+    assert equal $instants ($instants | sort) "burst timestamps must increase with persistence order"
+    assert ($entries | all {|entry| $entry.timestamp =~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$' }) "new timestamps must be nanosecond RFC3339 UTC"
+    assert ($entries | all {|entry| $entry.environment == "burst-env" }) "isolated default environment was not captured"
+
+    for entry in $entries {
+        let instant = ($entry.timestamp | into datetime | date to-timezone UTC)
+        let expected_date = ($instant | format date "%Y-%m-%d")
+        let expected_id_prefix = ($instant | format date "%Y%m%d-%H%M%S")
+        assert ($entry.id | str starts-with $expected_id_prefix) "ID time component did not use the persisted instant"
+        assert (($tmp | path join "history" $expected_date $"($entry.id).nuon") | path exists) "date directory did not use the persisted instant"
+    }
+
+    assert equal (api history list --limit 1 | get id | first) ($ids | last) "--limit 1 did not select the final persisted entry"
+    assert equal (api history list --limit 10 | get id) $expected "list order differs from reverse insertion order"
+    assert equal (api history list --limit 1000 | get id) $expected "overlarge list limit did not return all entries"
+    assert equal (api history list --limit 0 | length) 0 "zero list limit must select no entries"
+    let search_results = (api history search "request-" --limit 10)
+    assert equal ($search_results | get id) $expected "search order differs from list order"
+    assert ($search_results | all {|entry| $entry.timestamp =~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' }) "search timestamps must remain well-formed RFC3339"
+    assert equal (api history search "request-" --limit 1 | get id | first) ($ids | last) "search --limit 1 did not select the final entry"
+    assert equal (api history search "request-" --limit 0 | length) 0 "zero search limit must select no entries"
+    assert equal (open $index_path | get id) $expected "index order differs from list order"
+    assert equal (open $index_path --raw) $index_before "list/search unexpectedly rewrote the index"
+
+    rm $index_path
+    api history rebuild-index | ignore
+    assert equal (api history list --limit 10 | get id) $expected "rebuild changed burst list order"
+    assert equal (api history search "request-" --limit 10 | get id) $expected "rebuild changed burst search order"
+    cleanup $tmp
+}
+
+def test-b1-clock-collision-boundary-consistency [] {
+    let tmp = (make-temp-dir "b1-boundary")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let existing = (history-fixture "20991231-235959-existing" "2099-12-31T23:59:59.999999999Z" "https://example.com/boundary-existing")
+    save-history-fixture $tmp "2099-12-31" $existing
+    api history rebuild-index | ignore
+
+    let id = (api history save (synth-req "https://example.com/boundary-new") (synth-res 200))
+    let entry = (api history get $id)
+    assert equal $entry.timestamp "2100-01-01T00:00:00.000000000Z" "colliding/backward clock did not advance by one nanosecond"
+    assert ($id | str starts-with "21000101-000000-") "boundary ID did not use the advanced persistence instant"
+    assert (($tmp | path join "history" "2100-01-01" $"($id).nuon") | path exists) "boundary entry used an inconsistent date directory"
+    assert equal (api history list --limit 1 | get id | first) $id "boundary entry was not newest"
+    cleanup $tmp
+}
+
+def test-b1-mixed-and-malformed-timestamps [] {
+    let tmp = (make-temp-dir "b1-mixed")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let date_dir = "2026-01-01"
+    let fixtures = [
+        (history-fixture "fractional-newest" "2026-01-01T00:00:01.100000000Z" "https://example.com/mixed/fractional-newest")
+        (history-fixture "legacy-newest" "2026-01-01T00:00:01Z" "https://example.com/mixed/legacy-newest")
+        (history-fixture "fractional-older" "2026-01-01T00:00:00.900000000Z" "https://example.com/mixed/fractional-older")
+        (history-fixture "tied-z" "2026-01-01T00:00:00Z" "https://example.com/mixed/tied-z")
+        (history-fixture "tied-a" "2026-01-01T00:00:00Z" "https://example.com/mixed/tied-a")
+        (history-fixture "date-only-z" "2026-01-01" "https://example.com/mixed/date-only-z")
+        (history-fixture "invalid-z" "not-a-timestamp" "https://example.com/mixed/invalid-z")
+        (history-fixture "invalid-a" null "https://example.com/mixed/invalid-a")
+    ]
+    for entry in $fixtures { save-history-fixture $tmp $date_dir $entry }
+
+    let preferred = ["fractional-newest" "legacy-newest" "fractional-older" "tied-z" "tied-a" "date-only-z" "invalid-z" "invalid-a"]
+    ($preferred | append "tied-z")
+    | each {|id| history-summary ($fixtures | where id == $id | first) $date_dir }
+    | to nuon
+    | save -f ($tmp | path join "history" "index.nuon")
+
+    api history rebuild-index | ignore
+    assert equal (api history list --limit 20 | get id) $preferred "rebuild did not preserve existing order for tied timestamps"
+    assert equal (api history search "mixed" --limit 20 | get id) $preferred "mixed timestamp search order differed from list"
+    assert equal (api history show "invalid-z").id "invalid-z" "malformed timestamp entry was not readable"
+    assert equal (api history get "invalid-a").id "invalid-a" "missing timestamp entry was not readable"
+    assert equal (api history list --limit 20 | where id == "invalid-a" | first | get timestamp) "" "missing timestamp did not render safely"
+
+    let index_path = ($tmp | path join "history" "index.nuon")
+    rm $index_path
+    api history rebuild-index | ignore
+    let fallback = ["fractional-newest" "legacy-newest" "fractional-older" "tied-a" "tied-z" "date-only-z" "invalid-a" "invalid-z"]
+    assert equal (api history list --limit 20 | get id) $fallback "index-free rebuild fallback was not deterministic"
+    assert equal (api history search "mixed" --limit 20 | get id) $fallback "fallback search order differed from list"
+    cleanup $tmp
+}
+
+def test-b1-history-id-resolution [] {
+    let tmp = (make-temp-dir "b1-resolution")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let fixtures = [
+        (history-fixture "shared" "2026-01-01T00:00:03Z" "https://example.com/exact")
+        (history-fixture "prefix-shared-suffix" "2026-01-01T00:00:02Z" "https://example.com/partial")
+        (history-fixture "prefix-unique-target-suffix" "2026-01-01T00:00:01Z" "https://example.com/unique")
+        (history-fixture "history-shared-one" "2026-01-01T00:00:00Z" "https://example.com/ambiguous-one")
+        (history-fixture "history-shared-two" "2026-01-01T00:00:00Z" "https://example.com/ambiguous-two")
+    ]
+    for entry in $fixtures { save-history-fixture $tmp "2026-01-01" $entry }
+
+    assert equal (api history get "shared").id "shared" "exact ID did not win over partial matches"
+    assert equal (api history show "prefix-unique").id "prefix-unique-target-suffix" "unique prefix lookup changed"
+    assert equal (api history get "unique-target").id "prefix-unique-target-suffix" "unique middle lookup changed"
+    assert equal (api history show "target-suffix").id "prefix-unique-target-suffix" "unique suffix lookup changed"
+
+    let ambiguity = try {
+        api history get "history-shared" | ignore
+        null
+    } catch {|error| $error.msg }
+    assert ($ambiguity | str contains "is ambiguous (2 matches); use a longer or exact ID") "internal get did not reject ambiguity actionably"
     cleanup $tmp
 }
 
@@ -141,5 +299,9 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: method token filtering is literal and case-insensitive" { test-b1-history-method-filter-treats-token-literally })
         (run-test "B1: rebuild-index recreates index.nuon"          { test-b1-rebuild-index })
         (run-test "B1: rebuilt index preserves newest-first order"  { test-b1-index-sorted-after-rebuild })
+        (run-test "B1: ten-entry burst is deterministic before and after rebuild" { test-b1-burst-order-is-deterministic })
+        (run-test "B1: clock collision keeps timestamp, ID, and date directory consistent" { test-b1-clock-collision-boundary-consistency })
+        (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
+        (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
     ]
 }
