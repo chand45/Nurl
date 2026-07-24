@@ -139,6 +139,7 @@ def get-secrets [] {
     } else {
         {
             tokens: {}
+            saml_tokens: {}
             oauth: {}
             api_keys: {}
             basic_auth: {}
@@ -337,6 +338,13 @@ export def "api vars list" [
         if not ($secrets.api_keys | is-empty) {
             $result = ($result | append ($secrets.api_keys | transpose name value | each {|row|
                 { name: $"{{api_key_($row.name)}}", value: "***", type: "secret", description: "API key" }
+            }))
+        }
+
+        let saml_tokens = ($secrets.saml_tokens? | default {})
+        if not ($saml_tokens | is-empty) {
+            $result = ($result | append ($saml_tokens | transpose name value | each {|row|
+                { name: $"{{saml_token_($row.name)}}", value: "***", type: "secret", description: "SAML token" }
             }))
         }
     }

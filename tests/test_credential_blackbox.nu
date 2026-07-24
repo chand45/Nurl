@@ -472,6 +472,77 @@ def test-blackbox-literal-name-policy [] {
     }
 }
 
+def test-blackbox-saml-subprocess-boundary [] {
+    with-blackbox-server "saml" {|root, server|
+        blackbox-init $root
+        let base = $"http://127.0.0.1:($server.port)"
+        let scheme = "http://schemas.microsoft.com/dsts/saml2-bearer"
+        let token = (blackbox-secret "SAML")
+        let setup = (run-command-process $root $"api auth saml set bb-saml ($token | to nuon)")
+        assert-blackbox-success $setup "SAML setup" [$token] --allow-ansi
+        assert equal ($setup.stdout | ansi strip | str trim) "SAML token 'bb-saml' saved"
+
+        let get = (run-command-process $root "api auth saml get bb-saml")
+        assert equal $get.exit_code 0
+        assert equal ($get.stdout | str trim) $token
+        assert equal ($get.stderr | str trim) ""
+        let listed = (run-command-process $root "api auth list | where name == bb-saml | to json --raw")
+        assert-blackbox-success $listed "SAML list" [$token]
+        assert equal ($listed.stdout | str trim | from json) [[name, type]; [bb-saml, saml]]
+        let shown = (run-command-process $root "api auth show | where name == bb-saml | to json --raw")
+        assert-blackbox-success $shown "SAML masked show" [$token]
+        assert equal ($shown.stdout | str trim | from json) [[name, type, status, value]; [bb-saml, saml, configured, "******"]]
+
+        let before_preview = (command-error-snapshot $root)
+        let preview = (run-command-process $root $"api request -m GET (($base + '/saml-preview') | to nuon) --auth {type: saml, token_ref: bb-saml} --dry-run")
+        assert-blackbox-preview $preview "SAML dry-run" [$token $scheme] ["Authorization: ******"]
+        assert equal (command-error-snapshot $root) $before_preview "SAML dry-run mutated state"
+        assert equal (command-error-wire-events $server | length) 0
+
+        let execution = (run-command-process $root $"api get (($base + '/saml-wire') | to nuon) --auth {type: saml, ref: bb-saml} --output none")
+        assert-blackbox-success $execution "SAML execution" [$token]
+        let event = (command-error-wire-events $server | where path == "/saml-wire" | first)
+        assert equal $event.authorization $"($scheme) ($token)"
+        assert-blackbox-no-values (blackbox-history-bytes $root) [$token] "SAML history bytes"
+        assert ((blackbox-history-bytes $root) | str contains "type: saml")
+        assert ((blackbox-history-bytes $root) | str contains "replayable: true")
+
+        for case in [
+            {
+                label: "missing SAML reference"
+                command: $"api get (($base + '/saml-missing') | to nuon) --auth {type: saml, ref: missing-saml} --output none"
+                expected: "SAML token 'missing-saml' not found"
+            }
+            {
+                label: "CRLF SAML token"
+                command: "api auth saml set invalid-saml ('bad' + (char cr) + (char nl) + 'token')"
+                expected: "SAML token must not contain CR or LF"
+            }
+        ] {
+            let before = (command-error-snapshot $root)
+            let wire_before = (command-error-wire-events $server | length)
+            let result = (run-command-process $root $case.command)
+            assert equal $result.exit_code 1 $"($case.label) returned the wrong exit code"
+            assert equal $result.stdout "" $"($case.label) wrote stdout"
+            assert ($result.stderr | str contains $case.expected) $"($case.label) omitted its safe error"
+            assert equal $result.stderr ($result.stderr | ansi strip) $"($case.label) stderr contained ANSI"
+            assert-blackbox-no-values $result.stderr [$token $scheme] $case.label
+            assert equal (command-error-snapshot $root) $before $"($case.label) mutated state"
+            assert equal (command-error-wire-events $server | length) $wire_before $"($case.label) reached the server"
+        }
+
+        let deleted = (run-command-process $root "api auth saml delete bb-saml")
+        assert-blackbox-success $deleted "SAML delete" [$token] --allow-ansi
+        assert equal ($deleted.stdout | ansi strip | str trim) "SAML token 'bb-saml' deleted"
+        let missing_get = (run-command-process $root "api auth saml get bb-saml")
+        assert-blackbox-success $missing_get "missing SAML get" [$token]
+        assert equal $missing_get.stdout ""
+        let missing_delete = (run-command-process $root "api auth saml delete bb-saml")
+        assert-blackbox-success $missing_delete "missing SAML delete" [$token] --allow-ansi
+        assert equal ($missing_delete.stdout | ansi strip | str trim) "SAML token 'bb-saml' not found"
+    }
+}
+
 export def run-suite-credential-blackbox []: nothing -> list<record> {
     print "\n=== Credential Black-box Safety Tests ==="
     [
@@ -483,5 +554,6 @@ export def run-suite-credential-blackbox []: nothing -> list<record> {
         (run-test "black-box direct history save rejects missing and malformed refs atomically" { test-blackbox-invalid-history-refs })
         (run-test "black-box invalid OAuth obtain and refresh responses fail atomically" { test-blackbox-invalid-oauth-responses })
         (run-test "black-box literal URL and header name policy has exact boundaries" { test-blackbox-literal-name-policy })
+        (run-test "black-box SAML subprocess previews, wire auth, and history stay secret-safe" { test-blackbox-saml-subprocess-boundary })
     ]
 }

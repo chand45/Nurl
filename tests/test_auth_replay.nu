@@ -1704,6 +1704,511 @@ def test-authenticated-output-contracts [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-saml-auth-execution-replay-and-saved-put [] {
+    let root = (make-temp-dir "saml-auth")
+    let infra = (make-temp-dir "saml-auth-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let scheme = "http://schemas.microsoft.com/dsts/saml2-bearer"
+        let token_a = "SAML-NAMED-A-SENTINEL"
+        let token_b = "SAML-NAMED-B-SENTINEL"
+        let override_token = "SAML-OVERRIDE-SENTINEL"
+        let inline_token = "SAML-INLINE-SENTINEL"
+        let variable_token = "SAML-VARIABLE-MUST-NOT-WIN"
+        let environment_token = "SAML-ENVIRONMENT-MUST-NOT-WIN"
+        let bearer_token = "BEARER-SAME-NAME-SENTINEL"
+        let secrets = [$token_a $token_b $override_token $inline_token $bearer_token]
+        let non_wire_values = [$variable_token $environment_token]
+
+        api auth bearer set samltoken $bearer_token | ignore
+        api auth saml set samltoken $token_a | ignore
+        api auth saml set saml-override $override_token | ignore
+        assert equal (api auth saml get samltoken) $token_a
+        assert equal ((api auth list | where name == samltoken | get type | sort)) ["bearer" "saml"]
+        let shown = (api auth show --full | where name == samltoken and type == saml | first)
+        assert equal $shown {name: samltoken, type: saml, status: configured, value: $token_a}
+        let masked = (api auth show | where name == samltoken and type == saml | first)
+        assert equal $masked {name: samltoken, type: saml, status: configured, value: "******"}
+
+        let before_generic = (auth-history-ids)
+        let generic = (api request -m GET $"($base)/saml-generic" --auth {type: "SaMl", token_ref: samltoken} --raw)
+        assert equal $generic.response.status 200
+        assert (not (($generic | to nuon) | str contains $token_a))
+        assert (not (($generic | to nuon) | str contains $scheme))
+        assert equal (command-error-wire-events $server | where path == "/saml-generic" | first | get authorization) $"($scheme) ($token_a)"
+        let named_history = (auth-new-history $before_generic)
+        assert-history-auth $named_history "saml" "samltoken" $secrets
+
+        api auth saml set samltoken $token_b | ignore
+        let before_replay = (auth-history-ids)
+        api history resend $named_history.id --raw | ignore
+        assert equal (command-error-wire-events $server | where path == "/saml-generic" | last | get authorization) $"($scheme) ($token_b)"
+        assert-history-auth (auth-new-history $before_replay) "saml" "samltoken" $secrets
+
+        let before_override = (auth-history-ids)
+        api history resend $named_history.id --auth {type: saml, ref: saml-override} --raw | ignore
+        assert equal (command-error-wire-events $server | where path == "/saml-generic" | last | get authorization) $"($scheme) ($override_token)"
+        assert-history-auth (auth-new-history $before_override) "saml" "saml-override" $secrets
+
+        let binary_path = ($root | path join "saml-response.bin")
+        api get $"($base)/saml-binary" --auth {type: saml, ref: samltoken} --binary-save $binary_path --output none --no-history
+        assert ($binary_path | path exists)
+        assert equal (command-error-wire-events $server | where path == "/saml-binary" | first | get authorization) $"($scheme) ($token_b)"
+
+        let before_chain = (auth-history-ids)
+        api chain run ([{
+            method: GET
+            url: $"($base)/saml-chain"
+            auth: {type: saml, ref: samltoken}
+        }]) --quiet | ignore
+        assert equal (command-error-wire-events $server | where path == "/saml-chain" | first | get authorization) $"($scheme) ($token_b)"
+        assert-history-auth (auth-new-history $before_chain) "saml" "samltoken" $secrets
+
+        api collection create saml-saved | ignore
+        api vars set base_url $"($base)/global-must-not-win" | ignore
+        api vars set fault_id 1 | ignore
+        api vars set fault_name global-default | ignore
+        api collection env create saml-saved active --activate | ignore
+        api collection env set saml-saved base_url $"($base)/environment" | ignore
+        api collection env set saml-saved fault_id 2 | ignore
+        api collection env set saml-saved fault_name environment-default | ignore
+        api collection env set saml-saved samltoken $environment_token | ignore
+        let template_url = "{{base_url}}/fault-plans/{{fault_id}}"
+        let template_body = {fault: "{{fault_name}}", enabled: true}
+        let saved_auth = {type: saml, token_ref: samltoken}
+        api request create RegisterFaultPlan PUT $template_url --body $template_body --auth $saved_auth --collection saml-saved | ignore
+        let saved = (api request show RegisterFaultPlan --collection saml-saved)
+        assert equal $saved.method "PUT"
+        assert equal $saved.url $template_url
+        assert equal $saved.body.content $template_body
+        assert equal $saved.auth $saved_auth
+
+        let before_saved = (auth-history-ids)
+        let saved_result = (api send RegisterFaultPlan --collection saml-saved --vars {
+            fault_id: 42
+            fault_name: planned
+            samltoken: $variable_token
+        } --raw)
+        assert equal $saved_result.request.method "PUT"
+        assert equal $saved_result.request.url $"($base)/environment/fault-plans/42"
+        assert equal $saved_result.request.body {fault: planned, enabled: true}
+        let saved_wire = (command-error-wire-events $server | where path == "/environment/fault-plans/42" | first)
+        assert equal $saved_wire.authorization $"($scheme) ($token_b)"
+        assert-history-auth (auth-new-history $before_saved) "saml" "samltoken" $secrets
+
+        api send RegisterFaultPlan --collection saml-saved --vars {fault_id: 44, fault_name: override} --auth {type: saml, ref: saml-override} --output none --no-history
+        assert equal (command-error-wire-events $server | where path == "/environment/fault-plans/44" | first | get authorization) $"($scheme) ($override_token)"
+
+        let text_output = ($root | path join "saml-dry-run.txt")
+        let binary_output = ($root | path join "saml-dry-run.bin")
+        "TEXT-UNCHANGED" | save $text_output
+        "BINARY-UNCHANGED" | save $binary_output
+        let preview_before = (command-error-snapshot $root)
+        let preview_wire_before = (command-error-wire-events $server | length)
+        let preview_cases = [
+            {
+                label: "generic SAML dry-run"
+                command: $"api request -m PUT (($base + '/saml-preview') | to nuon) --body {ok: true} --auth {type: saml, ref: samltoken} --save ($text_output | to nuon) --binary-save ($binary_output | to nuon) --dry-run"
+                expected: ["-X PUT" "/saml-preview" '"ok":true']
+            }
+            {
+                label: "saved SAML dry-run"
+                command: "api send RegisterFaultPlan --collection saml-saved --vars {fault_id: 43, fault_name: preview} --dry-run"
+                expected: ["-X PUT" "/environment/fault-plans/43" '"fault":"preview"' '"enabled":true']
+            }
+            {
+                label: "saved SAML export"
+                command: "api request export RegisterFaultPlan --collection saml-saved"
+                expected: ["-X PUT" "/environment/fault-plans/2" '"fault":"environment-default"' '"enabled":true']
+            }
+            {
+                label: "history SAML dry-run"
+                command: $"api history resend ($named_history.id | to nuon) --dry-run"
+                expected: ["-X GET" "/saml-generic"]
+            }
+        ]
+        for case in $preview_cases {
+            let preview = (run-command-process $root $case.command)
+            assert-safe-preview $preview $case.label ($secrets | append $non_wire_values) (["Authorization: ******"] | append $case.expected)
+            assert (not ($preview.stdout | str contains $scheme)) $"($case.label) exposed the SAML scheme"
+        }
+        assert equal (command-error-snapshot $root) $preview_before "SAML previews mutated workspace state"
+        assert equal (command-error-wire-events $server | length) $preview_wire_before "SAML previews reached the server"
+        assert equal (open $text_output --raw) "TEXT-UNCHANGED"
+        assert equal (open $binary_output --raw) "BINARY-UNCHANGED"
+
+        let before_inline = (auth-history-ids)
+        api post $"($base)/saml-inline" --body {ok: true} --auth {type: saml, token: $inline_token} --raw | ignore
+        assert equal (command-error-wire-events $server | where path == "/saml-inline" | first | get authorization) $"($scheme) ($inline_token)"
+        let inline_history = (auth-new-history $before_inline)
+        assert equal $inline_history.request.auth {type: saml, replayable: false}
+        assert (not (($inline_history | to nuon) | str contains $inline_token))
+
+        let rejected_before = (command-error-snapshot $root)
+        let rejected_wire_before = (command-error-wire-events $server | length)
+        let rejected = (run-command-process $root $"api history resend ($inline_history.id | to nuon) --raw")
+        assert ($rejected.exit_code != 0)
+        assert equal ($rejected.stdout | str trim) ""
+        assert ($rejected.stderr | str contains "pass --auth")
+        assert equal $rejected.stderr ($rejected.stderr | ansi strip)
+        assert (not ($rejected.stderr | str contains $inline_token))
+        assert equal (command-error-snapshot $root) $rejected_before
+        assert equal (command-error-wire-events $server | length) $rejected_wire_before
+        api history resend $inline_history.id --auth {type: saml, ref: saml-override} --raw | ignore
+        assert equal (command-error-wire-events $server | where path == "/saml-inline" | last | get authorization) $"($scheme) ($override_token)"
+
+        let output_auth = {type: saml, ref: samltoken}
+        assert equal (api get $"($base)/saml-status" --auth $output_auth --output status --no-history) 200
+        assert equal (api get $"($base)/saml-body" --auth $output_auth --output body --no-history) {ok: true}
+        assert ((api get $"($base)/saml-headers" --auth $output_auth --output headers --no-history | describe) | str starts-with "record")
+        assert equal (api get $"($base)/saml-select" --auth $output_auth --select status --no-history) 200
+        let raw_output = (api get $"($base)/saml-raw" --auth $output_auth --output raw --no-history)
+        assert (not ($raw_output | str contains $token_b))
+        let json_output = (api get $"($base)/saml-json" --auth $output_auth --output json --no-history)
+        assert (not ($json_output | str contains $token_b))
+        assert (not ($json_output | str contains $scheme))
+        api get $"($base)/saml-none" --auth $output_auth --output none --no-history
+        for case in [
+            {label: default, options: ""}
+            {label: verbose, options: "--verbose"}
+            {label: debug, options: "--debug"}
+        ] {
+            let rendered = (run-command-process $root $"api get (($base + '/saml-' + $case.label) | to nuon) --auth {type: saml, ref: samltoken} --no-history ($case.options)")
+            assert equal $rendered.exit_code 0 $"SAML ($case.label) output failed: ($rendered.stderr)"
+            assert equal ($rendered.stderr | str trim) ""
+            assert (not ($"($rendered.stdout)\n($rendered.stderr)" | str contains $token_b))
+        }
+
+        let json_export = ($root | path join "saml-history.json")
+        let csv_export = ($root | path join "saml-history.csv")
+        api history export --format json --output $json_export | ignore
+        api history export --format csv --output $csv_export | ignore
+        let json_bytes = (open $json_export --raw)
+        let csv_bytes = (open $csv_export --raw)
+        assert ($json_bytes | str contains '"type": "saml"')
+        assert ($json_bytes | str contains '"replayable": true')
+        assert equal ($csv_bytes | lines | first) "id,timestamp,method,url,status,time_ms"
+        for value in ($secrets | append $non_wire_values) {
+            assert (not ($json_bytes | str contains $value))
+            assert (not ($csv_bytes | str contains $value))
+        }
+        let history_readers = [
+            $"api history get ($named_history.id | to nuon) | get request.auth | to json --raw"
+            $"api history show ($named_history.id | to nuon) | to nuon"
+            "api history list | to nuon"
+            "api history search saml | to nuon"
+        ]
+        for command in $history_readers {
+            let reader = (run-command-process $root $command)
+            assert equal $reader.exit_code 0 $"SAML history reader failed: ($reader.stderr)"
+            assert equal ($reader.stderr | str trim) ""
+            for secret in $secrets {
+                assert (not ($reader.stdout | str contains $secret)) "SAML history reader exposed a credential"
+            }
+            assert (not ($reader.stdout | str contains $scheme)) "SAML history reader exposed the wire scheme"
+        }
+        let canonical_auth = (run-command-process $root $"api history get ($named_history.id | to nuon) | get request.auth | to json --raw")
+        assert equal ($canonical_auth.stdout | str trim | from json) {type: saml, ref: samltoken, replayable: true}
+        let rebuild = (run-command-process $root "api history rebuild-index | ignore")
+        assert equal $rebuild.exit_code 0 $"SAML history index rebuild failed: ($rebuild.stderr)"
+        assert equal ($rebuild.stderr | str trim) ""
+        let index_bytes = (open ($root | path join "history" "index.nuon") --raw)
+        for secret in $secrets {
+            assert (not ($index_bytes | str contains $secret)) "SAML history index exposed a credential"
+        }
+        assert (not ($index_bytes | str contains $scheme)) "SAML history index exposed the wire scheme"
+        let public_state = (
+            command-error-snapshot $root
+            | where {|entry| not ($entry.path | str ends-with "secrets.nuon") }
+            | get content
+            | compact
+            | str join "\n"
+        )
+        for secret in $secrets {
+            assert (not ($public_state | str contains $secret)) "SAML credential escaped the secret store"
+        }
+        let saml_wire_events = (command-error-wire-events $server | where {|event| $event.authorization | str starts-with $scheme })
+        assert (($saml_wire_events | length) >= 10) "SAML wire-cardinality check did not observe the exercised request paths"
+        for event in $saml_wire_events {
+            assert equal ($event.authorization_count | into int) 1 $"SAML request emitted duplicate Authorization headers: ($event.path)"
+        }
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
+def test-saml-store-migration-vars-and-invalid-inputs [] {
+    let root = (make-temp-dir "saml-store")
+    let infra = (make-temp-dir "saml-store-server")
+    let server = (auth-test-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        mkdir $root
+        let base = $"http://127.0.0.1:($server.port)"
+        let secrets_path = ($root | path join "secrets.nuon")
+        {
+            tokens: {legacy-bearer: {bearer: legacy}}
+            oauth: {}
+            api_keys: {}
+            basic_auth: {}
+            unknown_bucket: {preserve: exact}
+        } | to nuon --indent 4 | save $secrets_path
+        api init | ignore
+        let legacy_bytes = (open $secrets_path --raw)
+
+        api auth list | ignore
+        api auth show | ignore
+        api vars list --include-secrets | ignore
+        assert equal (open $secrets_path --raw) $legacy_bytes "legacy secret reads rewrote the store"
+
+        api auth bearer set second-bearer second | ignore
+        let after_bearer = (open $secrets_path)
+        assert ("saml_tokens" not-in ($after_bearer | columns)) "non-SAML mutation eagerly added the SAML bucket"
+        assert equal $after_bearer.unknown_bucket {preserve: exact}
+        assert equal $after_bearer.tokens.legacy-bearer.bearer legacy
+
+        let valid_token = "SAML-STORE-VALID-SENTINEL"
+        api auth saml set legacy-saml $valid_token | ignore
+        let migrated = (open $secrets_path)
+        assert equal $migrated.saml_tokens.legacy-saml.token $valid_token
+        assert equal $migrated.unknown_bucket {preserve: exact}
+        assert equal $migrated.tokens.legacy-bearer.bearer legacy
+        assert equal (api auth saml get legacy-saml) $valid_token
+        assert equal (api auth list | where name == legacy-saml | first) {name: legacy-saml, type: saml}
+        assert equal (api auth show --full | where name == legacy-saml | first) {name: legacy-saml, type: saml, status: configured, value: $valid_token}
+
+        let secret_vars = (api vars list --include-secrets --full | where name == "{{saml_token_legacy-saml}}")
+        assert equal ($secret_vars | length) 1
+        assert equal ($secret_vars | first | get value) "***"
+        assert equal ($secret_vars | first | get type) "secret"
+        assert equal (api vars interpolate "{{saml_token_legacy-saml}}") "{{saml_token_legacy-saml}}"
+        assert ("saml_token_legacy-saml" not-in (api vars get-merged | columns))
+
+        api auth saml delete legacy-saml | ignore
+        assert equal (api auth saml get legacy-saml) null
+        let missing_delete = (run-command-process $root "api auth saml delete legacy-saml")
+        assert equal $missing_delete.exit_code 0
+        assert ($missing_delete.stdout | str contains "not found")
+
+        api auth saml set deleted-saml deleted | ignore
+        api auth saml delete deleted-saml | ignore
+        api auth saml set valid-saml $valid_token | ignore
+        let malformed = (
+            open $secrets_path
+            | update saml_tokens (
+                $in.saml_tokens
+                | upsert malformed-saml {token: 42}
+                | upsert malformed-record-saml 42
+                | upsert missing-token-saml {}
+                | upsert empty-saml {token: ""}
+                | upsert crlf-saml {token: "MALFORMED\r\nTOKEN"}
+                | upsert scheme-only-saml {token: "http://schemas.microsoft.com/dsts/saml2-bearer"}
+                | upsert prefixed-saml {token: "http://schemas.microsoft.com/dsts/saml2-bearer PREFIXED"}
+            )
+        )
+        $malformed | to nuon --indent 4 | save -f $secrets_path
+
+        api collection create invalid-saml | ignore
+        api request create deleted-saved GET $"($base)/deleted-saved" --collection invalid-saml --auth {type: saml, token_ref: deleted-saml} | ignore
+        assert equal (api request show deleted-saved --collection invalid-saml | get auth) {type: saml, token_ref: deleted-saml}
+
+        let output_path = ($root | path join "saml-invalid.bin")
+        "OUTPUT-UNCHANGED" | save $output_path
+        let crlf_ref = "bad\r\nref"
+        let crlf_token = "INLINE\r\nSENTINEL"
+        let scheme_only_token = "http://schemas.microsoft.com/dsts/saml2-bearer"
+        let prefixed_token = "http://schemas.microsoft.com/dsts/saml2-bearer INLINE-PREFIXED-SENTINEL"
+        let leading_prefixed_token = "  http://schemas.microsoft.com/dsts/saml2-bearer INLINE-LEADING-PREFIXED-SENTINEL"
+        let cases = [
+            {
+                label: "missing SAML ref"
+                command: $"api request -m GET (($base + '/missing') | to nuon) --auth {type: saml, ref: missing-saml} --output none"
+                expected: "SAML token 'missing-saml' not found"
+            }
+            {
+                label: "deleted saved SAML ref"
+                command: "api send deleted-saved --collection invalid-saml --output none"
+                expected: "SAML token 'deleted-saml' not found"
+            }
+            {
+                label: "malformed SAML ref"
+                command: $"api get (($base + '/malformed') | to nuon) --auth {type: saml, ref: malformed-saml} --binary-save ($output_path | to nuon) --output none"
+                expected: "SAML token 'malformed-saml' is malformed"
+            }
+            {
+                label: "malformed SAML get"
+                command: "api auth saml get malformed-saml"
+                expected: "SAML token 'malformed-saml' is malformed"
+            }
+            {
+                label: "non-record SAML get"
+                command: "api auth saml get malformed-record-saml"
+                expected: "SAML token 'malformed-record-saml' is malformed"
+            }
+            {
+                label: "missing-token SAML record"
+                command: $"api get (($base + '/missing-token-record') | to nuon) --auth {type: saml, ref: missing-token-saml} --output none"
+                expected: "SAML token 'missing-token-saml' is malformed"
+            }
+            {
+                label: "empty stored SAML token"
+                command: $"api get (($base + '/empty-stored') | to nuon) --auth {type: saml, ref: empty-saml} --output none"
+                expected: "SAML token 'empty-saml' is malformed"
+            }
+            {
+                label: "CRLF stored SAML token"
+                command: $"api get (($base + '/crlf') | to nuon) --auth {type: saml, ref: crlf-saml} --output none"
+                expected: "SAML token 'crlf-saml' is malformed"
+            }
+            {
+                label: "scheme-only stored SAML token"
+                command: $"api get (($base + '/scheme-only-stored') | to nuon) --auth {type: saml, ref: scheme-only-saml} --output none"
+                expected: "SAML token 'scheme-only-saml' is malformed"
+            }
+            {
+                label: "prefixed stored SAML token"
+                command: $"api get (($base + '/prefixed') | to nuon) --auth {type: saml, ref: prefixed-saml} --output none"
+                expected: "SAML token 'prefixed-saml' is malformed"
+            }
+            {
+                label: "empty SAML ref"
+                command: $"api get (($base + '/empty-ref') | to nuon) --auth {type: saml, ref: ''} --output none"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "non-string SAML ref"
+                command: $"api chain run ([{method: GET, url: (($base + '/nonstring-ref') | to nuon), auth: {type: saml, ref: 42}}]) --quiet | ignore"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "CRLF SAML ref"
+                command: $"api get (($base + '/crlf-ref') | to nuon) --auth ({type: saml, ref: $crlf_ref} | to nuon) --dry-run"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "empty inline SAML token"
+                command: $"api get (($base + '/empty-token') | to nuon) --auth {type: saml, token: ''} --output none"
+                expected: "SAML token must be a non-empty string"
+            }
+            {
+                label: "non-string inline SAML token"
+                command: $"api get (($base + '/nonstring-token') | to nuon) --auth {type: saml, token: 42} --output none"
+                expected: "SAML token must be a non-empty string"
+            }
+            {
+                label: "CRLF inline SAML token"
+                command: $"api get (($base + '/crlf-token') | to nuon) --auth ({type: saml, token: $crlf_token} | to nuon) --output none"
+                expected: "SAML token must not contain CR or LF"
+            }
+            {
+                label: "scheme-only inline SAML token"
+                command: $"api get (($base + '/scheme-only-token') | to nuon) --auth ({type: saml, token: $scheme_only_token} | to nuon) --output none"
+                expected: "SAML token must be a bare token"
+            }
+            {
+                label: "prefixed inline SAML token"
+                command: $"api get (($base + '/prefixed-token') | to nuon) --auth ({type: saml, token: $prefixed_token} | to nuon) --output none"
+                expected: "SAML token must be a bare token"
+            }
+            {
+                label: "leading-space prefixed inline SAML token"
+                command: $"api get (($base + '/leading-prefixed-token') | to nuon) --auth ({type: saml, token: $leading_prefixed_token} | to nuon) --output none"
+                expected: "SAML token must be a bare token"
+            }
+            {
+                label: "non-string SAML set reference"
+                command: $"api auth saml set 42 ($valid_token | to nuon)"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "empty SAML set reference"
+                command: $"api auth saml set '' ($valid_token | to nuon)"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "CRLF SAML get reference"
+                command: $"api auth saml get ($crlf_ref | to nuon)"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "non-string SAML delete reference"
+                command: "api auth saml delete 42"
+                expected: "SAML token reference must be a non-empty string"
+            }
+            {
+                label: "non-string SAML set"
+                command: "api auth saml set invalid-set 42"
+                expected: "SAML token must be a non-empty string"
+            }
+            {
+                label: "empty SAML set"
+                command: "api auth saml set invalid-set ''"
+                expected: "SAML token must be a non-empty string"
+            }
+            {
+                label: "CRLF SAML set"
+                command: $"api auth saml set invalid-set ($crlf_token | to nuon)"
+                expected: "SAML token must not contain CR or LF"
+            }
+            {
+                label: "scheme-only SAML set"
+                command: $"api auth saml set invalid-set ($scheme_only_token | to nuon)"
+                expected: "SAML token must be a bare token"
+            }
+            {
+                label: "prefixed SAML set"
+                command: $"api auth saml set invalid-set ($leading_prefixed_token | to nuon)"
+                expected: "SAML token must be a bare token"
+            }
+        ]
+
+        let invalid_wire_before = (command-error-wire-events $server | length)
+        let invalid_history_before = (auth-history-count)
+        for case in $cases {
+            let before = (command-error-snapshot $root)
+            let result = (run-command-process $root $case.command)
+            assert equal $result.exit_code 1 $"($case.label) returned the wrong failure exit code"
+            assert equal ($result.stdout | str trim) "" $"($case.label) wrote stdout"
+            assert ($result.stderr | str contains $case.expected) $"($case.label) omitted its safe error: ($result.stderr)"
+            assert equal $result.stderr ($result.stderr | ansi strip) $"($case.label) emitted ANSI"
+            for secret in [$valid_token $crlf_token $scheme_only_token $prefixed_token $leading_prefixed_token] {
+                assert (not ($"($result.stdout)\n($result.stderr)" | str contains $secret)) $"($case.label) exposed a token"
+            }
+            assert equal (command-error-snapshot $root) $before $"($case.label) mutated workspace state"
+        }
+        assert equal (command-error-wire-events $server | length) $invalid_wire_before
+        assert equal (auth-history-count) $invalid_history_before
+        assert equal (open $output_path --raw) "OUTPUT-UNCHANGED"
+
+        let transport_save_path = ($root | path join "saml-transport-save.txt")
+        "TRANSPORT-SAVE-UNCHANGED" | save $transport_save_path
+        let transport_before = (command-error-snapshot $root)
+        let transport = (run-command-process $root $"api get 'http://127.0.0.1:1/transport-failure' --auth {type: saml, ref: valid-saml} --save ($transport_save_path | to nuon) --binary-save ($output_path | to nuon) --output none --no-history --debug")
+        assert equal $transport.exit_code 1
+        assert equal ($transport.stdout | str trim) ""
+        assert equal $transport.stderr ($transport.stderr | ansi strip)
+        assert (not ($"($transport.stdout)\n($transport.stderr)" | str contains $valid_token))
+        assert equal (command-error-snapshot $root) $transport_before
+        assert equal (open $transport_save_path --raw) "TRANSPORT-SAVE-UNCHANGED"
+        assert equal (open $output_path --raw) "OUTPUT-UNCHANGED"
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
 export def run-suite-auth-replay [] {
     print "\n=== Authentication Replay and Preview Safety Tests ==="
     [
@@ -1716,5 +2221,7 @@ export def run-suite-auth-replay [] {
         (run-test "dry-run, send, export, and history previews mask all supported auth" { test-auth-preview-and-export-secrecy })
         (run-test "OAuth provider errors expose only stable safe codes across request surfaces" { test-oauth-provider-errors-are-secret-safe })
         (run-test "authenticated output modes preserve types and never expose auth" { test-authenticated-output-contracts })
+        (run-test "SAML exact wire auth, saved PUT, rotation, replay, binary, chain, and previews stay consistent" { test-saml-auth-execution-replay-and-saved-put })
+        (run-test "SAML legacy stores, masked vars, invalid inputs, and failures remain atomic" { test-saml-store-migration-vars-and-invalid-inputs })
     ]
 }
