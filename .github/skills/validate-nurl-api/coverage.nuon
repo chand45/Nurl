@@ -56,6 +56,9 @@
   { command: "api auth bearer set",      kind: command,  group: auth,            test: "api auth bearer set tmpcred abc123  # name + token are positional" }
   { command: "api auth bearer get",      kind: command,  group: auth,            test: "api auth bearer get tmpcred" }
   { command: "api auth bearer delete",   kind: command,  group: auth,            test: "api auth bearer delete tmpcred" }
+  { command: "api auth saml set",        kind: command,  group: auth,            test: "api auth saml set tmpsaml bare-token  # name + token are positional" }
+  { command: "api auth saml get",         kind: command,  group: auth,            test: "api auth saml get tmpsaml" }
+  { command: "api auth saml delete",      kind: command,  group: auth,            test: "api auth saml delete tmpsaml" }
   { command: "api auth basic set",       kind: command,  group: auth,            test: "api auth basic set tmpcred u p  # name/username/password positional" }
   { command: "api auth basic get",       kind: command,  group: auth,            test: "api auth basic get tmpcred" }
   { command: "api auth basic delete",    kind: command,  group: auth,            test: "api auth basic delete tmpcred" }

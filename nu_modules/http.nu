@@ -3,7 +3,7 @@
 
 use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use auth.nu [prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
+use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base list-contained-resource-files]
 use command-error.nu [fail-command]
@@ -157,8 +157,8 @@ def resolve-body [
     }
 }
 
-# Build bearer authentication arguments for execution or redacted display.
-def append-auth-args [
+# Build Authorization header arguments for execution or redacted display.
+def append-authorization-args [
     args: list
     auth?: record
     --redact
@@ -179,6 +179,18 @@ def append-auth-args [
                 $token
             } else {
                 $"Bearer ($token)"
+            }
+            $args | append ["-H" $"Authorization: ($header_value)"]
+        }
+        "saml" => {
+            let token = ($auth.token? | default null)
+            if $token == null or ($token | describe) != "string" or ($token | str trim | is-empty) {
+                fail-command "SAML token must be a non-empty string"
+            }
+            let header_value = if $redact {
+                "******"
+            } else {
+                $"($SAML_AUTH_SCHEME) ($token)"
             }
             $args | append ["-H" $"Authorization: ($header_value)"]
         }
@@ -228,9 +240,9 @@ def build-curl-args [
         }
     }
 
-    if $auth != null and ($auth.type? | default "none") == "bearer" {
+    if $auth != null and ($auth.type? | default "none") in ["bearer" "saml"] {
         # Bearer headers share one builder so binary and normal execution cannot diverge.
-        $args = (append-auth-args $args $auth)
+        $args = (append-authorization-args $args $auth)
     }
 
     # Add body if provided
@@ -274,9 +286,9 @@ def build-curl-args-for-display [
         }
     }
 
-    if $auth != null and ($auth.type? | default "none") == "bearer" {
+    if $auth != null and ($auth.type? | default "none") in ["bearer" "saml"] {
         # Display construction never receives the execution token value.
-        $args = (append-auth-args $args $auth --redact)
+        $args = (append-authorization-args $args $auth --redact)
     }
 
     # Add body if provided
@@ -376,9 +388,9 @@ def build-curl-args-binary [
         }
     }
 
-    if $auth != null and ($auth.type? | default "none") == "bearer" {
+    if $auth != null and ($auth.type? | default "none") in ["bearer" "saml"] {
         # Keep binary execution on the same bearer builder as normal requests.
-        $args = (append-auth-args $args $auth)
+        $args = (append-authorization-args $args $auth)
     }
 
     if $body != null and $body != "" {

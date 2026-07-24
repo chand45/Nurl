@@ -1,8 +1,10 @@
 # Authentication Module
-# Handles Bearer, Basic, API Key, and OAuth2 authentication
+# Handles Bearer, SAML, Basic, API Key, and OAuth2 authentication
 
 use command-error.nu [fail-command]
 use string-compat.nu [ascii-upcase optional-get]
+
+export const SAML_AUTH_SCHEME = "http://schemas.microsoft.com/dsts/saml2-bearer"
 
 # Truncate a string to max length with ellipsis
 def truncate-value [value: any, max_len: int = 40] {
@@ -20,18 +22,24 @@ def get-secrets-path [] {
     $root | path join "secrets.nuon"
 }
 
-# Load secrets
+# Default shape for newly created secret stores.
+def default-secrets [] {
+    {
+        tokens: {}
+        saml_tokens: {}
+        oauth: {}
+        api_keys: {}
+        basic_auth: {}
+    }
+}
+
+# Load secrets. Legacy files intentionally remain without saml_tokens until a SAML mutation.
 def load-secrets [] {
     let path = (get-secrets-path)
     if ($path | path exists) {
-        open $path
+        (default-secrets | reject saml_tokens) | merge (open $path)
     } else {
-        {
-            tokens: {}
-            oauth: {}
-            api_keys: {}
-            basic_auth: {}
-        }
+        default-secrets
     }
 }
 
@@ -69,6 +77,93 @@ export def "api auth bearer delete" [name: string] {
         print $"(ansi green)Bearer token '($name)' deleted(ansi reset)"
     } else {
         print $"(ansi yellow)Token '($name)' not found(ansi reset)"
+    }
+}
+
+# --- SAML Authentication ---
+
+def validate-saml-reference [value: any] {
+    if (
+        ($value | describe) != "string"
+        or ($value | str trim | is-empty)
+        or ($value | str contains "\r")
+        or ($value | str contains "\n")
+    ) {
+        fail-command "SAML token reference must be a non-empty string"
+    }
+    $value
+}
+
+def saml-token-validation-error [value: any] {
+    if ($value | describe) != "string" or ($value | str trim | is-empty) {
+        return "empty"
+    }
+    if ($value | str contains "\r") or ($value | str contains "\n") {
+        return "line-break"
+    }
+    if $value =~ ('(?i)^\s*' + ($SAML_AUTH_SCHEME | str replace --all "." '\.') + '(?:\s+|$)') {
+        return "prefixed"
+    }
+    null
+}
+
+def validate-saml-token [value: any] {
+    match (saml-token-validation-error $value) {
+        "empty" => { fail-command "SAML token must be a non-empty string" }
+        "line-break" => { fail-command "SAML token must not contain CR or LF" }
+        "prefixed" => { fail-command "SAML token must be a bare token without an authentication scheme" }
+        _ => {}
+    }
+    $value
+}
+
+def saved-saml-token [config: record, name: string, --metadata-only] {
+    let token = ($config | optional-get "token")
+    if (saml-token-validation-error $token) != null {
+        fail-command $"SAML token '($name)' is malformed"
+    }
+    if $metadata_only { null } else { $token }
+}
+
+# Store a bare SAML token.
+export def "api auth saml set" [
+    name: any   # Token name/identifier
+    token: any  # Bare SAML token
+] {
+    let validated_name = (validate-saml-reference $name)
+    let validated_token = (validate-saml-token $token)
+    mut secrets = (load-secrets)
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    $secrets = ($secrets | upsert saml_tokens ($saml_tokens | upsert $validated_name {token: $validated_token}))
+    save-secrets $secrets
+    print $"(ansi green)SAML token '($validated_name)' saved(ansi reset)"
+}
+
+# Get a SAML token by name.
+export def "api auth saml get" [name: any] {
+    let validated_name = (validate-saml-reference $name)
+    let secrets = (load-secrets)
+    let config = (($secrets.saml_tokens? | default {}) | optional-get $validated_name)
+    if $config == null {
+        null
+    } else if not (($config | describe) | str starts-with "record") {
+        fail-command $"SAML token '($validated_name)' is malformed"
+    } else {
+        saved-saml-token $config $validated_name
+    }
+}
+
+# Delete a SAML token.
+export def "api auth saml delete" [name: any] {
+    let validated_name = (validate-saml-reference $name)
+    mut secrets = (load-secrets)
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    if $validated_name in $saml_tokens {
+        $secrets = ($secrets | upsert saml_tokens ($saml_tokens | reject $validated_name))
+        save-secrets $secrets
+        print $"(ansi green)SAML token '($validated_name)' deleted(ansi reset)"
+    } else {
+        print $"(ansi yellow)SAML token '($validated_name)' not found(ansi reset)"
     }
 }
 
@@ -465,6 +560,12 @@ def resolve-bearer-reference [name: string, --metadata-only] {
     if $metadata_only { null } else { $token }
 }
 
+def resolve-saml-reference [name: string, --metadata-only] {
+    let validated_name = (validate-saml-reference $name)
+    let config = (get-saved-auth-record "saml_tokens" $validated_name "SAML token")
+    saved-saml-token $config $validated_name --metadata-only=$metadata_only
+}
+
 def resolve-basic-reference [name: string, --metadata-only] {
     let label = $"Basic credentials '($name)'"
     let config = (get-saved-auth-record "basic_auth" $name "Basic credentials")
@@ -674,7 +775,7 @@ export def sensitive-header [name: string, value: any] {
         or (sensitive-credential-name $name)
         or ($normalized =~ '(^|_)(TOKEN|SECRET|SESSION|API_?KEY)(_|$)')
     )
-    $sensitive_name or (($value | into string) =~ '(?i)^\s*(bearer|basic)\s+')
+    $sensitive_name or (($value | into string) =~ '(?i)^\s*(bearer|basic|http://schemas\.microsoft\.com/dsts/saml2-bearer)\s+')
 }
 
 export def redact-sensitive-headers [headers: record] {
@@ -738,6 +839,21 @@ export def auth-history-projection [auth_spec: record] {
                 {type: "bearer", replayable: false}
             } else {
                 fail-command "Bearer history authentication is malformed"
+            }
+        }
+        "SAML" => {
+            let ref = (auth-reference $auth_spec ["token_ref" "ref"] "SAML token")
+            if not ($ref | is-empty) {
+                validate-saml-reference $ref | ignore
+                resolve-saml-reference $ref --metadata-only | ignore
+                {type: "saml", ref: $ref, replayable: true}
+            } else if ("token" in ($auth_spec | columns)) or $replayable == false {
+                if "token" in ($auth_spec | columns) {
+                    validate-saml-token ($auth_spec | optional-get "token") | ignore
+                }
+                {type: "saml", replayable: false}
+            } else {
+                fail-command "SAML history authentication is malformed"
             }
         }
         "BASIC" => {
@@ -819,6 +935,25 @@ export def prepare-auth-context [
                     {type: "bearer", replayable: false}
                 })
                 wire: (if $display_only { null } else { {type: "bearer", token: $token} })
+            }
+        }
+        "SAML" => {
+            let ref = (auth-reference $auth_spec ["token_ref" "ref"] "SAML token")
+            let named = not ($ref | is-empty)
+            let token = if $named {
+                validate-saml-reference $ref | ignore
+                resolve-saml-reference $ref --metadata-only=$display_only
+            } else {
+                validate-saml-token ($auth_spec.token? | default null)
+            }
+            {
+                display: {type: "saml", token: "******"}
+                history: (if $named {
+                    {type: "saml", ref: $ref, replayable: true}
+                } else {
+                    {type: "saml", replayable: false}
+                })
+                wire: (if $display_only { null } else { {type: "saml", token: $token} })
             }
         }
         "BASIC" => {
@@ -928,6 +1063,19 @@ export def "api auth show" [
         }))
     }
 
+    # SAML tokens
+    let saml_tokens = ($secrets.saml_tokens? | default {})
+    if not ($saml_tokens | is-empty) {
+        $result = ($result | append ($saml_tokens | transpose name config | each {|row|
+            let value = if (($row.config | describe) | str starts-with "record") {
+                $row.config.token? | default ""
+            } else {
+                ""
+            }
+            { name: $row.name, type: "saml", status: "configured", value: $value }
+        }))
+    }
+
     # Basic auth
     if not ($secrets.basic_auth | is-empty) {
         $result = ($result | append ($secrets.basic_auth | transpose name config | each {|row|
@@ -984,6 +1132,10 @@ export def "api auth list" [] {
 
     for item in ($secrets.tokens | transpose name value) {
         $auth_list = ($auth_list | append { name: $item.name, type: "bearer" })
+    }
+
+    for item in (($secrets.saml_tokens? | default {}) | transpose name value) {
+        $auth_list = ($auth_list | append { name: $item.name, type: "saml" })
     }
 
     for item in ($secrets.basic_auth | transpose name value) {

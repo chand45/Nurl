@@ -645,9 +645,9 @@ def test-command-discovery-source-duplicates [] {
     let current = (^$nu.current-exe --no-config-file $discover --root $repo --check-help --json | complete)
     assert equal $current.exit_code 0 $"current command discovery failed: ($current.stderr)"
     let current_data = ($current.stdout | from json)
-    assert equal $current_data.defined_count 82
-    assert equal $current_data.defined_export_count 82
-    assert equal $current_data.covered_count 82
+    assert equal $current_data.defined_count 85
+    assert equal $current_data.defined_export_count 85
+    assert equal $current_data.covered_count 85
     assert equal ($current_data.source_duplicates | length) 0
     assert $current_data.ok
 
@@ -776,7 +776,35 @@ def test-command-discovery-exact-help [] {
     }
 }
 
-def run-suite-packaging []: nothing -> list<record> {
+def test-saml-secret-template-consistency [] {
+    let repo = $env.NURL_REPO_ROOT
+    let templates = [
+        {name: "api init", path: ($repo | path join "nu_modules" "mod.nu")}
+        {name: "PowerShell installer", path: ($repo | path join "install.ps1")}
+        {name: "shell installer", path: ($repo | path join "install.sh")}
+    ]
+    for template in $templates {
+        let source = (open $template.path --raw)
+        let declarations = ($source | parse --regex '(?m)^\s*saml_tokens:\s*\{\}\s*$')
+        assert equal ($declarations | length) 1 $"($template.name) must declare exactly one empty SAML token bucket"
+    }
+
+    let root = (make-temp-dir "saml-template")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let secrets = (open ($root | path join "secrets.nuon"))
+        assert equal ($secrets | columns) ["tokens" "saml_tokens" "oauth" "api_keys" "basic_auth"]
+        assert equal $secrets.saml_tokens {}
+        null
+    } catch {|error| $error }
+    cleanup $root
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
+export def run-suite-packaging []: nothing -> list<record> {
     print $"\n(ansi yellow)── Installer packaging and discovery ──(ansi reset)"
     [
         (run-test "fresh installer payloads include and source every transitive module" { test-installer-module-payloads })
@@ -786,5 +814,6 @@ def run-suite-packaging []: nothing -> list<record> {
         (run-test "shell installer rejects unsafe curl probes before mutation" { test-shell-installer-curl-preflight })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
         (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })
+        (run-test "fresh runtime and installer secret templates include one empty SAML bucket" { test-saml-secret-template-consistency })
     ]
 }

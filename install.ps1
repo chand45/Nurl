@@ -143,6 +143,7 @@ if (-not (Test-Path "$NurlHome\secrets.nuon")) {
     $secretsContent = @'
 {
     tokens: {}
+    saml_tokens: {}
     oauth: {}
     api_keys: {}
     basic_auth: {}

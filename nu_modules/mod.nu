@@ -73,6 +73,7 @@ export def "api init" [] {
     if not ($secrets_path | path exists) {
         {
             tokens: {}
+            saml_tokens: {}
             oauth: {}
             api_keys: {}
             basic_auth: {}
@@ -181,6 +182,9 @@ export def "api help" [] {
   api auth bearer set <n> <t>          Store bearer token
   api auth bearer get <n>              Retrieve bearer token
   api auth bearer delete <n>           Delete bearer token
+  api auth saml set <n> <t>            Store bare SAML token
+  api auth saml get <n>                Retrieve SAML token
+  api auth saml delete <n>             Delete SAML token
   api auth basic set <n> <u> <p>       Store basic auth credentials
   api auth basic get <n>               Retrieve basic auth credentials
   api auth basic delete <n>            Delete basic auth credentials
@@ -197,6 +201,8 @@ export def "api help" [] {
 (ansi yellow)Authentication — inline on any request via -a / --auth <record>:(ansi reset)
   Bearer token \(stored\):    -a {type: bearer, token_ref: mytoken}
   Bearer token \(inline\):    -a {type: bearer, token: "abc123"}
+  SAML \(stored\):            -a {type: saml, token_ref: mysaml}
+  SAML \(inline\):            -a {type: saml, token: "bare-token"}
   Basic auth \(stored\):      -a {type: basic, creds_ref: mycreds}
   Basic auth \(inline\):      -a {type: basic, username: "u", password: "p"}
   API key \(stored\):         -a {type: apikey, key_ref: mykey}

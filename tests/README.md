@@ -59,10 +59,10 @@ cleaned up after each test.
 | `test_chain.nu` | Chain: POST+GET, string body, variable extraction, `--stop-on-error` |
 | `test_auth_replay.nu` | Credential-safe previews, canonical history auth metadata, replay rotation, URL/header policy, and OAuth failures |
 | `test_credential_boundaries.nu` | Live response-header and config/environment/extra-variable interpolation boundaries |
-| `test_credential_blackbox.nu` | Eight independent public-CLI reproductions with literal policy tables and byte/network mutation checks |
+| `test_credential_blackbox.nu` | Nine independent public-CLI reproductions with literal policy tables and byte/network mutation checks |
 | `test_secure_header_capture.nu` | Fileless curl response parsing, sensitive live response masking, trailers, redirects, and transport artifacts |
 | `run-security.nu` | Current-runtime focused security runner |
-| `run-security-compat.nu` | Minimum-runtime 12-test hermetic boundary and black-box runner |
+| `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
 | `run.nu` | Main runner — sources all suites, prints summary, exits non-zero on failure |
 
 ## Adding a new test

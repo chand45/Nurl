@@ -68,6 +68,9 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api auth bearer set | `api auth bearer set tmpcred abc123` | "Bearer token 'tmpcred' saved". |
 | api auth bearer get | `api auth bearer get tmpcred` | Returns `abc123`. |
 | api auth bearer delete | `api auth bearer delete tmpcred` | Removed. |
+| api auth saml set | `api auth saml set tmpsaml bare-token` | "SAML token 'tmpsaml' saved". |
+| api auth saml get | `api auth saml get tmpsaml` | Returns `bare-token`. |
+| api auth saml delete | `api auth saml delete tmpsaml` | Removed. |
 | api auth basic set | `api auth basic set tmpcred u p` | "Basic auth 'tmpcred' saved". |
 | api auth basic get | `api auth basic get tmpcred` | Returns `{username,password}`. |
 | api auth basic delete | `api auth basic delete tmpcred` | Removed. |

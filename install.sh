@@ -150,6 +150,7 @@ if [ ! -f "$NURL_HOME/secrets.nuon" ]; then
     cat > "$NURL_HOME/secrets.nuon" << 'EOF'
 {
     tokens: {}
+    saml_tokens: {}
     oauth: {}
     api_keys: {}
     basic_auth: {}

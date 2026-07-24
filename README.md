@@ -391,7 +391,7 @@ takes precedence over `--output`. Recognized sensitive response headers are mask
 result before `--raw`, `--output headers|json`, `--select`, or human rendering, while non-sensitive
 header names, values, and result types remain unchanged. With `--dry-run`, the curl preview is returned instead of an
 HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
-OAuth token endpoint. They render bearer/OAuth authorization, basic credentials, API-key values,
+OAuth token endpoint. They render bearer/OAuth/SAML authorization, basic credentials, API-key values,
 and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
 header/query names. Query API-key names use RFC 3986 query-component encoding in previews, and real
 requests encode both the name and value exactly once while preserving existing queries and fragments.
@@ -525,6 +525,12 @@ api send create-user -c my-api --vars { name: "Alice" }
 # Send with auth override
 api send get-users -c my-api -a { type: bearer, token_ref: mytoken }
 
+# Saved SAML auth remains an unresolved reference until execution
+api request create RegisterFaultPlan PUT "{{base_url}}/fault-plans/{{id}}" -c my-api \
+  -b { name: "{{name}}" } -a { type: saml, token_ref: samltoken }
+api request show RegisterFaultPlan -c my-api
+api send RegisterFaultPlan -c my-api --vars { id: 42, name: "primary" }
+
 # Nested request names are supported
 api request create auth/login POST "{{base_url}}/auth/login" -c my-api
 api send auth/login -c my-api
@@ -540,6 +546,10 @@ These rules apply only to resource identifiers. Explicit path options such as `-
 # Bearer token
 api auth bearer set mytoken "your-jwt-token-here"
 api get "{{base_url}}/protected" -a { type: bearer, token_ref: mytoken }
+
+# SAML bearer token (stored as a bare token, never with the scheme prefix)
+api auth saml set samltoken "your-bare-saml-token"
+api get "{{base_url}}/protected" -a { type: saml, token_ref: samltoken }
 
 # Basic auth
 api auth basic set mycreds "username" "password"
@@ -563,8 +573,11 @@ api auth show
 
 Named authentication accepts the family-specific aliases (`token_ref`, `creds_ref`, and `key_ref`)
 or the generic `ref`. Successful history stores only the canonical type and reference, never the
-resolved token, key, password, access token, refresh token, or client secret. Inline bearer, basic,
-and API-key values can execute, but are recorded as non-replayable without storing the credential.
+resolved token, key, password, access token, refresh token, or client secret. SAML sends exactly
+`Authorization: http://schemas.microsoft.com/dsts/saml2-bearer <token>` on the wire. Saved requests
+retain the unresolved SAML auth block; URL/body interpolation still applies at send time, but
+variables and `--vars` cannot override workspace SAML secrets. Inline bearer, SAML, basic, and API-key
+values can execute, but are recorded as non-replayable without storing the credential.
 Before a direct history save, named references are validated against local credential metadata
 without contacting an OAuth provider. OAuth accepts tokens only from 2xx responses with a valid
 token record; failures report only a safe provider error code/status, never the untrusted response
@@ -605,7 +618,9 @@ api history export --output history.json
 ```
 
 Re-resolving named auth on resend means credential rotation is honored automatically for bearer,
-basic, API-key header/query, and OAuth2 references. Legacy history without auth metadata retains
+SAML, basic, API-key header/query, and OAuth2 references. Named SAML history is canonical
+`{type: saml, ref: <name>, replayable: true}`; inline SAML history is secret-free and non-replayable.
+Legacy history without auth metadata retains
 its unauthenticated resend behavior. A default resend of non-replayable inline auth fails before
 network or file side effects and tells you to pass `--auth`. New history also redacts recognized
 sensitive request and response headers. This sanitization is enforced by the shared persistence
@@ -762,7 +777,7 @@ Run `api help` for the full command list, or:
 | **Environments** | `api collection env create/use/show/set/unset/delete/list` |
 | **Requests** | `api request create/list/show/update/delete/export`, `api send` |
 | **Variables** | `api vars list/set/unset` |
-| **Auth** | `api auth bearer/basic/apikey/oauth2 set/get/delete`, `api auth show` |
+| **Auth** | `api auth bearer/saml/basic/apikey/oauth2 set/get/delete`, `api auth show` |
 | **History** | `api history list/show/search/resend/clear/rebuild-index` |
 | **Chains** | `api chain run/exec` |
 | **Other** | `api init`, `api status`, `api help`, `api tui` |
