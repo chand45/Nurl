@@ -1118,7 +1118,7 @@ export def "api auth show" [
                 name: (truncate-value $row.name 15)
                 type: $row.type
                 status: (truncate-value $row.status 20)
-                value: (truncate-value $row.value 15)
+                value: (if $row.type == "saml" { "******" } else { truncate-value $row.value 15 })
             }
         }
     }

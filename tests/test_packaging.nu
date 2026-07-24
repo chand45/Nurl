@@ -804,6 +804,33 @@ def test-saml-secret-template-consistency [] {
     }
 }
 
+def test-saml-help-coverage-integration [] {
+    let repo = $env.NURL_REPO_ROOT
+    let discover = ($repo | path join ".github" "skills" "validate-nurl-api" "scripts" "discover-commands.nu")
+    let manifest = ($repo | path join ".github" "skills" "validate-nurl-api" "coverage.nuon")
+    let result = (^$nu.current-exe --no-config-file $discover --root $repo --manifest $manifest --check-help --json | complete)
+    assert equal $result.exit_code 0 $"SAML help/coverage discovery failed: ($result.stderr)"
+    let discovered = ($result.stdout | from json)
+    let expected = [
+        "api auth saml set"
+        "api auth saml get"
+        "api auth saml delete"
+    ]
+    for command in $expected {
+        assert ($command in $discovered.help_commands) $"SAML command is absent from api help: ($command)"
+    }
+    let coverage = (open $manifest | where command in $expected | sort-by command)
+    assert equal ($coverage | get command) ($expected | sort)
+    for row in $coverage {
+        assert equal $row.kind command $"SAML coverage entry has the wrong kind: ($row.command)"
+        assert equal $row.group auth $"SAML coverage entry has the wrong group: ($row.command)"
+        assert (not ($row.test | str trim | is-empty)) $"SAML coverage entry has no runnable test: ($row.command)"
+    }
+    let help_source = (open ($repo | path join "nu_modules" "mod.nu") --raw)
+    assert ($help_source | str contains "SAML \\(stored\\):") "api help omitted the stored SAML auth example"
+    assert ($help_source | str contains "SAML \\(inline\\):") "api help omitted the inline SAML auth example"
+}
+
 export def run-suite-packaging []: nothing -> list<record> {
     print $"\n(ansi yellow)── Installer packaging and discovery ──(ansi reset)"
     [
@@ -814,6 +841,7 @@ export def run-suite-packaging []: nothing -> list<record> {
         (run-test "shell installer rejects unsafe curl probes before mutation" { test-shell-installer-curl-preflight })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
         (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })
+        (run-test "SAML CRUD commands and examples stay synchronized across help and coverage" { test-saml-help-coverage-integration })
         (run-test "fresh runtime and installer secret templates include one empty SAML bucket" { test-saml-secret-template-consistency })
     ]
 }

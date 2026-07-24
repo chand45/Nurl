@@ -124,6 +124,7 @@ try {
             $requestLine = $reader.ReadLine()
             $contentLength = 0
             $authorization = ''
+            $authorizationCount = 0
             $apiKey = ''
             $trace = ''
             $password = ''
@@ -133,6 +134,7 @@ try {
                 }
                 if ($line -match '(?i)^Authorization:\\s*(.*)$') {
                     $authorization = $Matches[1]
+                    $authorizationCount++
                 }
                 if ($line -match '(?i)^(?:X-API-Key|X[.]Nurl[+]Key):\\s*(.*)$') {
                     $apiKey = $Matches[1]
@@ -270,7 +272,7 @@ try {
                 $contentType = 'application/json'
             } else {
                 $requestPath = ($requestLine -split ' ')[1]
-                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + \"`t\" + $trace + \"`t\" + $password + [Environment]::NewLine)
+                [System.IO.File]::AppendAllText($WireFile, $requestPath + \"`t\" + $authorization + \"`t\" + $apiKey + \"`t\" + $trace + \"`t\" + $password + \"`t\" + $authorizationCount + [Environment]::NewLine)
                 if ($requestPath -eq '/slow') {
                     Start-Sleep -Seconds 3
                 }
@@ -608,7 +610,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_protected()
 
     def send_protected(self):
-        authorization = self.headers.get('Authorization', '')
+        authorizations = self.headers.get_all('Authorization', [])
+        authorization = authorizations[-1] if authorizations else ''
         api_key = self.headers.get('X.Nurl+Key', self.headers.get('X-API-Key', ''))
         trace = self.headers.get('X-Safe-Trace', '')
         password = ''
@@ -617,7 +620,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 password = self.headers.get(name, '')
                 break
         with open(wire_file, 'a', encoding='utf-8') as handle:
-            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\t' + trace + '\\t' + password + '\\n')
+            handle.write(self.path + '\\t' + authorization + '\\t' + api_key + '\\t' + trace + '\\t' + password + '\\t' + str(len(authorizations)) + '\\n')
         if self.path in ('/slow', '/timeout'):
             time.sleep(3)
         if self.path == '/acl-slow':
@@ -976,7 +979,7 @@ def command-error-wire-events [server: record] {
     open $server.wire_file --raw
     | lines
     | where {|line| not ($line | is-empty) }
-    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>[^\t]*)\t(?<trace>[^\t]*)\t(?<password>.*)$'
+    | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>[^\t]*)\t(?<trace>[^\t]*)\t(?<password>[^\t]*)\t(?<authorization_count>\d+)$'
 }
 
 def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {
