@@ -3,8 +3,8 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use resource-path.nu [resolve-under-base]
-use string-compat.nu [ascii-equal-ignore-case]
+use resource-path.nu [path-type-safe resolve-under-base]
+use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 
 # Get history directory
@@ -119,6 +119,14 @@ def history-entry-summary [entry: record, date_dir: string] {
     }
 }
 
+def history-path-key [path: string] {
+    if $nu.os-info.name == "windows" {
+        $path | ascii-upcase
+    } else {
+        $path
+    }
+}
+
 def list-history-entry-files [] {
     let dir = (get-history-dir)
     let subdirs = (ls $dir | where type == dir | get name | sort)
@@ -130,33 +138,39 @@ def list-history-entry-files [] {
         )
         ls $subdir
         | where type != dir and name =~ '\.nuon$'
-        | get name
-        | sort
+        | sort-by name
         | each {|listed_file|
-            let file_name = ($listed_file | path basename)
+            let file_name = ($listed_file.name | path basename)
             let logical_name = $"($date_dir)/($file_name)"
-            {
-                path: (
-                    resolve-under-base $dir $logical_name "history entry"
-                        --nested
-                        --scope="history directory"
-                )
-                date_dir: $date_dir
+            let path = (
+                resolve-under-base $dir $logical_name "history entry"
+                    --nested
+                    --scope="history directory"
+            )
+            let extension = ($path | path parse | get extension)
+            if (
+                (path-type-safe $path) == "file"
+                and (ascii-equal-ignore-case $extension "nuon")
+            ) {
+                {
+                    path: $path
+                    path_key: (history-path-key $path)
+                    id: ($file_name | path parse | get stem)
+                    date_dir: $date_dir
+                    linked: ($listed_file.type == "symlink")
+                }
             }
         }
+        | compact
     } | flatten
+    | sort-by linked date_dir id
+    | uniq-by path_key
+    | reject linked
 }
 
-def read-history-entry-summary [file: record] {
-    # File I/O failures invalidate the full scan. Only invalid NUON content or
-    # a non-entry shape may be skipped for legacy compatibility.
-    let raw = try {
-        open $file.path --raw
-    } catch {|read_error|
-        error make {
-            msg: $"History entry '($file.path)' could not be read: ($read_error.msg)"
-        }
-    }
+def parse-history-entry-summary [raw: any, file: record] {
+    # Only invalid NUON content or a non-entry shape may be skipped for legacy
+    # compatibility. Raw file I/O is handled strictly by the caller.
     let entry = try {
         $raw | from nuon
     } catch {
@@ -175,12 +189,21 @@ def read-history-entry-summary [file: record] {
 # Scan files in deterministic ID order, preferring an existing index's order
 # when it can disambiguate tied legacy timestamps.
 def scan-history-summaries [existing: list = []] {
-    let scanned = (
-        list-history-entry-files
-        | each {|file| read-history-entry-summary $file }
-        | where {|entry| $entry != null }
-        | sort-by id
-    )
+    mut summaries = []
+    for file in (list-history-entry-files) {
+        let raw = try {
+            open $file.path --raw
+        } catch {|read_error|
+            error make {
+                msg: $"History entry '($file.path)' could not be read: ($read_error.msg)"
+            }
+        }
+        let summary = (parse-history-entry-summary $raw $file)
+        if $summary != null {
+            $summaries = ($summaries | append $summary)
+        }
+    }
+    let scanned = ($summaries | sort-by id)
 
     let existing_ids = $existing | each {|entry|
         let id = ($entry.id? | default "")
@@ -296,41 +319,147 @@ def validate-history-limit [limit: int] {
     }
 }
 
-def reconcile-history-index-after-delete-error [] {
+def canonical-history-index-summary [summary: record] {
+    {
+        id: $summary.id
+        timestamp: ($summary.timestamp? | default "")
+        method: ($summary.method? | default "")
+        url: ($summary.url? | default "")
+        status: ($summary.status? | default 0)
+        time_ms: ($summary.time_ms? | default 0)
+        date_dir: $summary.date_dir
+    }
+}
+
+def canonicalize-history-recovery-hints [entries: list, files: list] {
+    mut hints = []
+
+    for raw_summary in $entries {
+        let hinted_summary = (canonical-history-index-summary $raw_summary)
+        let resolved = try {
+            {path: (history-entry-path $hinted_summary), error: null}
+        } catch {|path_error|
+            {path: null, error: $path_error}
+        }
+        if $resolved.error != null {
+            return {
+                usable: false
+                hints: []
+                error: {
+                    msg: $"History index hint for ID '($hinted_summary.id)' cannot be safely reconciled: ($resolved.error.msg)"
+                }
+            }
+        }
+        let resolved_path_key = (history-path-key $resolved.path)
+        let matching_files = ($files | where path_key == $resolved_path_key)
+        if ($matching_files | is-empty) {
+            continue
+        }
+        let file = ($matching_files | first)
+        if $file.id != $hinted_summary.id {
+            return {
+                usable: false
+                hints: []
+                error: {
+                    msg: $"History index hint for ID '($hinted_summary.id)' resolves to a different entry path"
+                }
+            }
+        }
+        let summary = ($hinted_summary | update date_dir $file.date_dir)
+        let path = $file.path
+        let path_key = $file.path_key
+
+        let conflicts = ($hints | where {|hint|
+            $hint.summary.id == $summary.id or $hint.path_key == $path_key
+        })
+        if not ($conflicts | is-empty) {
+            let existing = ($conflicts | first)
+            let compatible = (
+                $existing.summary.id == $summary.id
+                and $existing.path_key == $path_key
+                and (($existing.summary | to nuon) == ($summary | to nuon))
+            )
+            if $compatible {
+                continue
+            }
+            return {
+                usable: false
+                hints: []
+                error: {
+                    msg: $"Conflicting history index hints for ID '($summary.id)' cannot be safely reconciled"
+                }
+            }
+        }
+
+        $hints = ($hints | append {
+            summary: $summary
+            path: $path
+            path_key: $path_key
+        })
+    }
+
+    {usable: true, hints: $hints, error: null}
+}
+
+def capture-history-recovery-hints [] {
     let index = (read-history-index)
     if not $index.usable {
-        error make {
-            msg: "History index is missing or structurally unusable after a partial clear"
+        return {
+            usable: false
+            hints: []
+            error: {msg: "History index is missing or structurally unusable"}
         }
     }
 
-    # A recursive delete may remove some files before failing on another.
-    # Filter trusted hints by contained path existence without opening any
-    # surviving entry, which may still be locked or unreadable.
-    let existing_paths = (list-history-entry-files | get path)
+    # Traversal errors are visible before mutation. Semantic hint conflicts are
+    # retained as an unusable capture so a later operation failure can report
+    # both causes rather than guessing from unreadable surviving entries.
+    let files = (list-history-entry-files)
+    canonicalize-history-recovery-hints $index.entries $files
+}
+
+def reconcile-history-index-from-hints [recovery: record] {
+    if not $recovery.usable {
+        error make {msg: $recovery.error.msg}
+    }
+
+    let dir = (get-history-dir)
+    if not ($dir | path exists) {
+        mkdir $dir
+    }
+    let surviving_path_keys = (list-history-entry-files | get path_key)
     let remaining = (
-        $index.entries
-        | where {|summary|
-            let path = (history-entry-path $summary)
-            $existing_paths | any {|existing| $existing == $path }
+        $recovery.hints
+        | where {|hint|
+            let current_path = try {
+                history-entry-path $hint.summary
+            } catch {
+                null
+            }
+            (
+                ($current_path != null)
+                and ((history-path-key $current_path) == $hint.path_key)
+                and ($hint.path_key in $surviving_path_keys)
+            )
         }
+        | get summary
         | sort-history-entries
     )
     $remaining | to nuon | save -f (get-history-index-path)
 }
 
-def rethrow-history-delete-error [delete_error: record] {
+def rethrow-history-clear-error [recovery: record, operation_error: record] {
     try {
-        reconcile-history-index-after-delete-error
+        reconcile-history-index-from-hints $recovery
     } catch {|reconcile_error|
         error make {
-            msg: $"($delete_error.msg)\nHistory index reconciliation after partial clear also failed: ($reconcile_error.msg)"
+            msg: $"($operation_error.msg)\nHistory index reconciliation after failed clear also failed: ($reconcile_error.msg)"
         }
     }
-    error make $delete_error
+    error make {msg: $operation_error.msg}
 }
 
-def clear-history-before-cutoff [dir: string, cutoff: datetime] {
+def clear-history-before-cutoff [dir: string, cutoff: datetime, recovery: record] {
     let dirs = (
         ls $dir
         | where type == dir
@@ -358,14 +487,22 @@ def clear-history-before-cutoff [dir: string, cutoff: datetime] {
                 | upsert msg $"History directory '($d.name)' could not be deleted: ($delete_error.msg)"
             }
             if $delete_error != null {
-                rethrow-history-delete-error $delete_error
+                rethrow-history-clear-error $recovery $delete_error
             }
             $cleared = $cleared + 1
         }
     }
 
     if $cleared > 0 {
-        rebuild-history-index | ignore
+        let rebuild_error = try {
+            rebuild-history-index | ignore
+            null
+        } catch {|error|
+            $error
+        }
+        if $rebuild_error != null {
+            rethrow-history-clear-error $recovery $rebuild_error
+        }
     }
     $cleared
 }
@@ -796,7 +933,21 @@ export def "api history clear" [
             }
         }
 
-        rm -rf $dir
+        let recovery = (capture-history-recovery-hints)
+        let delete_error = try {
+            rm -rf $dir
+            if ($dir | path exists) {
+                {msg: $"History directory '($dir)' could not be deleted"}
+            } else {
+                null
+            }
+        } catch {|error|
+            $error
+            | upsert msg $"History directory '($dir)' could not be deleted: ($error.msg)"
+        }
+        if $delete_error != null {
+            rethrow-history-clear-error $recovery $delete_error
+        }
         mkdir $dir
         print "(ansi green)All history cleared(ansi reset)"
         return
@@ -804,7 +955,8 @@ export def "api history clear" [
 
     if $before != "" {
         let cutoff = ($before | into datetime)
-        let cleared = (clear-history-before-cutoff $dir $cutoff)
+        let recovery = (capture-history-recovery-hints)
+        let cleared = (clear-history-before-cutoff $dir $cutoff $recovery)
         print $"(ansi green)Cleared ($cleared) days of history before ($before)(ansi reset)"
         return
     }
@@ -819,7 +971,8 @@ export def "api history clear" [
     }
 
     let cutoff = ((date now) - ($retention_days | into duration --unit day))
-    let cleared = (clear-history-before-cutoff $dir $cutoff)
+    let recovery = (capture-history-recovery-hints)
+    let cleared = (clear-history-before-cutoff $dir $cutoff $recovery)
     print $"(ansi green)Cleared ($cleared) days of history older than ($retention_days) days(ansi reset)"
 }
 

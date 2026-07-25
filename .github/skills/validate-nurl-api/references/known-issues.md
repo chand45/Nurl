@@ -201,14 +201,24 @@ request, interpolates variables, or touches `.nuon` files.
 
 ## 21. Partial history clear and rebuild could silently desynchronize the index  (FIXED)
 - **Symptom:** recursive clear could delete files before a later delete error while leaving their
-  index rows visible. Full rebuild treated traversal or entry-read failures as empty/malformed data,
-  replaced the index, and printed success after silently dropping existing unreadable entries.
-- **Fix:** every delete error reconciles a structurally valid existing index against contained
-  surviving entry paths without opening locked files, then rethrows the original contextual error.
-  Normal explicit/automatic rebuilds now require a complete traversal and raw read of every entry;
-  genuine I/O failures propagate before index replacement, while invalid NUON/non-entry content
-  remains deterministically skippable for compatibility.
+  index rows visible. A successful deletion followed by a strict rebuild failure had the same stale
+  result, and partial `--all` failure bypassed recovery. Duplicate or injected hints could also
+  survive exceptional reconciliation. Full rebuild treated traversal or entry-read failures as
+  empty/malformed data, replaced the index, and printed success after silently dropping existing
+  unreadable entries.
+- **Fix:** clear captures validated canonical index hints before mutation. Every delete or
+  post-delete rebuild error reconciles those hints against contained surviving entry paths without
+  opening locked files, persists an exact-schema unique canonical index, then rethrows the original
+  contextual error. Compatible duplicates are collapsed, stale/injected data is removed, and
+  contained logical aliases are normalized to their direct regular `.nuon` files; directory and
+  non-NUON link targets are excluded. Conflicting ID/path hints produce a composed reconciliation
+  error without rewriting the index. Partial `--all` failures use the same recovery. Normal
+  explicit/automatic rebuilds require a complete traversal and raw read of every entry; genuine I/O
+  failures propagate before index replacement, while text/binary invalid NUON and non-entry content
+  remain deterministically skippable for compatibility.
 - **Re-check:** run `tests/test_history.nu`; the clear failure fixtures use barrier-synchronized
   Windows locks or POSIX permissions with no sleeps, and assert exact index/list/search/get/export
-  agreement after both later-directory and first-directory partial failures. Rebuild fixtures prove
-  valid and invalid prior index bytes remain unchanged on unreadable-entry failures.
+  agreement after later-directory, first-directory, post-delete rebuild, and partial `--all`
+  failures. Duplicate/conflicting-hint fixtures verify canonical unique recovery or explicit
+  combined failure. Rebuild fixtures prove valid and invalid prior index bytes remain unchanged on
+  unreadable-entry failures.
