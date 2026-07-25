@@ -89,6 +89,13 @@ jobs:
           & $env:NU_EXE --no-config-file "${{ matrix.runner }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Run minimum-runtime status compatibility suite
+        if: matrix.nu_version == '0.89.0'
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-status-compat.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   current-suite:
     name: Full suite / Nushell 0.114.1
     runs-on: windows-latest

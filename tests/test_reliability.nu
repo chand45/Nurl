@@ -209,32 +209,76 @@ def test-a7-normal-request-writes-history [] {
 
 # ── V1: api status on empty workspace ────────────────────────────────────────
 
-def test-v1-status-empty-workspace [] {
-    let tmp = (make-temp-dir "v1-status")
-    $env.API_ROOT = $tmp
-    api init | ignore
-    let s = (api status)
-    assert equal ($s | columns) [
+def v1-status-columns [] {
+    [
         root
         global_vars
         collections
         history_entries
         active_collection
         active_environment
-    ] "status returned an unexpected field schema"
+    ]
+}
+
+def json-preserves-nothing-fields [] {
+    let probe = ({present: true optional: null} | to json --raw | from json)
+    (($probe | columns | where $it == optional | length) == 1)
+}
+
+def run-status-command-process [root: string, command: string] {
+    let script_path = (test-temp-dir | path join $"nurl-status-command-(random uuid).nu")
+    let config_path = (test-temp-dir | path join $"nurl-status-config-(random uuid).nu")
+    let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+    [
+        $"use ($module_path | to nuon) *"
+        $"$env.API_ROOT = ($root | to nuon)"
+        "$env.NO_COLOR = '1'"
+        "$env.config.use_ansi_coloring = false"
+        $command
+    ] | str join "\n" | save -f $script_path
+    "$env.config.use_ansi_coloring = false" | save -f $config_path
+
+    let result = (test-complete-result (do {
+        with-env {NO_COLOR: "1"} {
+            ^$nu.current-exe --config $config_path $script_path
+        }
+    } | complete))
+    rm -f $script_path $config_path
+    $result
+}
+
+def test-v1-status-empty-workspace [] {
+    let tmp = (make-temp-dir "v1-status")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    let s = (api status)
+    assert equal ($s | columns) (v1-status-columns) "status returned an unexpected field schema"
     assert equal ($s.root | describe) "string" "status root should be a string"
     assert equal ($s.global_vars | describe) "int" "status global_vars should be an int"
     assert equal ($s.collections | describe) "int" "status collections should be an int"
     assert equal ($s.history_entries | describe) "int" "status history_entries should be an int"
     assert equal $s.history_entries 0 "empty workspace should have 0 history entries"
     assert equal $s.active_collection null "unset default collection should report null"
+    assert equal ($s.active_collection | describe) "nothing" "unset default collection should be nothing"
     assert equal $s.active_environment null "unset default collection should have no active environment"
-    let serialized_result = (run-command-process $tmp "api status | to json --raw")
+    assert equal ($s.active_environment | describe) "nothing" "unset active environment should be nothing"
+
+    let serialized_result = (run-status-command-process $tmp "api status | to json --raw")
     assert equal $serialized_result.exit_code 0 "serialized unset status failed"
     assert equal ($serialized_result.stderr | str trim) "" "serialized unset status wrote stderr"
     let serialized = ($serialized_result.stdout | from json)
-    assert equal $serialized.active_collection null "serialized unset collection should be null"
-    assert equal $serialized.active_environment null "serialized unset environment should be null"
+    if (json-preserves-nothing-fields) {
+        assert equal ($serialized | columns) (v1-status-columns) "status JSON omitted fields supported by this serializer"
+        assert equal $serialized.active_collection null "serialized unset collection should be null"
+        assert equal $serialized.active_environment null "serialized unset environment should be null"
+    } else {
+        assert equal ($serialized | columns) [
+            root
+            global_vars
+            collections
+            history_entries
+        ] "status JSON did not match this runtime's nothing-field omission"
+    }
     cleanup $tmp
 }
 
@@ -247,19 +291,21 @@ def test-v1-status-configured-context [] {
     api config set default_collection jsonplaceholder | ignore
 
     let configured = (api status)
+    assert equal ($configured | columns) (v1-status-columns) "configured status returned an unexpected field schema"
     assert equal $configured.active_collection "jsonplaceholder"
     assert equal ($configured.active_collection | describe) "string"
     assert equal $configured.active_environment "default"
     assert equal ($configured.active_environment | describe) "string"
 
-    let serialized_result = (run-command-process $tmp "api status | to json --raw")
+    let serialized_result = (run-status-command-process $tmp "api status | to json --raw")
     assert equal $serialized_result.exit_code 0 "serialized status failed"
     assert equal ($serialized_result.stderr | str trim) "" "serialized status wrote stderr"
     let serialized = ($serialized_result.stdout | from json)
+    assert equal ($serialized | columns) (v1-status-columns) "configured status JSON returned an unexpected schema"
     assert equal $serialized.active_collection "jsonplaceholder"
     assert equal $serialized.active_environment "default"
 
-    let human_result = (run-command-process $tmp "api status")
+    let human_result = (run-status-command-process $tmp "api status")
     assert equal $human_result.exit_code 0 "human status failed"
     assert equal ($human_result.stderr | str trim) "" "human status wrote stderr"
     assert ($human_result.stdout | str contains "active_collection") "human status omitted active_collection"
@@ -275,7 +321,7 @@ def test-v1-status-configured-context [] {
 }
 
 def assert-v1-status-failure [root: string, expected: string] {
-    let result = (run-command-process $root "api status")
+    let result = (run-status-command-process $root "api status")
     assert ($result.exit_code != 0) $"invalid status context exited zero: ($expected)"
     assert equal ($result.stdout | str trim) "" $"invalid status context wrote stdout: ($expected)"
     assert equal $result.stderr ($result.stderr | ansi strip) $"invalid status context wrote ANSI stderr: ($expected)"
@@ -287,6 +333,11 @@ def test-v1-status-invalid-context [] {
     $env.API_ROOT = $tmp
     api init | ignore
     let config_path = ($tmp | path join "config.nuon")
+
+    let child_version = (run-status-command-process $tmp "version | get version")
+    assert equal $child_version.exit_code 0 "status child process did not start"
+    assert equal ($child_version.stderr | str trim) "" "status child version probe wrote stderr"
+    assert equal ($child_version.stdout | str trim) (version | get version) "status tests used a different child runtime"
 
     [] | to nuon | save -f $config_path
     assert-v1-status-failure $tmp "config.nuon must contain a record"
@@ -313,15 +364,21 @@ def test-v1-status-invalid-context [] {
     cleanup $tmp
 }
 
+def run-suite-status-compatibility []: nothing -> list<record> {
+    print $"\n(ansi yellow)── V1: Status compatibility ──(ansi reset)"
+    [
+        (run-test "V1: api status reports typed unset context" { test-v1-status-empty-workspace })
+        (run-test "V1: api status reports configured collection and environment" { test-v1-status-configured-context })
+        (run-test "V1: api status rejects invalid configured context" { test-v1-status-invalid-context })
+    ]
+}
+
 # ── Suite runner ──────────────────────────────────────────────────────────────
 
 def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)── A: Reliability A1-A7 ──(ansi reset)"
     mut results = [
         (run-test "A5: status mapping offline (all codes + fallback)" { test-a5-status-mapping-offline })
-        (run-test "V1: api status reports typed unset context" { test-v1-status-empty-workspace })
-        (run-test "V1: api status reports configured collection and environment" { test-v1-status-configured-context })
-        (run-test "V1: api status rejects invalid configured context" { test-v1-status-invalid-context })
     ]
     if not $net_ok {
         $results = ($results | append (skip-test "A-Reliability-network" "network unavailable"))
