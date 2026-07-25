@@ -54,14 +54,49 @@ def sort-history-entries [] {
     | reject _history_timestamp_valid _history_timestamp_instant _history_tie_order
 }
 
+# Only lists/tables of summaries with stable identity/path fields are usable
+# index data. Other parseable NUON shapes are rebuilt from entry files.
+def history-index-summary-valid [summary: any] {
+    if not (($summary | describe) | str starts-with "record") {
+        return false
+    }
+    let id = ($summary.id? | default null)
+    let date_dir = ($summary.date_dir? | default null)
+    (($id | describe) == "string") and (not ($id | str trim | is-empty)) and (($date_dir | describe) == "string") and (not ($date_dir | str trim | is-empty))
+}
+
+def read-history-index [] {
+    let path = (get-history-index-path)
+    if not ($path | path exists) {
+        return {usable: false, entries: []}
+    }
+
+    # Read errors (for example permissions) must remain visible. Only NUON
+    # syntax/shape errors make an index unusable and eligible for rebuilding.
+    let raw = (open $path --raw)
+    let parsed = try {
+        {valid_nuon: true, value: ($raw | from nuon)}
+    } catch {
+        {valid_nuon: false, value: null}
+    }
+    if not $parsed.valid_nuon {
+        return {usable: false, entries: []}
+    }
+
+    let value_type = ($parsed.value | describe)
+    if not (($value_type | str starts-with "list") or ($value_type | str starts-with "table")) {
+        return {usable: false, entries: []}
+    }
+    if not ($parsed.value | all {|entry| history-index-summary-valid $entry }) {
+        return {usable: false, entries: []}
+    }
+
+    {usable: true, entries: $parsed.value}
+}
+
 # Load history index — list of summary entries (B1)
 def load-history-index [] {
-    let path = (get-history-index-path)
-    if ($path | path exists) {
-        try { open $path } catch { [] }
-    } else {
-        []
-    }
+    (read-history-index).entries
 }
 
 # Append one summary entry to the history index (B1) — keeps index sorted newest-first
@@ -163,8 +198,8 @@ export def "api history rebuild-index" [] {
 
 # Ensure history index exists; auto-rebuild if missing (B1)
 def ensure-history-index [] {
-    let path = (get-history-index-path)
-    if not ($path | path exists) {
+    let index = (read-history-index)
+    if not $index.usable {
         let dir = (get-history-dir)
         if ($dir | path exists) {
             rebuild-history-index | ignore
@@ -212,6 +247,60 @@ def validate-history-limit [limit: int] {
     if $limit < 0 {
         fail-command $"History --limit must be non-negative, got ($limit)"
     }
+}
+
+def rebuild-after-history-delete-error [delete_error: record] {
+    try {
+        rebuild-history-index | ignore
+    } catch {|rebuild_error|
+        error make {
+            msg: $"($delete_error.msg)\nHistory index rebuild after partial clear also failed: ($rebuild_error.msg)"
+        }
+    }
+    error make $delete_error
+}
+
+def clear-history-before-cutoff [dir: string, cutoff: datetime] {
+    let dirs = (
+        ls $dir
+        | where type == dir
+        | sort-by name
+    )
+    mut cleared = 0
+
+    for d in $dirs {
+        let dir_date = try {
+            $d.name | path basename | into datetime
+        } catch {
+            continue
+        }
+
+        if $dir_date < $cutoff {
+            let delete_error = try {
+                rm -rf $d.name
+                if ($d.name | path exists) {
+                    {msg: $"History directory '($d.name)' could not be deleted"}
+                } else {
+                    null
+                }
+            } catch {|delete_error|
+                $delete_error
+                | upsert msg $"History directory '($d.name)' could not be deleted: ($delete_error.msg)"
+            }
+            if $delete_error != null {
+                if $cleared > 0 {
+                    rebuild-after-history-delete-error $delete_error
+                }
+                error make $delete_error
+            }
+            $cleared = $cleared + 1
+        }
+    }
+
+    if $cleared > 0 {
+        rebuild-history-index | ignore
+    }
+    $cleared
 }
 
 def history-list-time [timestamp: any] {
@@ -648,26 +737,7 @@ export def "api history clear" [
 
     if $before != "" {
         let cutoff = ($before | into datetime)
-        let dirs = ls $dir | where type == dir
-
-        mut cleared = 0
-
-        for d in $dirs {
-            let dir_date = try {
-                $d.name | path basename | into datetime
-            } catch {
-                continue
-            }
-
-            if $dir_date < $cutoff {
-                rm -rf $d.name
-                $cleared = $cleared + 1
-            }
-        }
-
-        if $cleared > 0 {
-            rebuild-history-index | ignore
-        }
+        let cleared = (clear-history-before-cutoff $dir $cutoff)
         print $"(ansi green)Cleared ($cleared) days of history before ($before)(ansi reset)"
         return
     }
@@ -682,26 +752,7 @@ export def "api history clear" [
     }
 
     let cutoff = ((date now) - ($retention_days | into duration --unit day))
-    let dirs = ls $dir | where type == dir
-
-    mut cleared = 0
-
-    for d in $dirs {
-        let dir_date = try {
-            $d.name | path basename | into datetime
-        } catch {
-            continue
-        }
-
-        if $dir_date < $cutoff {
-            rm -rf $d.name
-            $cleared = $cleared + 1
-        }
-    }
-
-    if $cleared > 0 {
-        rebuild-history-index | ignore
-    }
+    let cleared = (clear-history-before-cutoff $dir $cutoff)
     print $"(ansi green)Cleared ($cleared) days of history older than ($retention_days) days(ansi reset)"
 }
 

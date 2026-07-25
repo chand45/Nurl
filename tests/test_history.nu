@@ -357,7 +357,8 @@ def clear-fixture [id: string, date: string, group: string] {
 def assert-clear-surfaces [root: string, expected_ids: list, removed_ids: list, label: string] {
     let index_path = ($root | path join "history" "index.nuon")
     assert ($index_path | path exists) $"($label): index.nuon is missing"
-    assert equal (open $index_path | get id) $expected_ids $"($label): index IDs are stale or out of order"
+    let index_ids = (open $index_path | get id)
+    assert equal $index_ids $expected_ids $"($label): expected index IDs ($expected_ids | to nuon), got ($index_ids | to nuon)"
     assert equal (api history list --limit 100 | get id) $expected_ids $"($label): list IDs differ from index"
     assert equal (api history search "clear-index-consistency" --limit 100 | get id) $expected_ids $"($label): URL search IDs differ from index"
     assert equal (api history search "clear-body-consistency" --limit 100 | get id) $expected_ids $"($label): body search IDs differ from entry files"
@@ -386,6 +387,15 @@ def assert-clear-surfaces [root: string, expected_ids: list, removed_ids: list, 
     }
 }
 
+def assert-valid-history-index [root: string, expected_ids: list, label: string] {
+    let index_path = ($root | path join "history" "index.nuon")
+    let index = (open $index_path)
+    let index_type = ($index | describe)
+    assert (($index_type | str starts-with "list") or ($index_type | str starts-with "table")) $"($label): index top-level shape is invalid"
+    assert ($index | all {|entry| ($entry | describe) | str starts-with "record" }) $"($label): index contains a non-record row"
+    assert equal ($index | get id) $expected_ids $"($label): index IDs are not canonical"
+}
+
 def prepare-clear-fixtures [
     root: string
     group: string
@@ -407,14 +417,43 @@ def prepare-clear-fixtures [
     {removed: $removed, retained_older: $retained_older, retained_newer: $retained_newer}
 }
 
+def test-b1-invalid-index-shapes-recover [] {
+    let tmp = (make-temp-dir "b1-index-shapes")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let fixtures = (prepare-clear-fixtures $tmp "shape" "2000-01-01" "2000-01-02" "2000-01-03")
+    let expected = [$fixtures.retained_newer.id $fixtures.retained_older.id $fixtures.removed.id]
+    let index_path = ($tmp | path join "history" "index.nuon")
+
+    for invalid in ["{}" "\"scalar-index\"" "[1 \"invalid-row\"]"] {
+        $invalid | save -f $index_path
+        let result = (run-command-process $tmp "api history rebuild-index | ignore")
+        assert equal $result.exit_code 0 $"explicit rebuild failed for index shape ($invalid)"
+        assert equal ($result.stderr | str trim) "" $"explicit rebuild wrote stderr for index shape ($invalid)"
+        assert ($result.stdout | str contains "Index rebuilt: 3 entries") $"explicit rebuild output changed for index shape ($invalid)"
+        assert-valid-history-index $tmp $expected $"explicit rebuild ($invalid)"
+    }
+
+    "{}" | save -f $index_path
+    assert equal (api history list --limit 100 | get id) $expected "automatic ensure did not rebuild a record-shaped index"
+    assert-clear-surfaces $tmp $expected [] "automatic shape recovery"
+
+    "[1]" | save -f $index_path
+    let saved_id = (api history save (synth-req "https://example.com/shape/save") (synth-res 200))
+    assert-valid-history-index $tmp ([$saved_id] | append $expected) "save after invalid index"
+    cleanup $tmp
+}
+
 def test-b1-clear-before-keeps-index-consistent [] {
     let tmp = (make-temp-dir "b1-clear-before")
     $env.API_ROOT = $tmp
     init-workspace
     let fixtures = (prepare-clear-fixtures $tmp "before" "2000-01-01" "2000-01-02" "2000-01-03")
+    let index_path = ($tmp | path join "history" "index.nuon")
+    "{}" | save -f $index_path
 
     let result = (run-command-process $tmp "api history clear --before 2000-01-02 --force")
-    assert equal $result.exit_code 0 "--before clear failed"
+    assert equal $result.exit_code 0 $"--before clear failed: ($result.stderr)"
     assert equal ($result.stderr | str trim) "" "--before clear wrote stderr"
     assert ($result.stdout | str contains "Cleared 1 days of history before 2000-01-02") "--before clear output changed"
     assert (not (($tmp | path join "history" "2000-01-01") | path exists)) "--before retained the removed directory"
@@ -426,7 +465,7 @@ def test-b1-clear-before-keeps-index-consistent [] {
     let empty_result = (run-command-process $tmp "api history clear --before 2000-01-04 --force")
     assert equal $empty_result.exit_code 0 "--before clear to empty failed"
     assert equal ($empty_result.stderr | str trim) "" "--before clear to empty wrote stderr"
-    assert equal (open ($tmp | path join "history" "index.nuon") | length) 0 "--before clear to empty left stale index rows"
+    assert-valid-history-index $tmp [] "--before clear to empty"
     assert equal (api history list --limit 100 | length) 0 "--before clear to empty left list rows"
     assert equal (api history search "clear-index-consistency" --limit 100 | length) 0 "--before clear to empty left URL-search rows"
     assert equal (api history search "clear-body-consistency" --limit 100 | length) 0 "--before clear to empty left body-search rows"
@@ -448,9 +487,9 @@ def test-b1-clear-retention-keeps-index-consistent [] {
     $env.API_ROOT = $tmp
     init-workspace
     let captured_date = (date now)
-    let removed_date = ($captured_date - 8day | format date "%Y-%m-%d")
-    let retained_older_date = ($captured_date - 6day | format date "%Y-%m-%d")
-    let retained_newer_date = ($captured_date - 5day | format date "%Y-%m-%d")
+    let removed_date = ($captured_date - 15day | format date "%Y-%m-%d")
+    let retained_older_date = ($captured_date - 2day | format date "%Y-%m-%d")
+    let retained_newer_date = ($captured_date - 1day | format date "%Y-%m-%d")
     let config_path = ($tmp | path join "config.nuon")
     open $config_path | upsert history_retention_days 7 | to nuon | save -f $config_path
     let fixtures = (prepare-clear-fixtures $tmp "retention" $removed_date $retained_older_date $retained_newer_date)
@@ -464,6 +503,142 @@ def test-b1-clear-retention-keeps-index-consistent [] {
     assert (($tmp | path join "history" $retained_newer_date $"($fixtures.retained_newer.id).nuon") | path exists) "configured retention removed the newer retained entry file"
     assert-clear-surfaces $tmp [$fixtures.retained_newer.id $fixtures.retained_older.id] [$fixtures.removed.id] "configured retention"
     cleanup $tmp
+}
+
+def start-history-delete-blocker [root: string, target: string] {
+    let directory = ($target | path dirname)
+    if $nu.os-info.name != "windows" {
+        ^chmod 500 $directory
+        return {mode: "permissions", directory: $directory}
+    }
+
+    let holder_script = ($root | path join "delete-block-holder.ps1")
+    let launcher_script = ($root | path join "delete-block-launcher.ps1")
+    let ready_file = ($root | path join "delete-block-ready.txt")
+    let holder_source = "param($Target, $ReadyFile)
+$stream = [System.IO.File]::Open(
+    $Target,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+)
+try {
+    [System.IO.File]::WriteAllText($ReadyFile, 'ready')
+    [System.Threading.ManualResetEvent]::new($false).WaitOne() | Out-Null
+} finally {
+    $stream.Dispose()
+}"
+    let launcher_source = "param($HolderScript, $Target, $ReadyFile)
+$arguments = @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    ('\"{0}\"' -f $HolderScript),
+    ('\"{0}\"' -f $Target),
+    ('\"{0}\"' -f $ReadyFile)
+)
+$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden
+if (-not [System.Threading.SpinWait]::SpinUntil({ Test-Path -LiteralPath $ReadyFile }, 10000)) {
+    Stop-Process -Id $process.Id -Force
+    throw 'Delete blocker did not reach the ready barrier'
+}
+$process.Id"
+    $holder_source | save -f $holder_script
+    $launcher_source | save -f $launcher_script
+    let launched = (
+        do {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $holder_script $target $ready_file
+        }
+        | complete
+    )
+    assert equal $launched.exit_code 0 $"delete blocker failed to lock the entry file: ($launched.stderr)"
+    {
+        mode: "lock"
+        pid: ($launched.stdout | str trim | into int)
+    }
+}
+
+def stop-history-delete-blocker [blocker: record] {
+    if $blocker.mode == "permissions" {
+        ^chmod 700 $blocker.directory
+        return
+    }
+    let stopped = (test-complete-result (
+        ^powershell.exe -NoProfile -NonInteractive -Command (
+            "Stop-Process -Id " + ($blocker.pid | into string) + " -Force -ErrorAction SilentlyContinue"
+        )
+        | complete
+    ))
+    assert equal $stopped.exit_code 0 $"delete blocker failed to release the file lock: ($stopped.stderr)"
+}
+
+def run-partial-clear-failure-case [mode: string] {
+    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: permission-based delete failure cannot be induced as root"}
+    }
+
+    let tmp = (make-temp-dir $"b1-clear-failure-($mode)")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let captured_date = (date now)
+    let dates = if $mode == "before" {
+        {first: "2000-01-01", blocked: "2000-01-02", retained: "2000-01-03"}
+    } else {
+        {first: ($captured_date - 16day | format date "%Y-%m-%d"), blocked: ($captured_date - 15day | format date "%Y-%m-%d"), retained: ($captured_date - 1day | format date "%Y-%m-%d")}
+    }
+    if $mode == "retention" {
+        let config_path = ($tmp | path join "config.nuon")
+        open $config_path | upsert history_retention_days 7 | to nuon | save -f $config_path
+    }
+
+    let first = (clear-fixture $"($mode)-first" $dates.first $"failure-($mode)")
+    let blocked = (clear-fixture $"($mode)-blocked" $dates.blocked $"failure-($mode)")
+    let retained = (clear-fixture $"($mode)-retained" $dates.retained $"failure-($mode)")
+    save-history-fixture $tmp $dates.first $first
+    save-history-fixture $tmp $dates.blocked $blocked
+    save-history-fixture $tmp $dates.retained $retained
+    api history rebuild-index | ignore
+    let blocked_path = ($tmp | path join "history" $dates.blocked $"($blocked.id).nuon")
+    let blocker = (start-history-delete-blocker $tmp $blocked_path)
+    let command = if $mode == "before" {
+        "api history clear --before 2000-01-03 --force"
+    } else {
+        "api history clear --force"
+    }
+    let result = (run-command-process $tmp $command)
+    let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
+    if $stop_failure != null {
+        cleanup $tmp
+        error make {msg: $stop_failure.msg}
+    }
+
+    let failure = try {
+        assert ($result.exit_code != 0) $"($mode): partial deletion failure exited zero"
+        assert equal ($result.stdout | str trim) "" $"($mode): partial deletion failure wrote stdout"
+        assert equal $result.stderr ($result.stderr | ansi strip) $"($mode): deletion error contained ANSI"
+        assert (not ($result.stderr | str trim | is-empty)) $"($mode): deletion error was empty"
+        assert ($result.stderr | str contains $dates.blocked) $"($mode): deletion error did not identify the blocked directory"
+        assert (not ($result.stderr | str contains "Cleared ")) $"($mode): deletion failure printed misleading success text"
+
+        assert (not (($tmp | path join "history" $dates.first) | path exists)) $"($mode): first committed deletion was rolled back"
+        assert ($blocked_path | path exists) $"($mode): blocked entry file was removed"
+        assert (($tmp | path join "history" $dates.retained $"($retained.id).nuon") | path exists) $"($mode): retained entry file was removed"
+        assert-clear-surfaces $tmp [$retained.id $blocked.id] [$first.id] $"($mode) delete failure"
+        null
+    } catch {|error| $error }
+
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-clear-before-failure-reconciles-index [] {
+    run-partial-clear-failure-case "before"
+}
+
+def test-b1-clear-retention-failure-reconciles-index [] {
+    run-partial-clear-failure-case "retention"
 }
 
 def test-b1-clear-all-removes-entire-history [] {
@@ -506,8 +681,11 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
         (run-test "B1: API_ROOT and default environment stay isolated" { test-b1-api-root-environment-scoping })
+        (run-test "B1: structurally invalid indexes rebuild canonically" { test-b1-invalid-index-shapes-recover })
         (run-test "B1: --before clear keeps index-backed surfaces consistent" { test-b1-clear-before-keeps-index-consistent })
         (run-test "B1: configured retention keeps index-backed surfaces consistent" { test-b1-clear-retention-keeps-index-consistent })
+        (run-test "B1: --before deletion failure reconciles committed index changes" { test-b1-clear-before-failure-reconciles-index })
+        (run-test "B1: retention deletion failure reconciles committed index changes" { test-b1-clear-retention-failure-reconciles-index })
         (run-test "B1: --all removes the entire indexed history state" { test-b1-clear-all-removes-entire-history })
     ]
 }
