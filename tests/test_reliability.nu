@@ -98,6 +98,8 @@ def test-a4-resend-environment-flag [] {
     let tmp = (make-temp-dir "a4")
     $env.API_ROOT = $tmp
     init-workspace
+    let config_path = ($tmp | path join "config.nuon")
+    open $config_path | upsert default_environment "stored-env" | to nuon | save -f $config_path
     let r1 = (api get "https://jsonplaceholder.typicode.com/posts/1" --raw)
     assert ($r1 != null)
     let hist = (api history list -l 1)
@@ -105,6 +107,12 @@ def test-a4-resend-environment-flag [] {
     # --environment flag should be accepted (even if it's a no-op)
     let r2 = (api history resend $id --environment "nonexistent" --raw)
     assert ($r2 != null) "--environment flag should not crash resend"
+    assert equal $r2.request.method $r1.request.method "--environment changed the replay method"
+    assert equal $r2.request.url $r1.request.url "--environment changed the replay URL"
+    assert equal $r2.response.status $r1.response.status "--environment changed the replay response"
+    assert equal (open $config_path | get default_environment) "stored-env" "--environment changed workspace configuration"
+    let replay_id = (api history list --limit 1 | first | get id)
+    assert equal (api history get $replay_id | get environment) "stored-env" "--environment changed the stored replay environment"
     cleanup $tmp
 }
 

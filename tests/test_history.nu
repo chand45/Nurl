@@ -15,7 +15,7 @@ def synth-res [status: int = 200] {
 }
 
 def history-fixture [id: string, timestamp: any, url: string] {
-    mut entry = {
+    let entry = {
         id: $id
         timestamp: $timestamp
         environment: null
@@ -23,9 +23,10 @@ def history-fixture [id: string, timestamp: any, url: string] {
         response: {status: 200, status_text: "OK", headers: {}, body: {fixture: $id}, time_ms: 1, size_bytes: 1}
     }
     if $timestamp == null {
-        $entry = ($entry | reject timestamp)
+        $entry | reject timestamp
+    } else {
+        $entry
     }
-    $entry
 }
 
 def save-history-fixture [root: string, date_dir: string, entry: record] {
@@ -163,7 +164,11 @@ def test-b1-burst-order-is-deterministic [] {
     open $config_path | upsert default_environment "burst-env" | to nuon | save -f $config_path
 
     let ids = 1..10 | each {|n|
-        api history save (synth-req $"https://example.com/request-($n)") (synth-res 200)
+        let response = (
+            synth-res 200
+            | upsert body {search_marker: "burst-body-fragment", sequence: $n}
+        )
+        api history save (synth-req $"https://example.com/request-($n)") $response
     }
     let expected = ($ids | reverse)
     let entries = $ids | each {|id| api history get $id }
@@ -192,14 +197,18 @@ def test-b1-burst-order-is-deterministic [] {
     assert equal ($search_results | get id) $expected "search order differs from list order"
     assert ($search_results | all {|entry| $entry.timestamp =~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' }) "search timestamps must remain well-formed RFC3339"
     assert equal (api history search "request-" --limit 1 | get id | first) ($ids | last) "search --limit 1 did not select the final entry"
+    assert equal (api history search "request-" --limit 1000 | get id) $expected "overlarge search limit did not return all entries"
     assert equal (api history search "request-" --limit 0 | length) 0 "zero search limit must select no entries"
+    assert equal (api history search "burst-body-fragment" --limit 10 | get id) $expected "body search order differs from list order"
     assert equal (open $index_path | get id) $expected "index order differs from list order"
     assert equal (open $index_path --raw) $index_before "list/search unexpectedly rewrote the index"
 
     rm $index_path
+    assert (not ($index_path | path exists)) "burst rebuild test did not remove the index"
     api history rebuild-index | ignore
     assert equal (api history list --limit 10 | get id) $expected "rebuild changed burst list order"
     assert equal (api history search "request-" --limit 10 | get id) $expected "rebuild changed burst search order"
+    assert equal (api history search "burst-body-fragment" --limit 10 | get id) $expected "rebuild changed body-search order"
     cleanup $tmp
 }
 
@@ -240,12 +249,22 @@ def test-b1-mixed-and-malformed-timestamps [] {
     let preferred = ["fractional-newest" "legacy-newest" "fractional-older" "tied-z" "tied-a" "date-only-z" "invalid-z" "invalid-a"]
     ($preferred | append "tied-z")
     | each {|id| history-summary ($fixtures | where id == $id | first) $date_dir }
+    | append {
+        id: "stale-index-only"
+        timestamp: "2026-01-01T00:00:02Z"
+        method: "GET"
+        url: "https://example.com/mixed/stale"
+        status: 200
+        time_ms: 1
+        date_dir: $date_dir
+    }
     | to nuon
     | save -f ($tmp | path join "history" "index.nuon")
 
     api history rebuild-index | ignore
     assert equal (api history list --limit 20 | get id) $preferred "rebuild did not preserve existing order for tied timestamps"
     assert equal (api history search "mixed" --limit 20 | get id) $preferred "mixed timestamp search order differed from list"
+    assert equal (open ($tmp | path join "history" "index.nuon") | get id) $preferred "rebuild retained stale or duplicate index hints"
     assert equal (api history show "invalid-z").id "invalid-z" "malformed timestamp entry was not readable"
     assert equal (api history get "invalid-a").id "invalid-a" "missing timestamp entry was not readable"
     assert equal (api history list --limit 20 | where id == "invalid-a" | first | get timestamp) "" "missing timestamp did not render safely"
@@ -285,6 +304,61 @@ def test-b1-history-id-resolution [] {
     cleanup $tmp
 }
 
+def test-b1-api-root-environment-scoping [] {
+    let first_root = (make-temp-dir "b1-root-first")
+    let second_root = (make-temp-dir "b1-root-second")
+
+    $env.API_ROOT = $first_root
+    init-workspace
+    let first_config = ($first_root | path join "config.nuon")
+    open $first_config | upsert default_environment "first-env" | to nuon | save -f $first_config
+    let first_id = (api history save (synth-req "https://example.com/first-root") (synth-res 200))
+    let first_index_before = (open ($first_root | path join "history" "index.nuon") --raw)
+
+    $env.API_ROOT = $second_root
+    init-workspace
+    let second_config = ($second_root | path join "config.nuon")
+    open $second_config | upsert default_environment "second-env" | to nuon | save -f $second_config
+    let second_id = (api history save (synth-req "https://example.com/second-root") (synth-res 200))
+    assert equal (api history get $second_id | get environment) "second-env"
+    assert equal (api history get $first_id) null "second API_ROOT exposed first-root history"
+    assert equal (open ($second_root | path join "history" "index.nuon") | get id) [$second_id]
+
+    $env.API_ROOT = $first_root
+    assert equal (api history get $first_id | get environment) "first-env"
+    assert equal (api history get $second_id) null "first API_ROOT exposed second-root history"
+    assert equal (open ($first_root | path join "history" "index.nuon") --raw) $first_index_before "second-root save mutated first-root history"
+    cleanup $first_root
+    cleanup $second_root
+}
+
+def test-b1-clear-retention-behavior [] {
+    let tmp = (make-temp-dir "b1-clear")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let old_dir = ($tmp | path join "history" "1900-01-01")
+    let future_dir = ($tmp | path join "history" "2999-01-01")
+    let old_entry = (history-fixture "old-entry" "1900-01-01T00:00:00Z" "https://example.com/old")
+    let future_entry = (history-fixture "future-entry" "2999-01-01T00:00:00Z" "https://example.com/future")
+
+    save-history-fixture $tmp "1900-01-01" $old_entry
+    save-history-fixture $tmp "2999-01-01" $future_entry
+    api history clear --before "2000-01-01"
+    assert (not ($old_dir | path exists)) "--before did not remove an older history directory"
+    assert ($future_dir | path exists) "--before removed a newer history directory"
+
+    save-history-fixture $tmp "1900-01-01" $old_entry
+    api history clear
+    assert (not ($old_dir | path exists)) "retention clear did not remove expired history"
+    assert ($future_dir | path exists) "retention clear removed future history"
+
+    api history clear --all --force
+    let history_dir = ($tmp | path join "history")
+    assert ($history_dir | path exists) "--all did not recreate the history directory"
+    assert equal (ls -a $history_dir | length) 0 "--all left history files or directories behind"
+    cleanup $tmp
+}
+
 # -- Suite runner ---------------------------------------------------------------
 
 def run-suite-history [net_ok: bool]: nothing -> list<record> {
@@ -303,5 +377,7 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: clock collision keeps timestamp, ID, and date directory consistent" { test-b1-clock-collision-boundary-consistency })
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
+        (run-test "B1: API_ROOT and default environment stay isolated" { test-b1-api-root-environment-scoping })
+        (run-test "B1: clear preserves before, retention, and all semantics" { test-b1-clear-retention-behavior })
     ]
 }

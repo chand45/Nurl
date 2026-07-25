@@ -322,7 +322,7 @@ def test-history-export-format-contract [] {
             size_bytes: 11
         }
     }
-    let final_id = ($ids | last)
+    let expected_ids = ($ids | reverse)
 
     let failure = try {
         let history_before = (command-error-snapshot ($root | path join "history"))
@@ -363,22 +363,20 @@ def test-history-export-format-contract [] {
                     $stdout_result.stdout | from csv
                 }
                 assert equal ($stdout_rows | length) $case.expected $"($format) stdout export selected the wrong count for ($case.name)"
+                assert equal ($stdout_rows | each {|row| $row.id }) ($expected_ids | first $case.expected) $"($format) stdout export order changed for ($case.name)"
                 if $format == "csv" and $case.expected > 0 {
                     assert equal ($stdout_rows | columns) $csv_columns "CSV fields changed"
                 }
                 if $case.expected > 0 {
-                    assert equal ($stdout_rows | first | get id) $final_id $"($format) stdout export did not put the final persisted ID first"
                     if $format == "json" {
-                        let first = ($stdout_rows | first)
-                        assert equal ($first | columns) [id timestamp environment request response] "JSON full-entry schema changed"
-                        assert equal ($first.request | columns) [method url headers body] "JSON request schema changed"
-                        assert equal ($first.response | columns) [status status_text headers body time_ms size_bytes] "JSON response schema changed"
-                        assert equal ($first.response.status | describe) "int" "JSON status type changed"
-                        assert equal ($first.response.time_ms | describe) "int" "JSON time_ms type changed"
+                        assert ($stdout_rows | all {|row| ($row | columns) == [id timestamp environment request response] }) "JSON full-entry schema changed"
+                        assert ($stdout_rows | all {|row| ($row.request | columns) == [method url headers body] }) "JSON request schema changed"
+                        assert ($stdout_rows | all {|row| ($row.response | columns) == [status status_text headers body time_ms size_bytes] }) "JSON response schema changed"
+                        assert ($stdout_rows | all {|row| ($row.response.status | describe) == "int" }) "JSON status type changed"
+                        assert ($stdout_rows | all {|row| ($row.response.time_ms | describe) == "int" }) "JSON time_ms type changed"
                     } else {
-                        let first = ($stdout_rows | first)
-                        assert equal ($first.status | describe) "int" "CSV status type changed"
-                        assert equal ($first.time_ms | describe) "int" "CSV time_ms type changed"
+                        assert ($stdout_rows | all {|row| ($row.status | describe) == "int" }) "CSV status type changed"
+                        assert ($stdout_rows | all {|row| ($row.time_ms | describe) == "int" }) "CSV time_ms type changed"
                     }
                 }
 
@@ -387,43 +385,47 @@ def test-history-export-format-contract [] {
                 let file_result = (run-command-process $root $"api history export --format ($format) --limit ($case.limit) --output ($output_file | to nuon)")
                 assert equal $file_result.exit_code 0 $"($format) file export with ($case.name) limit failed"
                 assert equal ($file_result.stderr | str trim) "" $"($format) file export with ($case.name) limit wrote stderr"
+                assert equal (($file_result.stdout | ansi strip) | str trim) $"Exported ($case.expected) entries to ($output_file)" $"($format) file export confirmation changed"
                 assert ($output_file | path exists) $"($format) file export did not create output"
                 let output_raw = (open $output_file --raw)
                 assert equal $output_raw ($output_raw | ansi strip) $"($format) export file contained ANSI"
                 let file_rows = (open $output_file)
                 assert equal ($file_rows | length) $case.expected $"($format) file export selected the wrong count for ($case.name)"
+                assert equal ($file_rows | each {|row| $row.id }) ($expected_ids | first $case.expected) $"($format) file export order changed for ($case.name)"
                 if $format == "csv" {
                     assert equal (open $output_file --raw | lines | first) "id,timestamp,method,url,status,time_ms" "CSV file header changed"
                     if $case.expected > 0 {
                         assert equal ($file_rows | columns) $csv_columns "CSV file fields changed"
                     }
                 }
-                if $case.expected > 0 {
-                    assert equal ($file_rows | first | get id) $final_id $"($format) file export did not put the final persisted ID first"
-                }
             }
         }
         assert equal (command-error-snapshot ($root | path join "history")) $history_before "valid history export mutated history"
 
-        rm ($root | path join "history" "index.nuon")
+        let index_path = ($root | path join "history" "index.nuon")
+        rm $index_path
+        assert (not ($index_path | path exists)) "history export rebuild test did not remove the index"
         api history rebuild-index | ignore
+        assert equal (open $index_path | get id) $expected_ids "rebuilt history index order changed"
         let rebuilt_history = (command-error-snapshot ($root | path join "history"))
         for format in ["json" "csv"] {
-            let stdout_result = (run-command-process $root $"api history export --format ($format) --limit 1")
+            let stdout_result = (run-command-process $root $"api history export --format ($format) --limit 10")
             assert equal $stdout_result.exit_code 0 $"rebuilt ($format) stdout export failed"
             assert equal ($stdout_result.stderr | str trim) "" $"rebuilt ($format) stdout export wrote stderr"
+            assert equal $stdout_result.stdout ($stdout_result.stdout | ansi strip) $"rebuilt ($format) stdout export contained ANSI"
             let stdout_rows = if $format == "json" {
                 $stdout_result.stdout | from json
             } else {
                 $stdout_result.stdout | from csv
             }
-            assert equal ($stdout_rows | first | get id) $final_id $"rebuilt ($format) stdout export changed newest entry"
+            assert equal ($stdout_rows | get id) $expected_ids $"rebuilt ($format) stdout export order changed"
 
             let output_file = ($output_dir | path join $"rebuilt.($format)")
-            let file_result = (run-command-process $root $"api history export --format ($format) --limit 1 --output ($output_file | to nuon)")
+            let file_result = (run-command-process $root $"api history export --format ($format) --limit 10 --output ($output_file | to nuon)")
             assert equal $file_result.exit_code 0 $"rebuilt ($format) file export failed"
             assert equal ($file_result.stderr | str trim) "" $"rebuilt ($format) file export wrote stderr"
-            assert equal (open $output_file | first | get id) $final_id $"rebuilt ($format) file export changed newest entry"
+            assert equal (($file_result.stdout | ansi strip) | str trim) $"Exported 10 entries to ($output_file)" $"rebuilt ($format) file export confirmation changed"
+            assert equal (open $output_file | get id) $expected_ids $"rebuilt ($format) file export order changed"
         }
         assert equal (command-error-snapshot ($root | path join "history")) $rebuilt_history "post-rebuild exports mutated history"
 
@@ -511,6 +513,65 @@ def test-collection-show-schema [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def test-history-read-stream-contracts [] {
+    let root = (make-temp-dir "history-read-streams")
+    $env.API_ROOT = $root
+    api init | ignore
+    let id = (api history save {
+        method: "POST"
+        url: "https://example.invalid/history-stream"
+        headers: {X-Test: "safe"}
+        body: {input: 1}
+    } {
+        status: 201
+        status_text: "Created"
+        headers: {Content-Type: "application/json"}
+        body: {output: 2}
+        time_ms: 9
+        size_bytes: 12
+    })
+
+    let human = (run-command-process $root "api history list --limit 1")
+    assert equal $human.exit_code 0 "human history list failed"
+    assert equal ($human.stderr | str trim) "" "human history list wrote stderr"
+    assert equal $human.stdout ($human.stdout | ansi strip) "human history list contained ANSI"
+    for heading in ["id" "timestamp" "method" "status" "url"] {
+        assert ($human.stdout | str contains $heading) $"human history list omitted the ($heading) column"
+    }
+    assert ($human.stdout | str contains ($id | str substring 0..10)) "human history list omitted the saved ID prefix"
+    assert ($human.stdout =~ '\d{2}:\d{2}:\d{2}') "human history list omitted the HH:MM:SS timestamp"
+
+    let machine_command = (
+        "let listed = (api history list --limit 1); "
+        + "let searched = (api history search history-stream --limit 1); "
+        + "let shown = (api history show " + ($id | to nuon) + "); "
+        + "let fetched = (api history get " + ($id | to nuon) + "); "
+        + '{list: $listed, search: $searched, show: $shown, get: $fetched} | to json --raw'
+    )
+    let machine = (run-command-process $root $machine_command)
+    assert equal $machine.exit_code 0 "typed history read subprocess failed"
+    assert equal ($machine.stderr | str trim) "" "typed history read subprocess wrote stderr"
+    assert equal $machine.stdout ($machine.stdout | ansi strip) "typed history read output contained ANSI"
+    let parsed = ($machine.stdout | from json)
+    assert equal ($parsed.list | columns) [id timestamp method status url time_ms] "typed list schema changed"
+    assert equal ($parsed.search | columns) [id timestamp method status url] "typed search schema changed"
+    assert equal ($parsed.list | first | get id) $id
+    assert equal ($parsed.search | first | get id) $id
+    assert (($parsed.list | first | get timestamp) =~ '^\d{2}:\d{2}:\d{2}$') "typed list timestamp must remain HH:MM:SS"
+    assert (($parsed.search | first | get timestamp) =~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') "typed search timestamp shape changed"
+    assert equal ($parsed.list | first | get method | describe) "string"
+    assert equal ($parsed.list | first | get status | describe) "int"
+    assert equal ($parsed.list | first | get url | describe) "string"
+    assert equal ($parsed.list | first | get time_ms | describe) "int"
+    assert equal $parsed.show $parsed.get "typed show/get records diverged"
+    assert equal ($parsed.show | columns) [id timestamp environment request response] "typed show/get schema changed"
+    assert equal ($parsed.show.request | columns) [method url headers body] "typed request schema changed"
+    assert equal ($parsed.show.response | columns) [status status_text headers body time_ms size_bytes] "typed response schema changed"
+    assert equal ($parsed.show.response.status | describe) "int"
+    assert equal ($parsed.show.response.time_ms | describe) "int"
+    cleanup $root
+}
+
 def pretty-result [body: any] {
     {
         request: {method: "GET", url: "https://example.invalid", headers: {}, body: null}
@@ -571,6 +632,7 @@ def run-suite-surface-contracts []: nothing -> list<record> {
         (run-test "supported output modes and raw-body precedence stay deterministic" { test-supported-output-modes-and-raw-body })
         (run-test "explicit body-file failures are nonzero and mutation-free" { test-body-file-contracts })
         (run-test "history export formats validate before output or mutation" { test-history-export-format-contract })
+        (run-test "human and typed history readers preserve streams and schemas" { test-history-read-stream-contracts })
         (run-test "collection show returns metadata, requests, and environments safely" { test-collection-show-schema })
         (run-test "api pretty serializes table and nested JSON bodies" { test-pretty-table-contract })
     ]
