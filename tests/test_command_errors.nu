@@ -1,26 +1,5 @@
 # Public command error and OAuth2 stream-contract regressions.
 
-def run-command-process [root: string, command: string] {
-    let script_path = (test-temp-dir | path join $"nurl-command-error-(random uuid).nu")
-    let config_path = (test-temp-dir | path join $"nurl-command-config-(random uuid).nu")
-    let env_config_path = (test-temp-dir | path join $"nurl-command-env-(random uuid).nu")
-    let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
-    [
-        $"use ($module_path | to nuon) *"
-        $"$env.API_ROOT = ($root | to nuon)"
-        "$env.NO_COLOR = '1'"
-        $command
-    ] | str join "\n" | save -f $script_path
-    "$env.config.use_ansi_coloring = false" | save -f $config_path
-    "# Isolated test environment." | save -f $env_config_path
-
-    let result = (test-complete-result (do {
-        ^$nu.current-exe --config $config_path --env-config $env_config_path $script_path
-    } | complete))
-    rm -f $script_path $config_path $env_config_path
-    $result
-}
-
 def command-error-entries [root: string] {
     if not ($root | path exists) {
         return []

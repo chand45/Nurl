@@ -332,30 +332,158 @@ def test-b1-api-root-environment-scoping [] {
     cleanup $second_root
 }
 
-def test-b1-clear-retention-behavior [] {
-    let tmp = (make-temp-dir "b1-clear")
+def clear-fixture [id: string, date: string, group: string] {
+    {
+        id: $id
+        timestamp: $"($date)T00:00:00Z"
+        environment: null
+        request: {
+            method: "GET"
+            url: $"https://example.com/clear-index-consistency/($group)/($id)"
+            headers: {}
+            body: null
+        }
+        response: {
+            status: 200
+            status_text: "OK"
+            headers: {}
+            body: {marker: "clear-body-consistency", group: $group, id: $id}
+            time_ms: 1
+            size_bytes: 1
+        }
+    }
+}
+
+def assert-clear-surfaces [root: string, expected_ids: list, removed_ids: list, label: string] {
+    let index_path = ($root | path join "history" "index.nuon")
+    assert ($index_path | path exists) $"($label): index.nuon is missing"
+    assert equal (open $index_path | get id) $expected_ids $"($label): index IDs are stale or out of order"
+    assert equal (api history list --limit 100 | get id) $expected_ids $"($label): list IDs differ from index"
+    assert equal (api history search "clear-index-consistency" --limit 100 | get id) $expected_ids $"($label): URL search IDs differ from index"
+    assert equal (api history search "clear-body-consistency" --limit 100 | get id) $expected_ids $"($label): body search IDs differ from entry files"
+
+    for id in $expected_ids {
+        assert equal (api history get $id | get id) $id $"($label): retained ID '($id)' is unreadable"
+    }
+    for id in $removed_ids {
+        assert equal (api history get $id) null $"($label): removed ID '($id)' remains readable"
+    }
+
+    for format in ["json" "csv"] {
+        let result = (run-command-process $root $"api history export --format ($format) --limit 100")
+        assert equal $result.exit_code 0 $"($label): ($format) export failed"
+        assert equal ($result.stderr | str trim) "" $"($label): ($format) export wrote stderr"
+        assert equal $result.stdout ($result.stdout | ansi strip) $"($label): ($format) export contained ANSI"
+        if $format == "csv" {
+            assert equal ($result.stdout | lines | first) "id,timestamp,method,url,status,time_ms" $"($label): CSV header changed"
+        }
+        let rows = if $format == "json" {
+            $result.stdout | from json
+        } else {
+            $result.stdout | from csv
+        }
+        assert equal ($rows | get id) $expected_ids $"($label): ($format) export IDs are inconsistent"
+    }
+}
+
+def prepare-clear-fixtures [
+    root: string
+    group: string
+    removed_date: string
+    retained_older_date: string
+    retained_newer_date: string
+] {
+    let removed = (clear-fixture $"($group)-removed" $removed_date $group)
+    let retained_older = (clear-fixture $"($group)-retained-older" $retained_older_date $group)
+    let retained_newer = (clear-fixture $"($group)-retained-newer" $retained_newer_date $group)
+    save-history-fixture $root $removed_date $removed
+    save-history-fixture $root $retained_older_date $retained_older
+    save-history-fixture $root $retained_newer_date $retained_newer
+    api history rebuild-index | ignore
+
+    let index_path = ($root | path join "history" "index.nuon")
+    assert ($index_path | path exists) $"($group): setup did not create index.nuon"
+    assert equal (open $index_path | get id) [$retained_newer.id $retained_older.id $removed.id] $"($group): indexed setup order changed"
+    {removed: $removed, retained_older: $retained_older, retained_newer: $retained_newer}
+}
+
+def test-b1-clear-before-keeps-index-consistent [] {
+    let tmp = (make-temp-dir "b1-clear-before")
     $env.API_ROOT = $tmp
     init-workspace
-    let old_dir = ($tmp | path join "history" "1900-01-01")
-    let future_dir = ($tmp | path join "history" "2999-01-01")
-    let old_entry = (history-fixture "old-entry" "1900-01-01T00:00:00Z" "https://example.com/old")
-    let future_entry = (history-fixture "future-entry" "2999-01-01T00:00:00Z" "https://example.com/future")
+    let fixtures = (prepare-clear-fixtures $tmp "before" "2000-01-01" "2000-01-02" "2000-01-03")
 
-    save-history-fixture $tmp "1900-01-01" $old_entry
-    save-history-fixture $tmp "2999-01-01" $future_entry
-    api history clear --before "2000-01-01"
-    assert (not ($old_dir | path exists)) "--before did not remove an older history directory"
-    assert ($future_dir | path exists) "--before removed a newer history directory"
+    let result = (run-command-process $tmp "api history clear --before 2000-01-02 --force")
+    assert equal $result.exit_code 0 "--before clear failed"
+    assert equal ($result.stderr | str trim) "" "--before clear wrote stderr"
+    assert ($result.stdout | str contains "Cleared 1 days of history before 2000-01-02") "--before clear output changed"
+    assert (not (($tmp | path join "history" "2000-01-01") | path exists)) "--before retained the removed directory"
+    assert (($tmp | path join "history" "2000-01-02" $"($fixtures.retained_older.id).nuon") | path exists) "--before removed the older retained entry file"
+    assert (($tmp | path join "history" "2000-01-03" $"($fixtures.retained_newer.id).nuon") | path exists) "--before removed the newer retained entry file"
+    let retained_ids = [$fixtures.retained_newer.id $fixtures.retained_older.id]
+    assert-clear-surfaces $tmp $retained_ids [$fixtures.removed.id] "--before"
 
-    save-history-fixture $tmp "1900-01-01" $old_entry
-    api history clear
-    assert (not ($old_dir | path exists)) "retention clear did not remove expired history"
-    assert ($future_dir | path exists) "retention clear removed future history"
+    let empty_result = (run-command-process $tmp "api history clear --before 2000-01-04 --force")
+    assert equal $empty_result.exit_code 0 "--before clear to empty failed"
+    assert equal ($empty_result.stderr | str trim) "" "--before clear to empty wrote stderr"
+    assert equal (open ($tmp | path join "history" "index.nuon") | length) 0 "--before clear to empty left stale index rows"
+    assert equal (api history list --limit 100 | length) 0 "--before clear to empty left list rows"
+    assert equal (api history search "clear-index-consistency" --limit 100 | length) 0 "--before clear to empty left URL-search rows"
+    assert equal (api history search "clear-body-consistency" --limit 100 | length) 0 "--before clear to empty left body-search rows"
+    assert equal (api history get $fixtures.retained_newer.id) null "--before clear to empty retained an entry"
+    let json_empty = (run-command-process $tmp "api history export --format json --limit 100")
+    let csv_empty = (run-command-process $tmp "api history export --format csv --limit 100")
+    assert equal $json_empty.exit_code 0 "--before clear to empty JSON export failed"
+    assert equal $csv_empty.exit_code 0 "--before clear to empty CSV export failed"
+    assert equal ($json_empty.stderr | str trim) "" "--before clear to empty JSON export wrote stderr"
+    assert equal ($csv_empty.stderr | str trim) "" "--before clear to empty CSV export wrote stderr"
+    assert equal ($json_empty.stdout | from json | length) 0 "--before clear to empty left JSON rows"
+    assert equal ($csv_empty.stdout | lines | first) "id,timestamp,method,url,status,time_ms" "--before clear to empty CSV header changed"
+    assert equal ($csv_empty.stdout | from csv | length) 0 "--before clear to empty left CSV rows"
+    cleanup $tmp
+}
 
-    api history clear --all --force
+def test-b1-clear-retention-keeps-index-consistent [] {
+    let tmp = (make-temp-dir "b1-clear-retention")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let captured_date = (date now)
+    let removed_date = ($captured_date - 8day | format date "%Y-%m-%d")
+    let retained_older_date = ($captured_date - 6day | format date "%Y-%m-%d")
+    let retained_newer_date = ($captured_date - 5day | format date "%Y-%m-%d")
+    let config_path = ($tmp | path join "config.nuon")
+    open $config_path | upsert history_retention_days 7 | to nuon | save -f $config_path
+    let fixtures = (prepare-clear-fixtures $tmp "retention" $removed_date $retained_older_date $retained_newer_date)
+
+    let result = (run-command-process $tmp "api history clear --force")
+    assert equal $result.exit_code 0 "configured-retention clear failed"
+    assert equal ($result.stderr | str trim) "" "configured-retention clear wrote stderr"
+    assert ($result.stdout | str contains "Cleared 1 days of history older than 7 days") "configured-retention clear output changed"
+    assert (not (($tmp | path join "history" $removed_date) | path exists)) "configured retention retained the expired directory"
+    assert (($tmp | path join "history" $retained_older_date $"($fixtures.retained_older.id).nuon") | path exists) "configured retention removed the older retained entry file"
+    assert (($tmp | path join "history" $retained_newer_date $"($fixtures.retained_newer.id).nuon") | path exists) "configured retention removed the newer retained entry file"
+    assert-clear-surfaces $tmp [$fixtures.retained_newer.id $fixtures.retained_older.id] [$fixtures.removed.id] "configured retention"
+    cleanup $tmp
+}
+
+def test-b1-clear-all-removes-entire-history [] {
+    let tmp = (make-temp-dir "b1-clear-all")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let fixtures = (prepare-clear-fixtures $tmp "all" "2000-01-01" "2000-01-02" "2000-01-03")
+    let index_path = ($tmp | path join "history" "index.nuon")
+
+    let result = (run-command-process $tmp "api history clear --all --force")
+    assert equal $result.exit_code 0 "--all clear failed"
+    assert equal ($result.stderr | str trim) "" "--all clear wrote stderr"
+    assert ($result.stdout | str contains "All history cleared") "--all clear output changed"
     let history_dir = ($tmp | path join "history")
     assert ($history_dir | path exists) "--all did not recreate the history directory"
     assert equal (ls -a $history_dir | length) 0 "--all left history files or directories behind"
+    assert (not ($index_path | path exists)) "--all left an index behind"
+    assert equal (api history get $fixtures.removed.id) null "--all retained the removed entry"
+    assert equal (api history get $fixtures.retained_older.id) null "--all retained the older entry"
+    assert equal (api history get $fixtures.retained_newer.id) null "--all retained the newer entry"
     cleanup $tmp
 }
 
@@ -378,6 +506,8 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
         (run-test "B1: API_ROOT and default environment stay isolated" { test-b1-api-root-environment-scoping })
-        (run-test "B1: clear preserves before, retention, and all semantics" { test-b1-clear-retention-behavior })
+        (run-test "B1: --before clear keeps index-backed surfaces consistent" { test-b1-clear-before-keeps-index-consistent })
+        (run-test "B1: configured retention keeps index-backed surfaces consistent" { test-b1-clear-retention-keeps-index-consistent })
+        (run-test "B1: --all removes the entire indexed history state" { test-b1-clear-all-removes-entire-history })
     ]
 }

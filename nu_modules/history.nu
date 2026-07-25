@@ -665,6 +665,9 @@ export def "api history clear" [
             }
         }
 
+        if $cleared > 0 {
+            rebuild-history-index | ignore
+        }
         print $"(ansi green)Cleared ($cleared) days of history before ($before)(ansi reset)"
         return
     }
@@ -696,6 +699,9 @@ export def "api history clear" [
         }
     }
 
+    if $cleared > 0 {
+        rebuild-history-index | ignore
+    }
     print $"(ansi green)Cleared ($cleared) days of history older than ($retention_days) days(ansi reset)"
 }
 
