@@ -147,3 +147,9 @@ jobs:
         run: |
           & $env:NU_EXE --no-config-file .github/skills/validate-nurl-api/scripts/discover-commands.nu --check-help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run dangling history alias recovery
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-history-alias.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

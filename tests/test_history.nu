@@ -56,11 +56,46 @@ def create-history-directory-link [link_path: string, target_path: string] {
     }
 }
 
-def create-history-file-link [link_path: string, target_path: string] {
-    if $nu.os-info.name == "windows" {
-        (^cmd.exe /d /c mklink $link_path $target_path | complete).exit_code == 0
+def create-history-file-link [
+    link_path: string
+    target_path: string
+    force_unavailable: bool = false
+] {
+    if $force_unavailable {
+        return {
+            created: false
+            unavailable: true
+            detail: "forced unavailable for capability-skip regression"
+        }
+    }
+
+    let result = if $nu.os-info.name == "windows" {
+        ^cmd.exe /d /c mklink $link_path $target_path | complete
     } else {
-        (^ln -s $target_path $link_path | complete).exit_code == 0
+        ^ln -s $target_path $link_path | complete
+    }
+    if $result.exit_code == 0 {
+        return {created: true, unavailable: false, detail: ""}
+    }
+
+    let detail = (
+        [$result.stdout $result.stderr]
+        | str join "\n"
+        | str trim
+    )
+    let capability_denied = (
+        ($detail | str contains -i "sufficient privilege")
+        or ($detail | str contains -i "operation not permitted")
+        or ($detail | str contains -i "not supported")
+        or ($detail | str contains -i "function not implemented")
+        or ($detail | str contains -i "read-only file system")
+    )
+    if $capability_denied {
+        return {created: false, unavailable: true, detail: $detail}
+    }
+
+    error make {
+        msg: $"History file-link fixture creation failed: ($detail | default 'unknown link command failure')"
     }
 }
 
@@ -69,6 +104,16 @@ def remove-history-file-link [link_path: string] {
         ^cmd.exe /d /c del $link_path | complete
     } else {
         ^rm -f $link_path | complete
+    }
+}
+
+def cleanup-history-alias-fixture [root: string, alias_path: string, alias_created: bool] {
+    if $alias_created {
+        remove-history-file-link $alias_path | ignore
+    }
+    cleanup $root
+    if ($root | path exists) {
+        error make {msg: $"History alias fixture cleanup left '($root)'"}
     }
 }
 
@@ -1004,7 +1049,10 @@ def test-b1-clear-recovery-canonicalizes-duplicate-hints [] {
     let retained_hint = (history-summary $retained "2000-01-02")
     let retained_path = ($tmp | path join "history" "2000-01-02" $"($retained.id).nuon")
     let retained_alias = ($tmp | path join "history" "2000-01-01" $"($retained.id).nuon")
-    let retained_alias_created = (create-history-file-link $retained_alias $retained_path)
+    let retained_alias_created = (
+        create-history-file-link $retained_alias $retained_path
+        | get created
+    )
     let retained_recovery_hints = if $retained_alias_created {
         let alias_hint = ($retained_hint | update date_dir "2000-01-01")
         [($alias_hint | merge {injected: "first"}) $alias_hint]
@@ -1080,8 +1128,10 @@ def test-b1-clear-recovery-canonicalizes-duplicate-hints [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
-def test-b1-clear-recovery-drops-dangling-contained-alias [] {
-    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+def test-b1-clear-recovery-drops-dangling-contained-alias [
+    force_link_unavailable: bool = false
+] {
+    if (not $force_link_unavailable) and $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
         error make {msg: "SKIP: permission-based delete failure cannot be induced as root"}
     }
 
@@ -1101,8 +1151,56 @@ def test-b1-clear-recovery-drops-dangling-contained-alias [] {
     let retained_path = ($retained_dir | path join $"($retained.id).nuon")
     let alias_name = $"($removed.id).nuon"
     let alias_path = ($retained_dir | path join $alias_name)
-    let alias_created = (create-history-file-link $alias_path $removed_path)
-    api history rebuild-index | ignore
+    let alias_result = try {
+        create-history-file-link $alias_path $removed_path $force_link_unavailable
+    } catch {|error|
+        let cleanup_error = try {
+            cleanup-history-alias-fixture $tmp $alias_path false
+            null
+        } catch {|cleanup_failure|
+            $cleanup_failure
+        }
+        if $cleanup_error != null {
+            error make {
+                msg: $"($error.msg)\nHistory alias fixture cleanup also failed: ($cleanup_error.msg)"
+            }
+        }
+        error make {msg: $error.msg}
+    }
+    if $alias_result.unavailable {
+        cleanup-history-alias-fixture $tmp $alias_path false
+        error make {
+            msg: $"SKIP: history file-link creation is unavailable: ($alias_result.detail)"
+        }
+    }
+    let alias_created = $alias_result.created
+    let setup_error = try {
+        let aliases_before = (
+            ls -a $retained_dir
+            | where {|entry| ($entry.name | path basename) == $alias_name }
+        )
+        assert equal ($aliases_before | length) 1 "dangling-alias fixture did not create exactly one alias"
+        assert equal ($aliases_before | first | get type) "symlink" "dangling-alias fixture created a direct file instead of an alias"
+        assert ($alias_path | path exists) "dangling-alias fixture did not resolve to its direct target before clear"
+        api history rebuild-index | ignore
+        null
+    } catch {|error|
+        $error
+    }
+    if $setup_error != null {
+        let cleanup_error = try {
+            cleanup-history-alias-fixture $tmp $alias_path $alias_created
+            null
+        } catch {|error|
+            $error
+        }
+        if $cleanup_error != null {
+            error make {
+                msg: $"($setup_error.msg)\nHistory alias fixture cleanup also failed: ($cleanup_error.msg)"
+            }
+        }
+        error make {msg: $setup_error.msg}
+    }
 
     let blocked_before = (open $blocked_path --raw)
     let retained_before = (open $retained_path --raw)
@@ -1115,7 +1213,7 @@ def test-b1-clear-recovery-drops-dangling-contained-alias [] {
     }
     let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
     if $stop_failure != null {
-        cleanup $tmp
+        cleanup-history-alias-fixture $tmp $alias_path $alias_created
         error make {msg: $stop_failure.msg}
     }
 
@@ -1127,9 +1225,8 @@ def test-b1-clear-recovery-drops-dangling-contained-alias [] {
         assert (not ($result.stderr | str contains "reconciliation after failed clear also failed")) "dangling alias aborted index reconciliation"
         assert (not ($result.stderr | str contains "Cleared ")) "dangling-alias clear printed success text"
         assert (not ($removed_path | path exists)) "dangling-alias direct target survived the committed deletion"
-        if $alias_created {
-            assert ($alias_name in $retained_names) "dangling contained alias was unexpectedly removed"
-        }
+        assert ($alias_name in $retained_names) "dangling contained alias was unexpectedly removed"
+        assert (not ($alias_path | path exists)) "contained alias still resolved after its direct target was deleted"
         assert ($blocked_path | path exists) "dangling-alias blocked survivor was removed"
         assert ($retained_path | path exists) "dangling-alias retained entry was removed"
         assert equal (open $blocked_path --raw) $blocked_before "dangling-alias blocked entry bytes changed"
@@ -1139,16 +1236,18 @@ def test-b1-clear-recovery-drops-dangling-contained-alias [] {
         null
     } catch {|error| $error }
 
-    let alias_cleanup = if $alias_created {
-        remove-history-file-link $alias_path
-    } else {
-        null
-    }
-    cleanup $tmp
-    if $alias_cleanup != null and $alias_cleanup.exit_code != 0 {
-        error make {msg: $"dangling-alias cleanup failed: ($alias_cleanup.stderr)"}
-    }
+    cleanup-history-alias-fixture $tmp $alias_path $alias_created
     if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-dangling-alias-capability-denial-skips [] {
+    let result = run-test "forced unavailable dangling-alias fixture" {
+        test-b1-clear-recovery-drops-dangling-contained-alias true
+    }
+    assert equal $result.status "skip" "forced unavailable alias fixture reported PASS"
+    assert (
+        $result.error | str contains "history file-link creation is unavailable"
+    ) "forced unavailable alias fixture did not report the capability reason"
 }
 
 def test-b1-clear-all-restores-conflicting-index-bytes [] {
@@ -1346,6 +1445,7 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: post-delete rebuild failure reconciles surviving hints" { test-b1-partial-clear-rebuild-failure-reconciles-index })
         (run-test "B1: --all partial deletion failure reconciles surviving hints" { test-b1-clear-all-failure-reconciles-index })
         (run-test "B1: exceptional recovery canonicalizes duplicate hints" { test-b1-clear-recovery-canonicalizes-duplicate-hints })
+        (run-test "B1: unavailable dangling-alias capability reports SKIP" { test-b1-dangling-alias-capability-denial-skips })
         (run-test "B1: exceptional recovery drops dangling contained aliases" { test-b1-clear-recovery-drops-dangling-contained-alias })
         (run-test "B1: exceptional recovery rejects conflicting hints" { test-b1-clear-recovery-rejects-conflicting-hints })
         (run-test "B1: failed conflicting --all restores exact index bytes" { test-b1-clear-all-restores-conflicting-index-bytes })
