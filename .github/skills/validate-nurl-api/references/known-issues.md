@@ -206,19 +206,23 @@ request, interpolates variables, or touches `.nuon` files.
   survive exceptional reconciliation. Full rebuild treated traversal or entry-read failures as
   empty/malformed data, replaced the index, and printed success after silently dropping existing
   unreadable entries.
-- **Fix:** clear captures validated canonical index hints before mutation. Every delete or
-  post-delete rebuild error reconciles those hints against contained surviving entry paths without
-  opening locked files, persists an exact-schema unique canonical index, then rethrows the original
-  contextual error. Compatible duplicates are collapsed, stale/injected data is removed, and
-  contained logical aliases are normalized to their direct regular `.nuon` files; directory and
-  non-NUON link targets are excluded. Conflicting ID/path hints produce a composed reconciliation
-  error without rewriting the index. Partial `--all` failures use the same recovery. Normal
-  explicit/automatic rebuilds require a complete traversal and raw read of every entry; genuine I/O
-  failures propagate before index replacement, while text/binary invalid NUON and non-entry content
-  remain deterministically skippable for compatibility.
+- **Fix:** clear captures validated canonical index hints and exact raw index bytes before mutation.
+  Every delete or post-delete rebuild error reconciles those hints against contained surviving
+  entry paths without opening locked files, persists an exact-schema unique canonical index, then
+  rethrows the original contextual error. Unsafe, stale, mismatched, and non-file hints are dropped
+  individually; compatible duplicates are collapsed; injected fields are removed; and contained
+  logical aliases are normalized to direct regular `.nuon` files. Dangling, external, directory,
+  and non-NUON aliases are ignored. Only conflicts among surviving safe paths produce a composed
+  reconciliation error. If reconciliation is impossible after the index changed or disappeared,
+  the captured bytes are restored exactly; restoration failure is added without replacing the
+  original clear error. Partial `--all` failures use the same recovery. Normal explicit/automatic
+  rebuilds require a complete traversal and raw read of every entry; genuine I/O failures propagate
+  before index replacement, while text/binary invalid NUON and non-entry content remain
+  deterministically skippable for compatibility.
 - **Re-check:** run `tests/test_history.nu`; the clear failure fixtures use barrier-synchronized
   Windows locks or POSIX permissions with no sleeps, and assert exact index/list/search/get/export
-  agreement after later-directory, first-directory, post-delete rebuild, and partial `--all`
-  failures. Duplicate/conflicting-hint fixtures verify canonical unique recovery or explicit
-  combined failure. Rebuild fixtures prove valid and invalid prior index bytes remain unchanged on
-  unreadable-entry failures.
+  agreement after later-directory, first-directory, post-delete rebuild, dangling-alias, and partial
+  `--all` failures. Unsafe/duplicate/conflicting-hint fixtures verify canonical unique recovery,
+  explicit combined failure, and byte-exact restoration when `--all` removes the index before
+  reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
+  unchanged on unreadable-entry failures.

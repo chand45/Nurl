@@ -64,6 +64,14 @@ def create-history-file-link [link_path: string, target_path: string] {
     }
 }
 
+def remove-history-file-link [link_path: string] {
+    if $nu.os-info.name == "windows" {
+        ^cmd.exe /d /c del $link_path | complete
+    } else {
+        ^rm -f $link_path | complete
+    }
+}
+
 # -- B1: history index is maintained --------------------------------------------------
 
 def test-b1-index-created-on-save [] {
@@ -1013,7 +1021,18 @@ def test-b1-clear-recovery-canonicalizes-duplicate-hints [] {
         history-summary $ordinary "1999-12-31"
         | update id "stale-duplicate-hint"
     )
+    let unsafe_id = "unsafe-outside-hint"
+    let unsafe_entry = (clear-fixture $unsafe_id "2000-01-01" "duplicate-hints")
+    let unsafe_hint = (history-summary $unsafe_entry "..")
+    let unsafe_path = ($tmp | path join $"($unsafe_id).nuon")
+    "outside-history-marker" | save -f $unsafe_path
+    let unsafe_before = (open $unsafe_path --raw)
+    let ordinary_hint = (history-summary $ordinary "2000-01-01")
+    let removed_conflict = ($ordinary_hint | update url "https://example.com/deleted-conflict")
     let hints = [
+        $unsafe_hint
+        $ordinary_hint
+        $removed_conflict
         ...$retained_recovery_hints
         ($blocked_hint | merge {injected: "second"})
         $blocked_hint
@@ -1042,15 +1061,159 @@ def test-b1-clear-recovery-canonicalizes-duplicate-hints [] {
         assert ($result.exit_code != 0) "duplicate-hint clear failure exited zero"
         assert equal ($result.stdout | str trim) "" "duplicate-hint clear failure wrote stdout"
         assert equal $result.stderr ($result.stderr | ansi strip) "duplicate-hint clear error contained ANSI"
+        assert ($result.stderr | str contains "2000-01-01") "duplicate-hint clear lost the original deletion error"
+        assert (not ($result.stderr | str contains "reconciliation after failed clear also failed")) "deleted or unsafe hints poisoned otherwise safe recovery"
         assert (not ($result.stderr | str contains "Cleared ")) "duplicate-hint clear failure printed success text"
-        assert (not ($ordinary_path | path exists)) "duplicate-hint ordinary entry survived"
+        assert (not ($ordinary_path | path exists)) $"duplicate-hint ordinary entry survived: ($result.stderr)"
         assert ($blocked_path | path exists) "duplicate-hint blocked entry was removed"
         assert-valid-history-index $tmp [$retained.id $blocked.id] "duplicate-hint recovery"
         assert equal (open $index_path | length) 2 "duplicate-hint recovery retained duplicate rows"
         assert equal (
             open $index_path | where id == $retained.id | get date_dir | first
         ) "2000-01-02" "duplicate-hint recovery retained a stale logical alias"
-        assert-clear-surfaces $tmp [$retained.id $blocked.id] [$ordinary.id] "duplicate-hint recovery"
+        assert equal (open $unsafe_path --raw) $unsafe_before "duplicate-hint recovery accessed an unsafe outside target"
+        assert-clear-surfaces $tmp [$retained.id $blocked.id] [$ordinary.id $unsafe_id "stale-duplicate-hint"] "duplicate-hint recovery"
+        null
+    } catch {|error| $error }
+
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-clear-recovery-drops-dangling-contained-alias [] {
+    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: permission-based delete failure cannot be induced as root"}
+    }
+
+    let tmp = (make-temp-dir "b1-clear-dangling-alias")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let removed = (clear-fixture "dangling-alias-removed" "2000-01-01" "dangling-alias")
+    let blocked = (clear-fixture "dangling-alias-blocked" "2000-01-02" "dangling-alias")
+    let retained = (clear-fixture "dangling-alias-retained" "2000-01-03" "dangling-alias")
+    save-history-fixture $tmp "2000-01-01" $removed
+    save-history-fixture $tmp "2000-01-02" $blocked
+    save-history-fixture $tmp "2000-01-03" $retained
+
+    let removed_path = ($tmp | path join "history" "2000-01-01" $"($removed.id).nuon")
+    let blocked_path = ($tmp | path join "history" "2000-01-02" $"($blocked.id).nuon")
+    let retained_dir = ($tmp | path join "history" "2000-01-03")
+    let retained_path = ($retained_dir | path join $"($retained.id).nuon")
+    let alias_name = $"($removed.id).nuon"
+    let alias_path = ($retained_dir | path join $alias_name)
+    let alias_created = (create-history-file-link $alias_path $removed_path)
+    api history rebuild-index | ignore
+
+    let blocked_before = (open $blocked_path --raw)
+    let retained_before = (open $retained_path --raw)
+    let blocker = (start-history-delete-blocker $tmp $blocked_path)
+    let result = (run-command-process $tmp "api history clear --before 2000-01-03 --force")
+    let retained_names = try {
+        ls -a $retained_dir | get name | each {|path| $path | path basename }
+    } catch {
+        []
+    }
+    let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
+    if $stop_failure != null {
+        cleanup $tmp
+        error make {msg: $stop_failure.msg}
+    }
+
+    let failure = try {
+        assert ($result.exit_code != 0) "dangling-alias clear failure exited zero"
+        assert equal ($result.stdout | str trim) "" "dangling-alias clear failure wrote stdout"
+        assert equal $result.stderr ($result.stderr | ansi strip) "dangling-alias clear error contained ANSI"
+        assert ($result.stderr | str contains "2000-01-02") $"dangling-alias clear lost the original blocked-directory error: ($result.stderr)"
+        assert (not ($result.stderr | str contains "reconciliation after failed clear also failed")) "dangling alias aborted index reconciliation"
+        assert (not ($result.stderr | str contains "Cleared ")) "dangling-alias clear printed success text"
+        assert (not ($removed_path | path exists)) "dangling-alias direct target survived the committed deletion"
+        if $alias_created {
+            assert ($alias_name in $retained_names) "dangling contained alias was unexpectedly removed"
+        }
+        assert ($blocked_path | path exists) "dangling-alias blocked survivor was removed"
+        assert ($retained_path | path exists) "dangling-alias retained entry was removed"
+        assert equal (open $blocked_path --raw) $blocked_before "dangling-alias blocked entry bytes changed"
+        assert equal (open $retained_path --raw) $retained_before "dangling-alias retained entry bytes changed"
+        assert-valid-history-index $tmp [$retained.id $blocked.id] "dangling-alias recovery"
+        assert-clear-surfaces $tmp [$retained.id $blocked.id] [$removed.id] "dangling-alias recovery"
+        null
+    } catch {|error| $error }
+
+    let alias_cleanup = if $alias_created {
+        remove-history-file-link $alias_path
+    } else {
+        null
+    }
+    cleanup $tmp
+    if $alias_cleanup != null and $alias_cleanup.exit_code != 0 {
+        error make {msg: $"dangling-alias cleanup failed: ($alias_cleanup.stderr)"}
+    }
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-clear-all-restores-conflicting-index-bytes [] {
+    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: permission-based delete failure cannot be induced as root"}
+    }
+
+    let tmp = (make-temp-dir "b1-clear-all-restore-index")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let date_dir = "z-survivors"
+    let ordinary = (clear-fixture "a-restore-ordinary" "2000-01-01" "restore-index")
+    let blocked = (clear-fixture "z-restore-blocked" "2000-01-02" "restore-index")
+    save-history-fixture $tmp $date_dir $ordinary
+    save-history-fixture $tmp $date_dir $blocked
+
+    let history_dir = ($tmp | path join "history")
+    let index_path = ($history_dir | path join "index.nuon")
+    let ordinary_path = ($history_dir | path join $date_dir $"($ordinary.id).nuon")
+    let blocked_path = ($history_dir | path join $date_dir $"($blocked.id).nuon")
+    let blocked_hint = (history-summary $blocked $date_dir)
+    let conflicting_hint = ($blocked_hint | update url "https://example.com/conflicting-restore-hint")
+    [(history-summary $ordinary $date_dir) $blocked_hint $conflicting_hint] | to nuon | save -f $index_path
+    let index_before = (open $index_path --raw)
+    let blocked_before = (open $blocked_path --raw)
+
+    if $nu.os-info.name != "windows" {
+        rm $ordinary_path
+    }
+    let blocker = (start-history-delete-blocker $tmp $blocked_path)
+    let result = (run-command-process $tmp "api history clear --all --force")
+    let index_after = try { open $index_path --raw } catch { null }
+    let history_names = try {
+        ls -a $history_dir | get name | each {|path| $path | path basename } | sort
+    } catch {
+        []
+    }
+    let survivor_names = try {
+        ls -a ($history_dir | path join $date_dir) | get name | each {|path| $path | path basename } | sort
+    } catch {
+        []
+    }
+    let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
+    if $stop_failure != null {
+        cleanup $tmp
+        error make {msg: $stop_failure.msg}
+    }
+
+    let failure = try {
+        assert ($result.exit_code != 0) "conflicting --all clear exited zero"
+        assert equal ($result.stdout | str trim) "" "conflicting --all clear wrote stdout"
+        assert equal $result.stderr ($result.stderr | ansi strip) "conflicting --all error contained ANSI"
+        assert ($result.stderr | str contains "History directory") $"conflicting --all lost the original delete error: ($result.stderr)"
+        assert ($result.stderr | str contains "reconciliation") "conflicting --all omitted the reconciliation failure"
+        assert (
+            ($result.stderr | str contains "Conflicting")
+            and ($result.stderr | str contains "history index hints")
+        ) "conflicting --all hint error was not actionable"
+        assert (not ($result.stderr | str contains "All history cleared")) "conflicting --all printed success text"
+        assert (not ($ordinary_path | path exists)) "conflicting --all ordinary entry survived"
+        assert ($blocked_path | path exists) "conflicting --all blocked survivor was removed"
+        assert equal (open $blocked_path --raw) $blocked_before "conflicting --all changed survivor bytes"
+        assert equal $index_after $index_before "conflicting --all did not restore exact prior index bytes"
+        assert equal $history_names ["index.nuon" $date_dir] "conflicting --all left a recovery artifact"
+        assert equal $survivor_names [$"($blocked.id).nuon"] "conflicting --all left an unexpected survivor artifact"
         null
     } catch {|error| $error }
 
@@ -1183,7 +1346,9 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: post-delete rebuild failure reconciles surviving hints" { test-b1-partial-clear-rebuild-failure-reconciles-index })
         (run-test "B1: --all partial deletion failure reconciles surviving hints" { test-b1-clear-all-failure-reconciles-index })
         (run-test "B1: exceptional recovery canonicalizes duplicate hints" { test-b1-clear-recovery-canonicalizes-duplicate-hints })
+        (run-test "B1: exceptional recovery drops dangling contained aliases" { test-b1-clear-recovery-drops-dangling-contained-alias })
         (run-test "B1: exceptional recovery rejects conflicting hints" { test-b1-clear-recovery-rejects-conflicting-hints })
+        (run-test "B1: failed conflicting --all restores exact index bytes" { test-b1-clear-all-restores-conflicting-index-bytes })
         (run-test "B1: --all removes the entire indexed history state" { test-b1-clear-all-removes-entire-history })
     ]
 }

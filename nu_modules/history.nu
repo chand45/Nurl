@@ -68,7 +68,13 @@ def history-index-summary-valid [summary: any] {
 def read-history-index [] {
     let path = (get-history-index-path)
     if not ($path | path exists) {
-        return {usable: false, entries: []}
+        return {
+            usable: false
+            entries: []
+            index_exists: false
+            index_raw: null
+            index_path: $path
+        }
     }
 
     # Read errors (for example permissions) must remain visible. Only NUON
@@ -80,18 +86,42 @@ def read-history-index [] {
         {valid_nuon: false, value: null}
     }
     if not $parsed.valid_nuon {
-        return {usable: false, entries: []}
+        return {
+            usable: false
+            entries: []
+            index_exists: true
+            index_raw: $raw
+            index_path: $path
+        }
     }
 
     let value_type = ($parsed.value | describe)
     if not (($value_type | str starts-with "list") or ($value_type | str starts-with "table")) {
-        return {usable: false, entries: []}
+        return {
+            usable: false
+            entries: []
+            index_exists: true
+            index_raw: $raw
+            index_path: $path
+        }
     }
     if not ($parsed.value | all {|entry| history-index-summary-valid $entry }) {
-        return {usable: false, entries: []}
+        return {
+            usable: false
+            entries: []
+            index_exists: true
+            index_raw: $raw
+            index_path: $path
+        }
     }
 
-    {usable: true, entries: $parsed.value}
+    {
+        usable: true
+        entries: $parsed.value
+        index_exists: true
+        index_raw: $raw
+        index_path: $path
+    }
 }
 
 # Load history index — list of summary entries (B1)
@@ -130,42 +160,89 @@ def history-path-key [path: string] {
 def list-history-entry-files [] {
     let dir = (get-history-dir)
     let subdirs = (ls $dir | where type == dir | get name | sort)
-    $subdirs | each {|listed_subdir|
+    mut direct_files = []
+    mut aliases = []
+
+    for listed_subdir in $subdirs {
         let date_dir = ($listed_subdir | path basename)
         let subdir = (
             resolve-under-base $dir $date_dir "history date directory"
                 --scope="history directory"
         )
-        ls $subdir
-        | where type != dir and name =~ '\.nuon$'
-        | sort-by name
-        | each {|listed_file|
+        for listed_file in (ls $subdir | sort-by name) {
             let file_name = ($listed_file.name | path basename)
+            if $file_name !~ '\.nuon$' {
+                continue
+            }
             let logical_name = $"($date_dir)/($file_name)"
-            let path = (
-                resolve-under-base $dir $logical_name "history entry"
-                    --nested
-                    --scope="history directory"
-            )
-            let extension = ($path | path parse | get extension)
-            if (
-                (path-type-safe $path) == "file"
-                and (ascii-equal-ignore-case $extension "nuon")
-            ) {
-                {
+            if $listed_file.type == "file" {
+                let path = (
+                    resolve-under-base $dir $logical_name "history entry"
+                        --nested
+                        --scope="history directory"
+                )
+                let extension = ($path | path parse | get extension)
+                if (
+                    (path-type-safe $path) != "file"
+                    or (not (ascii-equal-ignore-case $extension "nuon"))
+                ) {
+                    error make {
+                        msg: $"History entry '($listed_file.name)' is not a readable regular NUON file"
+                    }
+                }
+                $direct_files = ($direct_files | append {
                     path: $path
                     path_key: (history-path-key $path)
                     id: ($file_name | path parse | get stem)
                     date_dir: $date_dir
-                    linked: ($listed_file.type == "symlink")
+                })
+            } else if $listed_file.type == "symlink" {
+                let alias = try {
+                    let path = (
+                        resolve-under-base $dir $logical_name "history entry alias"
+                            --nested
+                            --scope="history directory"
+                    )
+                    let extension = ($path | path parse | get extension)
+                    if (
+                        (path-type-safe $path) == "file"
+                        and (ascii-equal-ignore-case $extension "nuon")
+                    ) {
+                        {
+                            path_key: (history-path-key $path)
+                            id: ($file_name | path parse | get stem)
+                            date_dir: $date_dir
+                        }
+                    } else {
+                        null
+                    }
+                } catch {
+                    null
+                }
+                if $alias != null {
+                    $aliases = ($aliases | append $alias)
                 }
             }
         }
-        | compact
-    } | flatten
-    | sort-by linked date_dir id
-    | uniq-by path_key
-    | reject linked
+    }
+
+    let alias_files = $aliases
+    $direct_files
+    | sort-by date_dir id
+    | each {|file|
+        let alias_refs = (
+            $alias_files
+            | where path_key == $file.path_key
+            | select id date_dir
+        )
+        $file | merge {
+            logical_refs: (
+                [{id: $file.id, date_dir: $file.date_dir}]
+                | append $alias_refs
+                | uniq
+            )
+        }
+    }
 }
 
 def parse-history-entry-summary [raw: any, file: record] {
@@ -336,60 +413,28 @@ def canonicalize-history-recovery-hints [entries: list, files: list] {
 
     for raw_summary in $entries {
         let hinted_summary = (canonical-history-index-summary $raw_summary)
-        let resolved = try {
-            {path: (history-entry-path $hinted_summary), error: null}
-        } catch {|path_error|
-            {path: null, error: $path_error}
-        }
-        if $resolved.error != null {
-            return {
-                usable: false
-                hints: []
-                error: {
-                    msg: $"History index hint for ID '($hinted_summary.id)' cannot be safely reconciled: ($resolved.error.msg)"
-                }
-            }
-        }
-        let resolved_path_key = (history-path-key $resolved.path)
-        let matching_files = ($files | where path_key == $resolved_path_key)
+        let matching_files = ($files | where {|file|
+            ($file.id == $hinted_summary.id) and (
+                $file.logical_refs | any {|logical| (($logical.id == $hinted_summary.id) and ($logical.date_dir == $hinted_summary.date_dir)) }
+            )
+        })
         if ($matching_files | is-empty) {
             continue
         }
-        let file = ($matching_files | first)
-        if $file.id != $hinted_summary.id {
+        let distinct_files = ($matching_files | uniq-by path_key)
+        if ($distinct_files | length) != 1 {
             return {
                 usable: false
                 hints: []
                 error: {
-                    msg: $"History index hint for ID '($hinted_summary.id)' resolves to a different entry path"
+                    msg: $"Conflicting history index hints for ID '($hinted_summary.id)' cannot be safely reconciled"
                 }
             }
         }
+        let file = ($distinct_files | first)
         let summary = ($hinted_summary | update date_dir $file.date_dir)
         let path = $file.path
         let path_key = $file.path_key
-
-        let conflicts = ($hints | where {|hint|
-            $hint.summary.id == $summary.id or $hint.path_key == $path_key
-        })
-        if not ($conflicts | is-empty) {
-            let existing = ($conflicts | first)
-            let compatible = (
-                $existing.summary.id == $summary.id
-                and $existing.path_key == $path_key
-                and (($existing.summary | to nuon) == ($summary | to nuon))
-            )
-            if $compatible {
-                continue
-            }
-            return {
-                usable: false
-                hints: []
-                error: {
-                    msg: $"Conflicting history index hints for ID '($summary.id)' cannot be safely reconciled"
-                }
-            }
-        }
 
         $hints = ($hints | append {
             summary: $summary
@@ -401,21 +446,55 @@ def canonicalize-history-recovery-hints [entries: list, files: list] {
     {usable: true, hints: $hints, error: null}
 }
 
+def canonicalize-surviving-history-recovery-hints [hints: list] {
+    mut canonical = []
+
+    for hint in $hints {
+        let conflicts = ($canonical | where {|existing|
+            $existing.summary.id == $hint.summary.id or $existing.path_key == $hint.path_key
+        })
+        if not ($conflicts | is-empty) {
+            let existing = ($conflicts | first)
+            let compatible = (
+                $existing.summary.id == $hint.summary.id
+                and $existing.path_key == $hint.path_key
+                and (($existing.summary | to nuon) == ($hint.summary | to nuon))
+            )
+            if $compatible {
+                continue
+            }
+            error make {
+                msg: $"Conflicting history index hints for ID '($hint.summary.id)' cannot be safely reconciled"
+            }
+        }
+        $canonical = ($canonical | append $hint)
+    }
+
+    $canonical
+}
+
 def capture-history-recovery-hints [] {
     let index = (read-history-index)
+    let index_snapshot = {
+        existed: $index.index_exists
+        raw: $index.index_raw
+        path: $index.index_path
+    }
     if not $index.usable {
         return {
             usable: false
             hints: []
             error: {msg: "History index is missing or structurally unusable"}
+            index_snapshot: $index_snapshot
         }
     }
 
-    # Traversal errors are visible before mutation. Semantic hint conflicts are
-    # retained as an unusable capture so a later operation failure can report
-    # both causes rather than guessing from unreadable surviving entries.
+    # Traversal errors are visible before mutation. Safe candidates remain
+    # separate until reconciliation can discard deleted paths before detecting
+    # conflicts among the actual survivors.
     let files = (list-history-entry-files)
     canonicalize-history-recovery-hints $index.entries $files
+    | merge {index_snapshot: $index_snapshot}
 }
 
 def reconcile-history-index-from-hints [recovery: record] {
@@ -428,7 +507,7 @@ def reconcile-history-index-from-hints [recovery: record] {
         mkdir $dir
     }
     let surviving_path_keys = (list-history-entry-files | get path_key)
-    let remaining = (
+    let surviving = (
         $recovery.hints
         | where {|hint|
             let current_path = try {
@@ -442,18 +521,59 @@ def reconcile-history-index-from-hints [recovery: record] {
                 and ($hint.path_key in $surviving_path_keys)
             )
         }
+    )
+    let remaining = (
+        canonicalize-surviving-history-recovery-hints $surviving
         | get summary
         | sort-history-entries
     )
     $remaining | to nuon | save -f (get-history-index-path)
 }
 
+def restore-history-index-snapshot [recovery: record] {
+    let snapshot = $recovery.index_snapshot
+    if not $snapshot.existed {
+        return
+    }
+
+    let unchanged = if ($snapshot.path | path exists) {
+        try {
+            (open $snapshot.path --raw) == $snapshot.raw
+        } catch {
+            false
+        }
+    } else {
+        false
+    }
+    if $unchanged {
+        return
+    }
+
+    let parent = ($snapshot.path | path dirname)
+    if not ($parent | path exists) {
+        mkdir $parent
+    }
+    $snapshot.raw | save -f $snapshot.path
+}
+
 def rethrow-history-clear-error [recovery: record, operation_error: record] {
     try {
         reconcile-history-index-from-hints $recovery
     } catch {|reconcile_error|
+        let restore_error = try {
+            restore-history-index-snapshot $recovery
+            null
+        } catch {|error|
+            $error
+        }
+        let combined = $"($operation_error.msg)\nHistory index reconciliation after failed clear also failed: ($reconcile_error.msg)"
+        if $restore_error != null {
+            error make {
+                msg: $"($combined)\nHistory index restoration after failed reconciliation also failed: ($restore_error.msg)"
+            }
+        }
         error make {
-            msg: $"($operation_error.msg)\nHistory index reconciliation after failed clear also failed: ($reconcile_error.msg)"
+            msg: $combined
         }
     }
     error make {msg: $operation_error.msg}
@@ -757,13 +877,11 @@ def resolve-history-entry [id: string] {
         return null
     }
 
-    # Get all history files
-    let subdirs = try { ls $dir | where type == dir | get name } catch { [] }
-    let all_files = $subdirs | each {|subdir|
-        try { ls $subdir | where name =~ '\.nuon$' | get name | sort } catch { [] }
-    } | flatten | sort | each {|path|
-        {path: $path, id: ($path | path parse | get stem)}
-    }
+    let all_files = (
+        list-history-entry-files
+        | select path id
+        | sort-by path
+    )
 
     # Try exact match first
     let exact_matches = $all_files | where {|file| $file.id == $id }
