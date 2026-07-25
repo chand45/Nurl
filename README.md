@@ -692,6 +692,7 @@ Global settings are stored in `config.nuon`:
 
 ```nushell
 {
+    default_collection: null
     default_headers: {
         "Content-Type": "application/json"
         "Accept": "application/json"
@@ -707,6 +708,10 @@ Global settings are stored in `config.nuon`:
     }
 }
 ```
+
+`default_collection` is optional. `api status` reports it as `active_collection` and reports that
+collection's `active_environment`; both fields are `null` when no default collection is configured.
+Configured collection or environment references must exist.
 
 ---
 

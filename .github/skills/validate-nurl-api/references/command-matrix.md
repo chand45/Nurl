@@ -27,7 +27,7 @@ collection) → expected result**. Internal helpers and TUI views are summarized
 | Command | Invocation | Expected |
 |---|---|---|
 | api init | `api init` | Recreates missing workspace files. **Churn:** rewrites `config.nuon`; `git checkout -- config.nuon` after. |
-| api status | `api status` | Prints active collection/env + counts, no error. |
+| api status | `api config set default_collection jsonplaceholder; api status` | Returns `root` (string), integer `global_vars` / `collections` / `history_entries`, `active_collection: jsonplaceholder`, and the collection metadata's string `active_environment`. With no configured collection, both active fields are `null`; stale or invalid configured collection/environment references fail with empty stdout and actionable stderr. |
 | api config get | `api config get` | Prints the config record. |
 | api config set | `api config set default_collection jsonplaceholder; api config get` | `default_collection` now `jsonplaceholder`. Restore prior value or `git checkout -- config.nuon`. |
 | api help | `api help` | Prints the curated command groups. |

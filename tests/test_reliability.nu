@@ -210,14 +210,106 @@ def test-a7-normal-request-writes-history [] {
 # ── V1: api status on empty workspace ────────────────────────────────────────
 
 def test-v1-status-empty-workspace [] {
-    # Offline: api status must NOT crash when history dir is empty.
-    # Was: math sum over empty list → nu::shell::unsupported_input crash.
     let tmp = (make-temp-dir "v1-status")
     $env.API_ROOT = $tmp
     api init | ignore
-    # history/ exists but has no sub-dirs — should return history_entries: 0
     let s = (api status)
+    assert equal ($s | columns) [
+        root
+        global_vars
+        collections
+        history_entries
+        active_collection
+        active_environment
+    ] "status returned an unexpected field schema"
+    assert equal ($s.root | describe) "string" "status root should be a string"
+    assert equal ($s.global_vars | describe) "int" "status global_vars should be an int"
+    assert equal ($s.collections | describe) "int" "status collections should be an int"
+    assert equal ($s.history_entries | describe) "int" "status history_entries should be an int"
     assert equal $s.history_entries 0 "empty workspace should have 0 history entries"
+    assert equal $s.active_collection null "unset default collection should report null"
+    assert equal $s.active_environment null "unset default collection should have no active environment"
+    let serialized_result = (run-command-process $tmp "api status | to json --raw")
+    assert equal $serialized_result.exit_code 0 "serialized unset status failed"
+    assert equal ($serialized_result.stderr | str trim) "" "serialized unset status wrote stderr"
+    let serialized = ($serialized_result.stdout | from json)
+    assert equal $serialized.active_collection null "serialized unset collection should be null"
+    assert equal $serialized.active_environment null "serialized unset environment should be null"
+    cleanup $tmp
+}
+
+def test-v1-status-configured-context [] {
+    let tmp = (make-temp-dir "v1-status-configured")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    api collection create jsonplaceholder | ignore
+    api collection env create jsonplaceholder default --activate | ignore
+    api config set default_collection jsonplaceholder | ignore
+
+    let configured = (api status)
+    assert equal $configured.active_collection "jsonplaceholder"
+    assert equal ($configured.active_collection | describe) "string"
+    assert equal $configured.active_environment "default"
+    assert equal ($configured.active_environment | describe) "string"
+
+    let serialized_result = (run-command-process $tmp "api status | to json --raw")
+    assert equal $serialized_result.exit_code 0 "serialized status failed"
+    assert equal ($serialized_result.stderr | str trim) "" "serialized status wrote stderr"
+    let serialized = ($serialized_result.stdout | from json)
+    assert equal $serialized.active_collection "jsonplaceholder"
+    assert equal $serialized.active_environment "default"
+
+    let human_result = (run-command-process $tmp "api status")
+    assert equal $human_result.exit_code 0 "human status failed"
+    assert equal ($human_result.stderr | str trim) "" "human status wrote stderr"
+    assert ($human_result.stdout | str contains "active_collection") "human status omitted active_collection"
+    assert ($human_result.stdout | str contains "active_environment") "human status omitted active_environment"
+
+    let meta_path = ($tmp | path join "collections" "jsonplaceholder" "meta.nuon")
+    {active_environment: null} | to nuon | save -f $meta_path
+    assert equal (api status | get active_collection) "jsonplaceholder"
+    assert equal (api status | get active_environment) null "null active environment should remain null"
+    rm $meta_path
+    assert equal (api status | get active_environment) null "missing collection metadata should report a null environment"
+    cleanup $tmp
+}
+
+def assert-v1-status-failure [root: string, expected: string] {
+    let result = (run-command-process $root "api status")
+    assert ($result.exit_code != 0) $"invalid status context exited zero: ($expected)"
+    assert equal ($result.stdout | str trim) "" $"invalid status context wrote stdout: ($expected)"
+    assert equal $result.stderr ($result.stderr | ansi strip) $"invalid status context wrote ANSI stderr: ($expected)"
+    assert ($result.stderr | str contains $expected) $"status error did not contain '($expected)': ($result.stderr)"
+}
+
+def test-v1-status-invalid-context [] {
+    let tmp = (make-temp-dir "v1-status-invalid")
+    $env.API_ROOT = $tmp
+    api init | ignore
+    let config_path = ($tmp | path join "config.nuon")
+
+    [] | to nuon | save -f $config_path
+    assert-v1-status-failure $tmp "config.nuon must contain a record"
+
+    {default_collection: 42} | to nuon | save -f $config_path
+    assert-v1-status-failure $tmp "default_collection must be a non-empty string or null"
+
+    {default_collection: missing} | to nuon | save -f $config_path
+    assert-v1-status-failure $tmp "Configured default collection 'missing' not found"
+
+    api collection create configured | ignore
+    {default_collection: configured} | to nuon | save -f $config_path
+    let meta_path = ($tmp | path join "collections" "configured" "meta.nuon")
+
+    {active_environment: 42} | to nuon | save -f $meta_path
+    assert-v1-status-failure $tmp "active_environment must be a non-empty"
+
+    {active_environment: missing} | to nuon | save -f $meta_path
+    assert-v1-status-failure $tmp "Configured active environment 'missing' not found"
+
+    let environment_path = ($tmp | path join "collections" "configured" "environments" "missing.nuon")
+    [] | to nuon | save $environment_path
+    assert-v1-status-failure $tmp "must contain a record"
     cleanup $tmp
 }
 
@@ -225,9 +317,11 @@ def test-v1-status-empty-workspace [] {
 
 def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)── A: Reliability A1-A7 ──(ansi reset)"
-    # A5 offline test runs regardless of network
     mut results = [
         (run-test "A5: status mapping offline (all codes + fallback)" { test-a5-status-mapping-offline })
+        (run-test "V1: api status reports typed unset context" { test-v1-status-empty-workspace })
+        (run-test "V1: api status reports configured collection and environment" { test-v1-status-configured-context })
+        (run-test "V1: api status rejects invalid configured context" { test-v1-status-invalid-context })
     ]
     if not $net_ok {
         $results = ($results | append (skip-test "A-Reliability-network" "network unavailable"))
@@ -244,7 +338,6 @@ def run-suite-reliability [net_ok: bool]: nothing -> list<record> {
         (run-test "A6: history dir path has no doubled slashes" { test-a6-history-dir-no-doubled-slash })
         (run-test "A7: --no-history skips writing history"     { test-a7-no-history-skips-write })
         (run-test "A7: normal request writes to history"       { test-a7-normal-request-writes-history })
-        (run-test "V1: api status on empty workspace does not crash" { test-v1-status-empty-workspace })
     ])
     $results
 }
