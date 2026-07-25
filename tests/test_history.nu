@@ -508,8 +508,9 @@ def test-b1-clear-retention-keeps-index-consistent [] {
 def start-history-delete-blocker [root: string, target: string] {
     let directory = ($target | path dirname)
     if $nu.os-info.name != "windows" {
+        ^chmod 000 $target
         ^chmod 500 $directory
-        return {mode: "permissions", directory: $directory}
+        return {mode: "permissions-delete", directory: $directory, target: $target}
     }
 
     let holder_script = ($root | path join "delete-block-holder.ps1")
@@ -520,7 +521,7 @@ $stream = [System.IO.File]::Open(
     $Target,
     [System.IO.FileMode]::Open,
     [System.IO.FileAccess]::Read,
-    [System.IO.FileShare]::Read
+[System.IO.FileShare]::None
 )
 try {
     [System.IO.File]::WriteAllText($ReadyFile, 'ready')
@@ -560,9 +561,68 @@ $process.Id"
     }
 }
 
+def start-history-read-blocker [root: string, target: string] {
+    if $nu.os-info.name != "windows" {
+        ^chmod 000 $target
+        return {mode: "permissions-read", target: $target}
+    }
+
+    let holder_script = ($root | path join "read-block-holder.ps1")
+    let launcher_script = ($root | path join "read-block-launcher.ps1")
+    let ready_file = ($root | path join "read-block-ready.txt")
+    let holder_source = "param($Target, $ReadyFile)
+$stream = [System.IO.File]::Open(
+    $Target,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::None
+)
+try {
+    [System.IO.File]::WriteAllText($ReadyFile, 'ready')
+    [System.Threading.ManualResetEvent]::new($false).WaitOne() | Out-Null
+} finally {
+    $stream.Dispose()
+}"
+    let launcher_source = "param($HolderScript, $Target, $ReadyFile)
+$arguments = @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    ('\"{0}\"' -f $HolderScript),
+    ('\"{0}\"' -f $Target),
+    ('\"{0}\"' -f $ReadyFile)
+)
+$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden
+if (-not [System.Threading.SpinWait]::SpinUntil({ Test-Path -LiteralPath $ReadyFile }, 10000)) {
+    Stop-Process -Id $process.Id -Force
+    throw 'Read blocker did not reach the ready barrier'
+}
+$process.Id"
+    $holder_source | save -f $holder_script
+    $launcher_source | save -f $launcher_script
+    let launched = (
+        do {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $holder_script $target $ready_file
+        }
+        | complete
+    )
+    assert equal $launched.exit_code 0 $"read blocker failed to lock the entry file: ($launched.stderr)"
+    {
+        mode: "lock"
+        pid: ($launched.stdout | str trim | into int)
+    }
+}
+
 def stop-history-delete-blocker [blocker: record] {
-    if $blocker.mode == "permissions" {
+    if $blocker.mode == "permissions-delete" {
         ^chmod 700 $blocker.directory
+        ^chmod 600 $blocker.target
+        return
+    }
+    if $blocker.mode == "permissions-read" {
+        ^chmod 600 $blocker.target
         return
     }
     let stopped = (test-complete-result (
@@ -633,6 +693,153 @@ def run-partial-clear-failure-case [mode: string] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def run-partial-entry-delete-failure-case [mode: string] {
+    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: permission-based delete failure cannot be induced as root"}
+    }
+
+    let tmp = (make-temp-dir $"b1-partial-entry-failure-($mode)")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let captured_date = (date now)
+    let dates = if $mode == "before" {
+        {target: "2000-01-01", retained: "2000-01-02"}
+    } else {
+        {target: ($captured_date - 15day | format date "%Y-%m-%d"), retained: ($captured_date - 1day | format date "%Y-%m-%d")}
+    }
+    if $mode == "retention" {
+        let config_path = ($tmp | path join "config.nuon")
+        open $config_path | upsert history_retention_days 7 | to nuon | save -f $config_path
+    }
+
+    let ordinary = (clear-fixture $"a-($mode)-ordinary" $dates.target $"partial-entry-($mode)")
+    let blocked = (clear-fixture $"z-($mode)-blocked" $dates.target $"partial-entry-($mode)")
+    let retained = (clear-fixture $"($mode)-retained" $dates.retained $"partial-entry-($mode)")
+    save-history-fixture $tmp $dates.target $ordinary
+    save-history-fixture $tmp $dates.target $blocked
+    save-history-fixture $tmp $dates.retained $retained
+    api history rebuild-index | ignore
+
+    let ordinary_path = ($tmp | path join "history" $dates.target $"($ordinary.id).nuon")
+    let blocked_path = ($tmp | path join "history" $dates.target $"($blocked.id).nuon")
+    let retained_path = ($tmp | path join "history" $dates.retained $"($retained.id).nuon")
+    let blocked_before = (open $blocked_path --raw)
+    let retained_before = (open $retained_path --raw)
+    let config_path = ($tmp | path join "config.nuon")
+    let config_before = (open $config_path --raw)
+
+    # POSIX permits unlinking an open file. Remove the ordinary file first,
+    # then use permissions to reproduce the same partially committed state.
+    if $nu.os-info.name != "windows" {
+        rm $ordinary_path
+    }
+    let blocker = (start-history-delete-blocker $tmp $blocked_path)
+    let command = if $mode == "before" {
+        "api history clear --before 2000-01-02 --force"
+    } else {
+        "api history clear --force"
+    }
+    let result = (run-command-process $tmp $command)
+    let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
+    if $stop_failure != null {
+        cleanup $tmp
+        error make {msg: $stop_failure.msg}
+    }
+
+    let failure = try {
+        assert ($result.exit_code != 0) $"($mode): first-directory partial deletion exited zero"
+        assert equal ($result.stdout | str trim) "" $"($mode): first-directory partial deletion wrote stdout"
+        assert equal $result.stderr ($result.stderr | ansi strip) $"($mode): first-directory deletion error contained ANSI"
+        assert (not ($result.stderr | str trim | is-empty)) $"($mode): first-directory deletion error was empty"
+        assert ($result.stderr | str contains $dates.target) $"($mode): first-directory deletion error did not identify the blocked target"
+        assert (not ($result.stderr | str contains "Cleared ")) $"($mode): first-directory deletion failure printed success text"
+
+        assert (not ($ordinary_path | path exists)) $"($mode): ordinary entry was not deleted before the failure"
+        assert ($blocked_path | path exists) $"($mode): blocked entry file was removed"
+        assert ($retained_path | path exists) $"($mode): retained entry file was removed"
+        assert equal (open $blocked_path --raw) $blocked_before $"($mode): blocked entry bytes changed"
+        assert equal (open $retained_path --raw) $retained_before $"($mode): retained entry bytes changed"
+        assert equal (open $config_path --raw) $config_before $"($mode): config changed"
+        assert-valid-history-index $tmp [$retained.id $blocked.id] $"($mode) first-directory delete failure"
+        assert-clear-surfaces $tmp [$retained.id $blocked.id] [$ordinary.id] $"($mode) first-directory delete failure"
+        null
+    } catch {|error| $error }
+
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-clear-before-first-directory-failure-reconciles-index [] {
+    run-partial-entry-delete-failure-case "before"
+}
+
+def test-b1-clear-retention-first-directory-failure-reconciles-index [] {
+    run-partial-entry-delete-failure-case "retention"
+}
+
+def test-b1-rebuild-entry-io-failure-preserves-index [] {
+    if $nu.os-info.name != "windows" and ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: unreadable entry-file failure cannot be induced as root"}
+    }
+
+    let tmp = (make-temp-dir "b1-rebuild-entry-io")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let readable = (clear-fixture "rebuild-readable" "2000-01-01" "rebuild-io")
+    let blocked = (clear-fixture "rebuild-blocked" "2000-01-02" "rebuild-io")
+    save-history-fixture $tmp "2000-01-01" $readable
+    save-history-fixture $tmp "2000-01-02" $blocked
+    api history rebuild-index | ignore
+
+    let index_path = ($tmp | path join "history" "index.nuon")
+    let readable_path = ($tmp | path join "history" "2000-01-01" $"($readable.id).nuon")
+    let blocked_path = ($tmp | path join "history" "2000-01-02" $"($blocked.id).nuon")
+    let index_before = (open $index_path --raw)
+    let readable_before = (open $readable_path --raw)
+    let blocked_before = (open $blocked_path --raw)
+    let blocker = (start-history-read-blocker $tmp $blocked_path)
+
+    let explicit = (run-command-process $tmp "api history rebuild-index | ignore")
+    let index_after_explicit = (open $index_path --raw)
+    "{}" | save -f $index_path
+    let invalid_index_before = (open $index_path --raw)
+    let automatic = (run-command-process $tmp "api history list --limit 100 | ignore")
+    let invalid_index_after = (open $index_path --raw)
+
+    let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
+    if $stop_failure != null {
+        cleanup $tmp
+        error make {msg: $stop_failure.msg}
+    }
+
+    let failure = try {
+        for result in [$explicit $automatic] {
+            assert ($result.exit_code != 0) "unreadable entry rebuild exited zero"
+            assert equal ($result.stdout | str trim) "" "unreadable entry rebuild wrote stdout or success text"
+            assert equal $result.stderr ($result.stderr | ansi strip) "unreadable entry rebuild error contained ANSI"
+            assert (not ($result.stderr | str trim | is-empty)) "unreadable entry rebuild error was empty"
+            assert ($result.stderr | str contains $blocked.id) "unreadable entry rebuild error did not identify the blocked entry"
+            assert (not ($result.stderr | str contains "Index rebuilt")) "failed rebuild printed success text"
+        }
+        assert equal $index_after_explicit $index_before "explicit failed rebuild replaced the valid index"
+        assert equal $invalid_index_after $invalid_index_before "automatic failed rebuild replaced the invalid index"
+        assert equal (open $readable_path --raw) $readable_before "failed rebuild changed the readable entry"
+        assert equal (open $blocked_path --raw) $blocked_before "failed rebuild changed the blocked entry"
+
+        "{not valid nuon" | save -f ($tmp | path join "history" "2000-01-01" "corrupt-syntax.nuon")
+        "42" | save -f ($tmp | path join "history" "2000-01-01" "corrupt-shape.nuon")
+        let recovered = (run-command-process $tmp "api history rebuild-index | ignore")
+        assert equal $recovered.exit_code 0 "content-invalid entries made rebuild fail"
+        assert equal ($recovered.stderr | str trim) "" "content-invalid entry rebuild wrote stderr"
+        assert ($recovered.stdout | str contains "Index rebuilt: 2 entries") "content-invalid entry rebuild output/count changed"
+        assert-valid-history-index $tmp [$blocked.id $readable.id] "content-invalid entry rebuild"
+        null
+    } catch {|error| $error }
+
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def test-b1-clear-before-failure-reconciles-index [] {
     run-partial-clear-failure-case "before"
 }
@@ -686,6 +893,9 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: configured retention keeps index-backed surfaces consistent" { test-b1-clear-retention-keeps-index-consistent })
         (run-test "B1: --before deletion failure reconciles committed index changes" { test-b1-clear-before-failure-reconciles-index })
         (run-test "B1: retention deletion failure reconciles committed index changes" { test-b1-clear-retention-failure-reconciles-index })
+        (run-test "B1: --before first-directory failure reconciles partial file deletion" { test-b1-clear-before-first-directory-failure-reconciles-index })
+        (run-test "B1: retention first-directory failure reconciles partial file deletion" { test-b1-clear-retention-first-directory-failure-reconciles-index })
+        (run-test "B1: rebuild I/O failures preserve the previous index" { test-b1-rebuild-entry-io-failure-preserves-index })
         (run-test "B1: --all removes the entire indexed history state" { test-b1-clear-all-removes-entire-history })
     ]
 }

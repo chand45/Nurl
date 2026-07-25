@@ -119,21 +119,68 @@ def history-entry-summary [entry: record, date_dir: string] {
     }
 }
 
+def list-history-entry-files [] {
+    let dir = (get-history-dir)
+    let subdirs = (ls $dir | where type == dir | get name | sort)
+    $subdirs | each {|listed_subdir|
+        let date_dir = ($listed_subdir | path basename)
+        let subdir = (
+            resolve-under-base $dir $date_dir "history date directory"
+                --scope="history directory"
+        )
+        ls $subdir
+        | where type != dir and name =~ '\.nuon$'
+        | get name
+        | sort
+        | each {|listed_file|
+            let file_name = ($listed_file | path basename)
+            let logical_name = $"($date_dir)/($file_name)"
+            {
+                path: (
+                    resolve-under-base $dir $logical_name "history entry"
+                        --nested
+                        --scope="history directory"
+                )
+                date_dir: $date_dir
+            }
+        }
+    } | flatten
+}
+
+def read-history-entry-summary [file: record] {
+    # File I/O failures invalidate the full scan. Only invalid NUON content or
+    # a non-entry shape may be skipped for legacy compatibility.
+    let raw = try {
+        open $file.path --raw
+    } catch {|read_error|
+        error make {
+            msg: $"History entry '($file.path)' could not be read: ($read_error.msg)"
+        }
+    }
+    let entry = try {
+        $raw | from nuon
+    } catch {
+        return null
+    }
+    if not (($entry | describe) | str starts-with "record") {
+        return null
+    }
+    let id = ($entry.id? | default null)
+    if ($id | describe) != "string" or ($id | str trim | is-empty) {
+        return null
+    }
+    history-entry-summary $entry $file.date_dir
+}
+
 # Scan files in deterministic ID order, preferring an existing index's order
 # when it can disambiguate tied legacy timestamps.
 def scan-history-summaries [existing: list = []] {
-    let dir = (get-history-dir)
-    let subdirs = try { ls $dir | where type == dir | get name | sort } catch { [] }
-    let scanned = $subdirs | each {|subdir|
-        let date_dir = ($subdir | path basename)
-        (try { ls $subdir | where name =~ '\.nuon$' | get name | sort } catch { [] })
-        | each {|file|
-            try {
-                history-entry-summary (open $file) $date_dir
-            } catch { null }
-        }
-        | where {|e| $e != null }
-    } | flatten | sort-by id
+    let scanned = (
+        list-history-entry-files
+        | each {|file| read-history-entry-summary $file }
+        | where {|entry| $entry != null }
+        | sort-by id
+    )
 
     let existing_ids = $existing | each {|entry|
         let id = ($entry.id? | default "")
@@ -249,12 +296,35 @@ def validate-history-limit [limit: int] {
     }
 }
 
-def rebuild-after-history-delete-error [delete_error: record] {
-    try {
-        rebuild-history-index | ignore
-    } catch {|rebuild_error|
+def reconcile-history-index-after-delete-error [] {
+    let index = (read-history-index)
+    if not $index.usable {
         error make {
-            msg: $"($delete_error.msg)\nHistory index rebuild after partial clear also failed: ($rebuild_error.msg)"
+            msg: "History index is missing or structurally unusable after a partial clear"
+        }
+    }
+
+    # A recursive delete may remove some files before failing on another.
+    # Filter trusted hints by contained path existence without opening any
+    # surviving entry, which may still be locked or unreadable.
+    let existing_paths = (list-history-entry-files | get path)
+    let remaining = (
+        $index.entries
+        | where {|summary|
+            let path = (history-entry-path $summary)
+            $existing_paths | any {|existing| $existing == $path }
+        }
+        | sort-history-entries
+    )
+    $remaining | to nuon | save -f (get-history-index-path)
+}
+
+def rethrow-history-delete-error [delete_error: record] {
+    try {
+        reconcile-history-index-after-delete-error
+    } catch {|reconcile_error|
+        error make {
+            msg: $"($delete_error.msg)\nHistory index reconciliation after partial clear also failed: ($reconcile_error.msg)"
         }
     }
     error make $delete_error
@@ -288,10 +358,7 @@ def clear-history-before-cutoff [dir: string, cutoff: datetime] {
                 | upsert msg $"History directory '($d.name)' could not be deleted: ($delete_error.msg)"
             }
             if $delete_error != null {
-                if $cleared > 0 {
-                    rebuild-after-history-delete-error $delete_error
-                }
-                error make $delete_error
+                rethrow-history-delete-error $delete_error
             }
             $cleared = $cleared + 1
         }

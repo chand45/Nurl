@@ -198,3 +198,17 @@ request, interpolates variables, or touches `.nuon` files.
   `tests/test_surface_contracts.nu`; they cover ten-entry no-sleep bursts, rebuilds, mixed/tied/
   malformed timestamps, every export/limit surface, exact/unique/ambiguous IDs, and zero endpoint or
   OAuth events on ambiguity.
+
+## 21. Partial history clear and rebuild could silently desynchronize the index  (FIXED)
+- **Symptom:** recursive clear could delete files before a later delete error while leaving their
+  index rows visible. Full rebuild treated traversal or entry-read failures as empty/malformed data,
+  replaced the index, and printed success after silently dropping existing unreadable entries.
+- **Fix:** every delete error reconciles a structurally valid existing index against contained
+  surviving entry paths without opening locked files, then rethrows the original contextual error.
+  Normal explicit/automatic rebuilds now require a complete traversal and raw read of every entry;
+  genuine I/O failures propagate before index replacement, while invalid NUON/non-entry content
+  remains deterministically skippable for compatibility.
+- **Re-check:** run `tests/test_history.nu`; the clear failure fixtures use barrier-synchronized
+  Windows locks or POSIX permissions with no sleeps, and assert exact index/list/search/get/export
+  agreement after both later-directory and first-directory partial failures. Rebuild fixtures prove
+  valid and invalid prior index bytes remain unchanged on unreadable-entry failures.
