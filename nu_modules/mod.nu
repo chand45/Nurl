@@ -1,7 +1,7 @@
 # API Client Module - Main Entry Point
 # A Postman-like API testing tool built on curl and nushell
 
-use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files]
+use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files path-type-safe]
 use command-error.nu [fail-command]
 
 # Get the directory where this module is located
@@ -15,6 +15,58 @@ def get-collections-dir [] {
 
 def resolve-collection-dir [name: string] {
     resolve-under-base (get-collections-dir) $name "collection" --scope "API workspace collections" --base-is-canonical
+}
+
+def get-status-context [] {
+    let config = (api config get)
+    if not (($config | describe) | str starts-with "record") {
+        fail-command "config.nuon must contain a record"
+    }
+
+    let active_collection = ($config.default_collection? | default null)
+    if $active_collection == null {
+        return {active_collection: null, active_environment: null}
+    }
+    if ($active_collection | describe) != "string" or ($active_collection | str trim | is-empty) {
+        fail-command "Config default_collection must be a non-empty string or null"
+    }
+
+    validate-resource-name "collection" $active_collection | ignore
+    let collection_dir = (resolve-collection-dir $active_collection)
+    if (path-type-safe $collection_dir) != "dir" {
+        fail-command $"Configured default collection '($active_collection)' not found"
+    }
+
+    let meta = (load-coll-meta $collection_dir)
+    if not (($meta | describe) | str starts-with "record") {
+        fail-command $"Collection '($active_collection)' meta.nuon must contain a record"
+    }
+
+    let active_environment = ($meta.active_environment? | default null)
+    if $active_environment == null {
+        return {
+            active_collection: $active_collection
+            active_environment: null
+        }
+    }
+    if ($active_environment | describe) != "string" or ($active_environment | str trim | is-empty) {
+        fail-command $"Collection '($active_collection)' active_environment must be a non-empty string or null"
+    }
+
+    validate-resource-name "environment" $active_environment | ignore
+    let environment_path = (get-coll-env-path $collection_dir $active_collection $active_environment)
+    if (path-type-safe $environment_path) != "file" {
+        fail-command $"Configured active environment '($active_environment)' not found in collection '($active_collection)'"
+    }
+    let environment = (open $environment_path)
+    if not (($environment | describe) | str starts-with "record") {
+        fail-command $"Environment '($active_environment)' in collection '($active_collection)' must contain a record"
+    }
+
+    {
+        active_collection: $active_collection
+        active_environment: $active_environment
+    }
 }
 
 # Export submodules
@@ -91,6 +143,7 @@ export def "api init" [] {
 # Show current API client status
 export def "api status" [] {
     let root = (get-api-root)
+    let context = (get-status-context)
 
     # Count global variables
     let vars_path = ($root | path join "variables.nuon")
@@ -117,6 +170,8 @@ export def "api status" [] {
         global_vars: $global_vars_count
         collections: $collection_count
         history_entries: $history_count
+        active_collection: $context.active_collection
+        active_environment: $context.active_environment
     }
 }
 
@@ -159,7 +214,7 @@ export def "api help" [] {
 
 (ansi yellow)Setup:(ansi reset)
   api init                      Initialize workspace
-  api status                    Show current status
+  api status                    Show counts and active collection/environment
   api config get                Show configuration
   api config set <key> <value>  Set configuration
   api help                      Show this help

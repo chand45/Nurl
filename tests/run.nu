@@ -59,6 +59,7 @@ if $net_ok {
 let all_results = (
     [
         ...(run-suite-vars)            # Offline — runs first (fastest)
+        ...(run-suite-status-compatibility)
         ...(run-suite-reliability $net_ok)
         ...(run-suite-history $net_ok)
         ...(run-suite-output $net_ok)

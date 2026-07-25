@@ -183,3 +183,46 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run `tests/test_credential_boundaries.nu` and `tests/test_secure_header_capture.nu`;
   they exercise the live curl parser through typed/human/machine outputs, history/index/read/export,
   trailers, redirects, exact password-family names, and safe boundary lookalikes.
+
+## 20. Same-second history recency and partial IDs were nondeterministic  (FIXED)
+- **Symptom:** rapid saves shared a second-only timestamp, so list/search/rebuild order depended on a
+  random ID suffix, export used filename order, and an ambiguous partial ID silently selected one
+  entry. Negative limits leaked a low-level Nushell error.
+- **Fix:** new saves use monotonic nine-digit fractional RFC3339 UTC timestamps derived consistently
+  with their date directory and ID time component. One numeric newest-first ordering now drives the
+  index, list, search, rebuild, and JSON/CSV export. Exact IDs win; only unique prefix/middle/suffix
+  fragments resolve. Ambiguous fragments and negative limits use the shared clean error contract
+  before index, output, auth, network, or replay work. Legacy files remain unchanged and readable;
+  malformed timestamps sort deterministically last.
+- **Re-check:** run `tests/test_history.nu`, the history cases in `tests/test_command_errors.nu`, and
+  `tests/test_surface_contracts.nu`; they cover ten-entry no-sleep bursts, rebuilds, mixed/tied/
+  malformed timestamps, every export/limit surface, exact/unique/ambiguous IDs, and zero endpoint or
+  OAuth events on ambiguity.
+
+## 21. Partial history clear and rebuild could silently desynchronize the index  (FIXED)
+- **Symptom:** recursive clear could delete files before a later delete error while leaving their
+  index rows visible. A successful deletion followed by a strict rebuild failure had the same stale
+  result, and partial `--all` failure bypassed recovery. Duplicate or injected hints could also
+  survive exceptional reconciliation. Full rebuild treated traversal or entry-read failures as
+  empty/malformed data, replaced the index, and printed success after silently dropping existing
+  unreadable entries.
+- **Fix:** clear captures validated canonical index hints and exact raw index bytes before mutation.
+  Every delete or post-delete rebuild error reconciles those hints against contained surviving
+  entry paths without opening locked files, persists an exact-schema unique canonical index, then
+  rethrows the original contextual error. Unsafe, stale, mismatched, and non-file hints are dropped
+  individually; compatible duplicates are collapsed; injected fields are removed; and contained
+  logical aliases are normalized to direct regular `.nuon` files. Dangling, external, directory,
+  and non-NUON aliases are ignored. Only conflicts among surviving safe paths produce a composed
+  reconciliation error. If reconciliation is impossible after the index changed or disappeared,
+  the captured bytes are restored exactly; restoration failure is added without replacing the
+  original clear error. Partial `--all` failures use the same recovery. Normal explicit/automatic
+  rebuilds require a complete traversal and raw read of every entry; genuine I/O failures propagate
+  before index replacement, while text/binary invalid NUON and non-entry content remain
+  deterministically skippable for compatibility.
+- **Re-check:** run `tests/test_history.nu`; the clear failure fixtures use barrier-synchronized
+  Windows locks or POSIX permissions with no sleeps, and assert exact index/list/search/get/export
+  agreement after later-directory, first-directory, post-delete rebuild, dangling-alias, and partial
+  `--all` failures. Unsafe/duplicate/conflicting-hint fixtures verify canonical unique recovery,
+  explicit combined failure, and byte-exact restoration when `--all` removes the index before
+  reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
+  unchanged on unreadable-entry failures.
