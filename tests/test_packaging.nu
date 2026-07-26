@@ -828,7 +828,13 @@ def test-shell-uninstall-backup-and-consent [] {
             + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash $bash_config)
         )
-        let abort = (^$bash -lc $"($environment) /usr/bin/setsid -w /bin/bash (quote-for-bash $script) </dev/null" | complete)
+        let has_setsid = (^$bash -lc "command -v setsid >/dev/null 2>&1" | complete)
+        let non_tty_bash = if $has_setsid.exit_code == 0 {
+            "setsid -w /bin/bash"
+        } else {
+            "/bin/bash"
+        }
+        let abort = (^$bash -lc $"($environment) ($non_tty_bash) (quote-for-bash $script) </dev/null" | complete)
         assert ($abort.exit_code != 0) "non-TTY shell uninstall unexpectedly proceeded"
         assert (($abort.stdout + $abort.stderr) | str contains "--yes") "non-TTY shell uninstall did not explain explicit consent"
         assert ($nurl | path exists) "non-TTY shell uninstall mutated the installation"
