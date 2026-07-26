@@ -259,33 +259,6 @@ param()
         [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
     }
 
-    function Get-NurlTreeManifest {
-        param([Parameter(Mandatory)][string]$Root)
-        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@("\", "/"))
-        @(
-            Get-ChildItem -LiteralPath $rootPath -Force -Recurse |
-                ForEach-Object {
-                    $relative = $_.FullName.Substring($rootPath.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
-                    if ($_.PSIsContainer) {
-                        "D|$relative"
-                    } else {
-                        $stream = [System.IO.File]::OpenRead($_.FullName)
-                        try {
-                            $sha256 = [System.Security.Cryptography.SHA256]::Create()
-                            try {
-                                $hash = [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace("-", "")
-                            } finally {
-                                $sha256.Dispose()
-                            }
-                        } finally {
-                            $stream.Dispose()
-                        }
-                        "F|$relative|$($_.Length)|$hash"
-                    }
-                } | Sort-Object
-        )
-    }
-
     function Invoke-NurlInstall {
         $NurlHome = Join-Path $env:USERPROFILE ".nurl"
         $RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
@@ -372,7 +345,6 @@ param()
         $promotionStarted = $false
         $committed = $false
         $freshPromoted = $false
-        $freshManifest = @()
         $rollbackRecords = [System.Collections.Generic.List[object]]::new()
         $createdDirectories = [System.Collections.Generic.List[string]]::new()
         $rollbackState = [pscustomobject]@{ Failed = $false }
@@ -613,7 +585,6 @@ param()
             Write-Host "[3/4] Promoting validated payloads..."
             $promotionStarted = $true
             if (-not $IsUpdate) {
-                $freshManifest = @(Get-NurlTreeManifest $PayloadRoot)
                 [System.IO.Directory]::Move($PayloadRoot, $NurlHome)
                 $freshPromoted = $true
             } else {

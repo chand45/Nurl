@@ -316,6 +316,9 @@ param(
             if (Test-Path -LiteralPath $configPath -PathType Leaf) {
                 $edit = New-NurlUninstallConfig $configPath
                 if ($edit.Changed) {
+                    if ($configItem.IsReadOnly) {
+                        throw "Nushell config contains Nurl entries but is read-only; Nurl was not moved. Config: $configPath"
+                    }
                     $configEdits.Add([pscustomobject]@{
                         Path = $configPath
                         Bytes = $edit.Bytes

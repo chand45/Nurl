@@ -31,7 +31,6 @@ ROLLBACK_DIR=''
 PROMOTION_STARTED=false
 COMMITTED=false
 FRESH_PROMOTED=false
-FRESH_SIGNATURE=''
 BACKUP_DESTS=()
 BACKUP_PATHS=()
 BACKUP_CANDIDATES=()
@@ -63,13 +62,6 @@ parse_version_line() {
     PARSED_MAJOR="${BASH_REMATCH[1]}"
     PARSED_MINOR="${BASH_REMATCH[2]}"
     PARSED_PATCH="${BASH_REMATCH[3]}"
-}
-
-trim_ascii_space() {
-    local value="$1"
-    value="${value#"${value%%[!$' \t']*}"}"
-    value="${value%"${value##*[!$' \t']}"}"
-    printf '%s' "$value"
 }
 
 resolve_config_path() {
@@ -108,8 +100,7 @@ restore_displaced_config() {
     if [[ -e "$destination" || -L "$destination" ]]; then
         return 1
     fi
-    if ln "$displaced" "$destination"; then
-        rm -f "$displaced"
+    if mv -n "$displaced" "$destination" && [[ ! -e "$displaced" && -e "$destination" ]]; then
         return 0
     fi
     return 1
@@ -139,7 +130,7 @@ replace_config_safely() {
             echo "Error: Nushell config changed during installation; the concurrent edit was preserved." >&2
             return 1
         fi
-        if ! ln "$source" "$destination"; then
+        if ! mv -n "$source" "$destination" || [[ -e "$source" ]]; then
             restore_displaced_config "$displaced" "$destination" || {
                 echo "Error: Nushell config recovery remains at $displaced." >&2
                 ROLLBACK_FAILED=true
@@ -148,7 +139,6 @@ replace_config_safely() {
             CONFIG_DISPLACED_DEST=''
             return 1
         fi
-        rm -f "$source"
         LAST_CONFIG_BACKUP="$displaced"
         CONFIG_DISPLACED=''
         CONFIG_DISPLACED_DEST=''
@@ -157,8 +147,10 @@ replace_config_safely() {
             echo "Error: Nushell config disappeared during installation; no config changes were applied." >&2
             return 1
         fi
-        ln "$source" "$destination"
-        rm -f "$source"
+        if ! mv -n "$source" "$destination" || [[ -e "$source" ]]; then
+            echo "Error: Nushell config appeared during installation; the candidate was not applied." >&2
+            return 1
+        fi
     fi
 }
 
@@ -186,88 +178,109 @@ canonicalize_directory_path() {
     printf '%s%s' "$path" "$suffix"
 }
 
-read_config_records() {
+validate_config_bytes() {
     local source="$1"
-    local LC_ALL=C
-    local body=''
-    local char='' line byte octal
-    local pending_cr=false
-    local CR=$'\r'
-    local LF=$'\n'
+    local display_path="$2"
     local scratch_root="${STAGE_ROOT:-$HOME}"
-    local byte_stream source_size decoded_count=0
-    CONFIG_BODIES=()
-    CONFIG_EOLS=()
-    byte_stream="$(mktemp "$scratch_root/.nurl-config-bytes.XXXXXX")" || {
-        echo -e "${RED}Error: Could not create a temporary byte stream for Nushell config: $source${NC}" >&2
-        return 1
-    }
+    local byte_stream source_size decoded_count
+    byte_stream="$(mktemp "$scratch_root/.nurl-config-bytes.XXXXXX")" || return 1
     if ! od -An -v -tu1 "$source" > "$byte_stream"; then
         rm -f "$byte_stream"
-        echo -e "${RED}Error: Could not read Nushell config bytes with od: $source${NC}" >&2
+        echo -e "${RED}Error: Could not read Nushell config bytes with od: $display_path${NC}" >&2
         return 1
     fi
-    if ! source_size="$(wc -c < "$source")"; then
-        rm -f "$byte_stream"
-        echo -e "${RED}Error: Could not determine Nushell config byte count: $source${NC}" >&2
-        return 1
-    fi
-    source_size="${source_size//[[:space:]]/}"
-    while IFS= read -r line; do
-        for byte in $line; do
-            decoded_count=$((decoded_count + 1))
-            if [[ "$byte" == '0' ]]; then
-                rm -f "$byte_stream"
-                echo -e "${RED}Error: Nushell config contains an unsupported NUL byte: $source${NC}" >&2
-                return 1
-            fi
-            if [[ "$pending_cr" == true ]]; then
-                if [[ "$byte" == '10' ]]; then
-                    CONFIG_BODIES+=("$body")
-                    CONFIG_EOLS+=("$CR$LF")
-                    body=''
-                    pending_cr=false
-                    continue
-                fi
-                CONFIG_BODIES+=("$body")
-                CONFIG_EOLS+=("$CR")
-                body=''
-                pending_cr=false
-            fi
-            if [[ "$byte" == '13' ]]; then
-                pending_cr=true
-            elif [[ "$byte" == '10' ]]; then
-                CONFIG_BODIES+=("$body")
-                CONFIG_EOLS+=("$LF")
-                body=''
-            else
-                printf -v octal '%03o' "$byte"
-                printf -v char '%b' "\\$octal"
-                body+="$char"
-            fi
-        done
-    done < "$byte_stream"
+    source_size="$(wc -c < "$source")" || { rm -f "$byte_stream"; return 1; }
+    decoded_count="$(awk '{count += NF} END {print count + 0}' "$byte_stream")" || { rm -f "$byte_stream"; return 1; }
     rm -f "$byte_stream"
-    if (( decoded_count != source_size )); then
+    source_size="${source_size//[[:space:]]/}"
+    if [[ "$decoded_count" != "$source_size" ]]; then
         echo -e "${RED}Error: Nushell config byte read was incomplete: expected $source_size bytes, decoded $decoded_count.${NC}" >&2
         return 1
     fi
-    if [[ "$pending_cr" == true ]]; then
-        CONFIG_BODIES+=("$body")
-        CONFIG_EOLS+=("$CR")
-    elif [[ -n "$body" ]]; then
-        CONFIG_BODIES+=("$body")
-        CONFIG_EOLS+=('')
-    fi
 }
 
-write_config_records() {
-    local destination="$1"
-    local index
-    : > "$destination"
-    for ((index = 0; index < ${#output_bodies[@]}; index++)); do
-        printf '%s%s' "${output_bodies[$index]}" "${output_eols[$index]}" >> "$destination"
-    done
+transform_config_file() {
+    local mode="$1" source="$2" destination="$3" display_path="$4"
+    perl - "$mode" "$source" "$destination" "$display_path" <<'PERL'
+use strict;
+use warnings;
+my ($mode, $source, $destination, $display) = @ARGV;
+open my $input, '<:raw', $source or die "Cannot read Nushell config '$source': $!\n";
+local $/;
+my $data = <$input> // '';
+close $input;
+die "Nushell config contains an unsupported NUL byte: $display\n" if index($data, "\0") >= 0;
+my (@body, @eol);
+pos($data) = 0;
+while ((pos($data) // 0) < length($data)) {
+    my $offset = pos($data) // 0;
+    if ($data =~ /\G(.*?)(\r\n|\r|\n)/sg) { push @body, $1; push @eol, $2; }
+    else { push @body, substr($data, $offset); push @eol, ''; last; }
+}
+my $trim = sub { my $v = shift; $v =~ s/^[ \t]+|[ \t]+$//g; return $v; };
+my $legacy = sub {
+    my $v = $trim->(shift);
+    return $v eq 'source ~/.nurl/api.nu' || $v eq 'source "~/.nurl/api.nu"' ||
+           $v eq 'source $"($env.HOME)/.nurl/api.nu"';
+};
+my $legacy_comment = sub { return $trim->(shift) eq '# Nurl - Terminal API Client'; };
+my ($inside, $owned) = (0, 0);
+for my $line (@body) {
+    my $clean = $trim->($line);
+    if ($clean eq '# >>> nurl >>>') {
+        die "Nushell config contains an invalid Nurl sentinel block: $source\n" if $inside || $owned;
+        $inside = 1; $owned = 1;
+    } elsif ($clean eq '# <<< nurl <<<') {
+        die "Nushell config contains an unmatched Nurl sentinel: $source\n" unless $inside;
+        $inside = 0;
+    }
+}
+die "Nushell config contains an unterminated Nurl sentinel block: $source\n" if $inside;
+exit 3 if $mode eq 'install' && $owned;
+my $preferred = "\n";
+for my $ending (@eol) { if (length $ending) { $preferred = $ending; last; } }
+my (@out_body, @out_eol);
+if ($mode eq 'install') {
+    my $inserted = 0;
+    for my $index (0 .. $#body) {
+        if ($legacy->($body[$index])) {
+            if (!$inserted) {
+                if (@out_body && $legacy_comment->($out_body[-1])) { pop @out_body; pop @out_eol; }
+                push @out_body, '# >>> nurl >>>', 'source ~/.nurl/api.nu', '# <<< nurl <<<';
+                push @out_eol, $preferred, $preferred, $eol[$index];
+                $inserted = 1;
+            }
+        } else { push @out_body, $body[$index]; push @out_eol, $eol[$index]; }
+    }
+    if (!$inserted) {
+        $out_eol[-1] = $preferred if @out_body && $out_eol[-1] eq '';
+        my $final = (!@body || (@eol && $eol[-1] ne '')) ? $preferred : '';
+        push @out_body, '# >>> nurl >>>', 'source ~/.nurl/api.nu', '# <<< nurl <<<';
+        push @out_eol, $preferred, $preferred, $final;
+    }
+} else {
+    my ($in_block, $removed) = (0, 0);
+    for my $index (0 .. $#body) {
+        my $clean = $trim->($body[$index]);
+        if ($clean eq '# >>> nurl >>>') { $in_block = 1; $removed = 1; next; }
+        if ($clean eq '# <<< nurl <<<') {
+            $in_block = 0;
+            $out_eol[-1] = '' if $eol[$index] eq '' && $index == $#body && @out_eol;
+            next;
+        }
+        next if $in_block;
+        if ($legacy->($body[$index])) {
+            if (@out_body && $legacy_comment->($out_body[-1])) { pop @out_body; pop @out_eol; }
+            $removed = 1; next;
+        }
+        push @out_body, $body[$index]; push @out_eol, $eol[$index];
+    }
+    exit 3 unless $removed;
+}
+open my $output, '>:raw', $destination or die "Cannot write config candidate '$destination': $!\n";
+for my $index (0 .. $#out_body) { print {$output} $out_body[$index], $out_eol[$index]; }
+close $output or die "Cannot finish config candidate '$destination': $!\n";
+PERL
 }
 
 assert_safe_directory_chain() {
@@ -292,120 +305,22 @@ assert_safe_directory_chain() {
     done
 }
 
-is_legacy_source_line() {
-    local line="${1%$'\r'}"
-    line="$(trim_ascii_space "$line")"
-    case "$line" in
-        'source ~/.nurl/api.nu'|'source "~/.nurl/api.nu"'|'source $"($env.HOME)/.nurl/api.nu"')
-            return 0
-            ;;
-    esac
-    return 1
-}
-
-is_legacy_comment_line() {
-    local line="${1%$'\r'}"
-    line="$(trim_ascii_space "$line")"
-    [[ "$line" == '# Nurl - Terminal API Client' ]]
-}
-
 prepare_config_candidate() {
     local source="$1"
     local destination="$2"
+    local display_path="$3"
     CONFIG_CHANGED=true
-
     if [[ ! -f "$source" ]]; then
-        printf '%s\n%s\n%s\n' \
-            '# >>> nurl >>>' \
-            'source ~/.nurl/api.nu' \
-            '# <<< nurl <<<' > "$destination"
+        printf '%s\n%s\n%s\n' '# >>> nurl >>>' 'source ~/.nurl/api.nu' '# <<< nurl <<<' > "$destination"
         return
     fi
-
-    read_config_records "$source"
-    local preferred_eol=$'\n'
-    local eol
-    for eol in "${CONFIG_EOLS[@]}"; do
-        if [[ -n "$eol" ]]; then
-            preferred_eol="$eol"
-            break
-        fi
-    done
-    local trailing_newline=false
-    if (( ${#CONFIG_EOLS[@]} > 0 )) && [[ -n "${CONFIG_EOLS[$(( ${#CONFIG_EOLS[@]} - 1 ))]}" ]]; then
-        trailing_newline=true
+    validate_config_bytes "$source" "$display_path"
+    if transform_config_file install "$source" "$destination" "$display_path"; then
+        CONFIG_CHANGED=true
+    else
+        local status=$?
+        if [[ "$status" -eq 3 ]]; then CONFIG_CHANGED=false; else return "$status"; fi
     fi
-
-    local owned_start=-1
-    local owned_end=-1
-    local in_owned=false
-    local index
-    for ((index = 0; index < ${#CONFIG_BODIES[@]}; index++)); do
-        clean="$(trim_ascii_space "${CONFIG_BODIES[$index]}")"
-        if [[ "$clean" == '# >>> nurl >>>' ]]; then
-            if [[ "$in_owned" == true || "$owned_start" -ge 0 ]]; then
-                echo -e "${RED}Error: Nushell config contains an invalid Nurl sentinel block.${NC}" >&2
-                return 1
-            fi
-            in_owned=true
-            owned_start=$index
-        elif [[ "$clean" == '# <<< nurl <<<' ]]; then
-            if [[ "$in_owned" != true ]]; then
-                echo -e "${RED}Error: Nushell config contains an invalid Nurl sentinel block.${NC}" >&2
-                return 1
-            fi
-            in_owned=false
-            owned_end=$index
-        fi
-    done
-    if [[ "$in_owned" == true ]]; then
-        echo -e "${RED}Error: Nushell config contains an unterminated Nurl sentinel block.${NC}" >&2
-        return 1
-    fi
-    if [[ "$owned_start" -ge 0 && "$owned_end" -ge "$owned_start" ]]; then
-        CONFIG_CHANGED=false
-        return
-    fi
-
-    local output_bodies=()
-    local output_eols=()
-    local inserted=false
-    local line
-    for ((index = 0; index < ${#CONFIG_BODIES[@]}; index++)); do
-        line="${CONFIG_BODIES[$index]}"
-        if is_legacy_source_line "$line"; then
-            if [[ "$inserted" != true ]]; then
-                local output_count=${#output_bodies[@]}
-                if (( output_count > 0 )) && is_legacy_comment_line "${output_bodies[$((output_count - 1))]}"; then
-                    unset 'output_bodies[output_count-1]'
-                    unset 'output_eols[output_count-1]'
-                    output_bodies=("${output_bodies[@]}")
-                    output_eols=("${output_eols[@]}")
-                fi
-                output_bodies+=("# >>> nurl >>>" "source ~/.nurl/api.nu" "# <<< nurl <<<")
-                output_eols+=("$preferred_eol" "$preferred_eol" "${CONFIG_EOLS[$index]}")
-                inserted=true
-            fi
-            continue
-        fi
-        output_bodies+=("$line")
-        output_eols+=("${CONFIG_EOLS[$index]}")
-    done
-
-    if [[ "$inserted" != true ]]; then
-        local output_count=${#output_bodies[@]}
-        if (( output_count > 0 )) && [[ -z "${output_eols[$((output_count - 1))]}" ]]; then
-            output_eols[$((output_count - 1))]="$preferred_eol"
-        fi
-        local final_eol=''
-        if [[ "$trailing_newline" == true || "$output_count" -eq 0 ]]; then
-            final_eol="$preferred_eol"
-        fi
-        output_bodies+=("# >>> nurl >>>" "source ~/.nurl/api.nu" "# <<< nurl <<<")
-        output_eols+=("$preferred_eol" "$preferred_eol" "$final_eol")
-    fi
-
-    write_config_records "$destination"
 }
 
 remember_created_dir() {
@@ -466,7 +381,6 @@ promote_if_absent() {
 
 rollback_install() {
     set +e
-    ROLLBACK_FAILED=false
     local index
     for ((index = ${#CREATED_PATHS[@]} - 1; index >= 0; index--)); do
         if [[ -n "${CREATED_CANDIDATES[$index]}" ]]; then
@@ -493,7 +407,6 @@ rollback_install() {
     done
     if [[ "$FRESH_PROMOTED" == true ]]; then
         echo "Warning: rollback preserved the visible fresh installation to avoid deleting concurrent data." >&2
-        ROLLBACK_FAILED=true
     fi
     for ((index = ${#CREATED_DIRS[@]} - 1; index >= 0; index--)); do
         rmdir "${CREATED_DIRS[$index]}" 2>/dev/null || true
@@ -572,6 +485,13 @@ if ! version_at_least "$CURL_MAJOR" "$CURL_MINOR" "$CURL_PATCH" "$MINIMUM_CURL_V
     echo -e "${RED}Error: curl $MINIMUM_CURL_VERSION or newer is required (found $CURL_VERSION).${NC}" >&2
     exit 1
 fi
+
+for required_tool in od awk perl wc; do
+    if ! command -v "$required_tool" >/dev/null 2>&1; then
+        echo -e "${RED}Error: $required_tool is required for byte-safe Nushell config editing.${NC}" >&2
+        exit 1
+    fi
+done
 
 NUSHELL_CONFIG_DIR="$(
     nu --no-config-file -c '$nu.default-config-dir' 2>/dev/null \
@@ -729,12 +649,11 @@ if [[ -f "$NUSHELL_CONFIG" ]]; then
         exit 1
     }
 fi
-prepare_config_candidate "$CONFIG_ORIGINAL" "$CONFIG_CANDIDATE"
+prepare_config_candidate "$CONFIG_ORIGINAL" "$CONFIG_CANDIDATE" "$NUSHELL_CONFIG"
 
 echo "[3/4] Promoting validated payloads..."
 PROMOTION_STARTED=true
 if [[ "$IS_UPDATE" != true ]]; then
-    FRESH_SIGNATURE="$(cd "$PAYLOAD_ROOT" && tar -cf - . | cksum)"
     mv "$PAYLOAD_ROOT" "$NURL_HOME"
     FRESH_PROMOTED=true
 else

@@ -721,13 +721,17 @@ def test-installer-atomic-staging [] {
         cp ($tools | path join "nu") ($fresh_concurrent_tools | path join "nu")
         cp ($tools | path join "curl") ($fresh_concurrent_tools | path join "curl")
         '#!/bin/bash
-if [[ "$NURL_INSTALLER_INJECT_FRESH_DATA" == "1" && "$*" == *"/.config.nu.nurl."* ]]; then
+source_path=""
+for argument in "$@"; do
+    if [[ "$argument" != -* ]]; then source_path="$argument"; break; fi
+done
+if [[ "$NURL_INSTALLER_INJECT_FRESH_DATA" == "1" && "$source_path" == *"/.config.nu.nurl."* && "$source_path" != *".rollback."* ]]; then
     printf "%s" "concurrent fresh data" > "$HOME/.nurl/only-copy.txt"
     exit 80
 fi
-exec /bin/ln "$@"
-' | str replace --all "\r" "" | save -f ($fresh_concurrent_tools | path join "ln")
-        let fresh_concurrent_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'ln')))" | complete)
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($fresh_concurrent_tools | path join "mv")
+        let fresh_concurrent_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'mv')))" | complete)
         assert equal $fresh_concurrent_chmod.exit_code 0
         let fresh_concurrent_result = (^$bash -lc (
             "HOME=" + (quote-for-bash (path-for-bash $bash $fresh_concurrent_home))
@@ -742,6 +746,7 @@ exec /bin/ln "$@"
         assert ($fresh_concurrent_result.exit_code != 0) "fresh concurrent-data fixture unexpectedly succeeded"
         assert equal (open ($fresh_concurrent_home | path join ".nurl" "only-copy.txt") --raw) "concurrent fresh data" "fresh rollback deleted concurrent data"
         assert (($fresh_concurrent_result.stdout + $fresh_concurrent_result.stderr) | str contains "preserved the visible fresh installation") "fresh rollback did not report preserved concurrent data"
+        assert ((child-paths-starting $fresh_concurrent_home ".nurl-stage.") | is-empty) "fresh preserved-data failure leaked an empty recovery stage"
 
         let incompatible_shell_path = ($modules | path join "auth.nu")
         mkdir $incompatible_shell_path
@@ -808,12 +813,16 @@ exec /bin/mv "$@"
         cp ($tools | path join "nu") ($config_fail_tools | path join "nu")
         cp ($tools | path join "curl") ($config_fail_tools | path join "curl")
         '#!/bin/bash
-if [[ "$*" == *"/.config.nu.nurl."* ]]; then
+source_path=""
+for argument in "$@"; do
+    if [[ "$argument" != -* ]]; then source_path="$argument"; break; fi
+done
+if [[ "$source_path" == *"/.config.nu.nurl."* && "$source_path" != *".rollback."* ]]; then
     exit 76
 fi
-exec /bin/ln "$@"
-' | str replace --all "\r" "" | save -f ($config_fail_tools | path join "ln")
-        let config_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'ln')))" | complete)
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($config_fail_tools | path join "mv")
+        let config_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'mv')))" | complete)
         assert equal $config_fail_chmod.exit_code 0
         let config_promotion_failure = (^$bash -lc (
             "HOME=" + (quote-for-bash (path-for-bash $bash $config_fail_home))
@@ -989,6 +998,7 @@ def test-shell-uninstall-backup-and-consent [] {
         error make {msg: "SKIP: Bash is unavailable for shell uninstall fixtures"}
     }
     let bash = ($bash_candidates | first)
+    let require_posix = ($env.NURL_REQUIRE_POSIX_PACKAGING? | default "") == "1"
     let fixture = (make-temp-dir "shell-uninstall")
     let failure = try {
         let tools = ($fixture | path join "tools")
@@ -1165,13 +1175,17 @@ exec /bin/cp "$@"
             "pty data" | save -f ($pty_nurl | path join "data.nuon")
             "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\nkeep\n" | save -f ($pty_config_dir | path join "config.nu")
             '#!/bin/bash
-if [[ "$NURL_UNINSTALL_FAIL_CONFIG" == "1" && "$*" == *"/.config.nu.nurl."* ]]; then
+source_path=""
+for argument in "$@"; do
+    if [[ "$argument" != -* ]]; then source_path="$argument"; break; fi
+done
+if [[ "$NURL_UNINSTALL_FAIL_CONFIG" == "1" && "$source_path" == *"/.config.nu.nurl."* && "$source_path" != *".rollback."* ]]; then
     printf "%s\n" "forced config failure" >&2
     exit 77
 fi
-exec /bin/ln "$@"
-' | str replace --all "\r" "" | save -f ($pty_tools | path join "ln")
-            let pty_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'ln')))" | complete)
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($pty_tools | path join "mv")
+            let pty_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'mv')))" | complete)
             assert equal $pty_chmod.exit_code 0
             let pty_environment = (
                 "HOME=" + (quote-for-bash (path-for-bash $bash $pty_home))
@@ -1188,6 +1202,8 @@ exec /bin/ln "$@"
             assert ($pty_output | str contains "backup remains at") "PTY piped uninstall omitted the backup location"
             assert (not ($pty_nurl | path exists)) "PTY config failure left the detached install path"
             assert equal ((child-paths-starting $pty_home ".nurl-backup-") | length) 1 "PTY config failure did not preserve the verified backup"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu PTY packaging capability is unavailable"}
         }
 
         let link_home = ($fixture | path join "link-home")
@@ -1214,6 +1230,8 @@ exec /bin/ln "$@"
             assert ($link_nurl | path exists) "shell internal-link rejection removed Nurl"
             assert equal (open ($link_target | path join "keep.txt") --raw) "external link target" "shell internal-link rejection damaged external data"
             assert ((child-paths-starting $link_home ".nurl-backup-") | is-empty) "shell internal-link rejection created a success-shaped backup"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu symlink packaging capability is unavailable"}
         }
         null
     } catch {|error| $error }
@@ -1229,6 +1247,7 @@ def test-shell-config-ownership-and-resolution [] {
         error make {msg: "SKIP: Bash is unavailable for shell config fixtures"}
     }
     let bash = ($bash_candidates | first)
+    let require_posix = ($env.NURL_REQUIRE_POSIX_PACKAGING? | default "") == "1"
     let fixture = (make-temp-dir "shell-config")
     let failure = try {
         let tools = ($fixture | path join "tools")
@@ -1310,6 +1329,97 @@ def test-shell-config-ownership-and-resolution [] {
         let migration_mode_after_remove = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $migration_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $migration_config))" | complete)
         assert equal ($migration_mode_after_remove.stdout | str trim) $expected_migration_mode $"shell uninstaller changed config mode: expected=($expected_migration_mode) actual=($migration_mode_after_remove.stdout | str trim)"
 
+        let ln_failure_home = ($fixture | path join "ln-failure-home")
+        let ln_failure_config_dir = ($fixture | path join "ln-failure-config")
+        let ln_failure_tools = ($fixture | path join "ln-failure-tools")
+        mkdir $ln_failure_home
+        mkdir $ln_failure_config_dir
+        mkdir $ln_failure_tools
+        cp ($tools | path join "nu") ($ln_failure_tools | path join "nu")
+        cp ($tools | path join "curl") ($ln_failure_tools | path join "curl")
+        '#!/bin/bash
+printf "%s\n" "ln: Operation not permitted" >&2
+exit 81
+' | str replace --all "\r" "" | save -f ($ln_failure_tools | path join "ln")
+        let ln_failure_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($ln_failure_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($ln_failure_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($ln_failure_tools | path join 'ln')))" | complete)
+        assert equal $ln_failure_chmod.exit_code 0
+        let ln_failure_config = ($ln_failure_config_dir | path join "config.nu")
+        let ln_failure_original = "let keep = 'hard-link-independent'\r\n"
+        $ln_failure_original | save -f $ln_failure_config
+        let ln_failure_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $ln_failure_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $ln_failure_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $ln_failure_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "ln-failure-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "ln-failure-downloads.log")))
+        )
+        let ln_fresh = (^$bash -lc $"($ln_failure_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert equal $ln_fresh.exit_code 0 $"fresh install depended on hard links: ($ln_fresh.stderr)"
+        assert (($ln_failure_config | path exists)) "fresh install lost config when ln failed"
+        let configured_without_ln = (open $ln_failure_config --raw)
+        assert ($configured_without_ln | str contains "# >>> nurl >>>") "fresh install did not configure without hard links"
+        let ln_failure_user = ($ln_failure_home | path join ".nurl" "collections" "user.nuon")
+        "hard-link user data" | save -f $ln_failure_user
+        let ln_update = (^$bash -lc $"($ln_failure_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert equal $ln_update.exit_code 0 $"update install depended on hard links: ($ln_update.stderr)"
+        assert equal (open $ln_failure_config --raw) $configured_without_ln "update install changed configured bytes when ln failed"
+        assert equal (open $ln_failure_user --raw) "hard-link user data" "update install lost user data when ln failed"
+        let ln_remove = (^$bash -lc $"($ln_failure_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert equal $ln_remove.exit_code 0 $"uninstall depended on hard links: ($ln_remove.stderr)"
+        assert ($ln_failure_config | path exists) "uninstall lost config when ln failed"
+        assert equal (open $ln_failure_config --raw) $ln_failure_original "uninstall did not restore config bytes when ln failed"
+        let ln_backup = (child-paths-starting $ln_failure_home ".nurl-backup-" | first)
+        assert equal (open ($ln_backup | path join "collections" "user.nuon") --raw) "hard-link user data" "uninstall ln failure lost backup data"
+
+        let readonly_home = ($fixture | path join "readonly-home")
+        let readonly_nurl = ($readonly_home | path join ".nurl")
+        let readonly_config_dir = ($fixture | path join "readonly-config")
+        let readonly_config = ($readonly_config_dir | path join "config.nu")
+        mkdir $readonly_nurl
+        mkdir $readonly_config_dir
+        "readonly Nurl data" | save -f ($readonly_nurl | path join "data.nuon")
+        let readonly_original = "let unrelated = true\n"
+        $readonly_original | save -f $readonly_config
+        ^$bash -lc $"chmod 444 (quote-for-bash (path-for-bash $bash $readonly_config))"
+        let readonly_capability = (^$bash -lc $"test ! -w (quote-for-bash (path-for-bash $bash $readonly_config))" | complete)
+        if $readonly_capability.exit_code == 0 {
+            let readonly_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $readonly_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $readonly_config_dir))
+                + " NURL_ASSUME_YES=1"
+            )
+            let readonly_noop = (^$bash -lc $"($readonly_environment) /bin/bash (quote-for-bash $uninstaller)" | complete)
+            assert equal $readonly_noop.exit_code 0 $"uninstaller rejected unrelated read-only config: ($readonly_noop.stderr)"
+            assert equal (open $readonly_config --raw) $readonly_original "uninstaller changed unrelated read-only config"
+
+            let readonly_changed_home = ($fixture | path join "readonly-changed-home")
+            let readonly_changed_nurl = ($readonly_changed_home | path join ".nurl")
+            let readonly_changed_config_dir = ($fixture | path join "readonly-changed-config")
+            let readonly_changed_config = ($readonly_changed_config_dir | path join "config.nu")
+            mkdir $readonly_changed_nurl
+            mkdir $readonly_changed_config_dir
+            "must remain" | save -f ($readonly_changed_nurl | path join "data.nuon")
+            "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\n" | save -f $readonly_changed_config
+            ^$bash -lc $"chmod 444 (quote-for-bash (path-for-bash $bash $readonly_changed_config))"
+            let readonly_changed_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $readonly_changed_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $readonly_changed_config_dir))
+                + " NURL_ASSUME_YES=1"
+            )
+            let readonly_changed = (^$bash -lc $"($readonly_changed_environment) /bin/bash (quote-for-bash $uninstaller)" | complete)
+            assert ($readonly_changed.exit_code != 0) "uninstaller accepted Nurl-owned read-only config"
+            assert (($readonly_changed.stdout + $readonly_changed.stderr) | str contains "contains Nurl entries but is not writable") "read-only config diagnostic was inaccurate"
+            assert ($readonly_changed_nurl | path exists) "read-only config failure detached Nurl"
+            ^$bash -lc $"chmod 600 (quote-for-bash (path-for-bash $bash $readonly_changed_config))"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu read-only config capability is unavailable"}
+        }
+        ^$bash -lc $"chmod 600 (quote-for-bash (path-for-bash $bash $readonly_config))"
+
         let symlink_home = ($fixture | path join "symlink-home")
         let symlink_config_dir = ($symlink_home | path join ".config" "nushell")
         let symlink_dotfiles = ($symlink_home | path join "dotfiles")
@@ -1345,6 +1455,8 @@ def test-shell-config-ownership-and-resolution [] {
             assert equal (open $symlink_target --raw) "dotfile content" "symlinked config target did not round-trip"
             let link_after_remove = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
             assert equal $link_after_remove.exit_code 0 "uninstaller replaced config symlink"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu config-file symlink capability is unavailable"}
         }
 
         let contained_home = ($fixture | path join "contained-home")
@@ -1483,6 +1595,8 @@ def test-shell-config-ownership-and-resolution [] {
         if $actual_mixed_link.exit_code == 0 {
             let parent_link_after = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $mixed_link))" | complete)
             assert equal $parent_link_after.exit_code 0 "packaging replaced the symlinked config parent"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu config-parent symlink capability is unavailable"}
         }
         null
     } catch {|error| $error }
@@ -1618,6 +1732,31 @@ function Move-Item {
         assert equal (open $uninstall_temp_config --raw) "concurrent uninstall config" "PowerShell uninstall conflict overwrote the concurrent edit"
         assert ((child-paths-starting $uninstall_temp_resolved ".config.nu.nurl.") | is-empty) "PowerShell uninstall config promotion failure leaked a temp"
         assert equal ((child-paths-starting $uninstall_temp_home ".nurl-backup-") | length) 1 "PowerShell uninstall config promotion failure lost its verified backup"
+
+        let readonly_ps_home = ($fixture | path join "readonly-ps-home")
+        let readonly_ps_appdata = ($fixture | path join "readonly-ps-appdata")
+        let readonly_ps_config_dir = ($readonly_ps_appdata | path join "nushell")
+        let readonly_ps_config = ($readonly_ps_config_dir | path join "config.nu")
+        mkdir ($readonly_ps_home | path join ".nurl")
+        mkdir $readonly_ps_config_dir
+        "read-only PS data" | save -f ($readonly_ps_home | path join ".nurl" "data.nuon")
+        let write_readonly_ps = '[System.IO.File]::WriteAllText($env:NURL_TEST_CONFIG_PATH, "# >>> nurl >>>`r`nsource ~/.nurl/api.nu`r`n# <<< nurl <<<`r`n", [System.Text.UTF8Encoding]::new($false))'
+        let readonly_ps_written = (with-env {NURL_TEST_CONFIG_PATH: $readonly_ps_config} {
+            ^powershell.exe -NoProfile -NonInteractive -Command $write_readonly_ps | complete
+        })
+        assert equal $readonly_ps_written.exit_code 0
+        let readonly_ps_set = (with-env {NURL_TEST_CONFIG_PATH: $readonly_ps_config} {
+            ^powershell.exe -NoProfile -NonInteractive -Command '(Get-Item -LiteralPath $env:NURL_TEST_CONFIG_PATH).IsReadOnly = $true' | complete
+        })
+        assert equal $readonly_ps_set.exit_code 0
+        let readonly_ps_result = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstall_harness ($env.NURL_REPO_ROOT | path join "uninstall.ps1") $readonly_ps_home $readonly_ps_appdata $tools | complete)
+        assert ($readonly_ps_result.exit_code != 0) "PowerShell uninstall accepted read-only owned config"
+        assert (($readonly_ps_result.stdout + $readonly_ps_result.stderr) | str contains "read-only; Nurl was not moved") "PowerShell read-only config error lacked actionable state"
+        assert (($readonly_ps_home | path join ".nurl") | path exists) "PowerShell read-only config failure detached Nurl"
+        assert ((child-paths-starting $readonly_ps_home ".nurl-backup-") | is-empty) "PowerShell read-only config failure created a backup"
+        with-env {NURL_TEST_CONFIG_PATH: $readonly_ps_config} {
+            ^powershell.exe -NoProfile -NonInteractive -Command '(Get-Item -LiteralPath $env:NURL_TEST_CONFIG_PATH).IsReadOnly = $false' | complete | ignore
+        }
 
         let reparse_home = ($fixture | path join "reparse-home")
         let reparse_appdata = ($fixture | path join "reparse-appdata")
@@ -1803,7 +1942,7 @@ Write-Output "PSSTYLE-PRESERVED"
     }
 }
 
-def test-shell-config-byte-reader-and-performance [--performance-only] {
+def test-shell-config-byte-reader-and-performance [--performance-only, --huge-only, --uninstall-only] {
     let bash_candidates = (which bash | where type == "external" | get path? | default [])
     if ($bash_candidates | is-empty) {
         error make {msg: "SKIP: Bash is unavailable for config byte-reader fixtures"}
@@ -1871,8 +2010,40 @@ def test-shell-config-byte-reader-and-performance [--performance-only] {
             assert equal (open $config --raw) $config_bytes $"shell uninstall ($case.name) od failure changed config"
             assert ((child-paths-starting $home ".nurl-backup-") | is-empty) $"shell uninstall ($case.name) od failure created a backup"
         }
+
+        let nul_root = ($fixture | path join "nul-byte")
+        let nul_home = ($nul_root | path join "home")
+        let nul_nurl = ($nul_home | path join ".nurl")
+        let nul_config_dir = ($nul_root | path join "config")
+        mkdir $nul_nurl
+        mkdir $nul_config_dir
+        "nul user data" | save -f ($nul_nurl | path join "data.nuon")
+        let nul_config = ($nul_config_dir | path join "config.nu")
+        0x[6c 65 74 20 78 20 3d 20 31 00 0a] | save -f $nul_config
+        let nul_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $nul_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $base_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $nul_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($nul_root | path join "curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($nul_root | path join "downloads.log")))
+        )
+        let nul_install = (^$bash -lc $"($nul_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert ($nul_install.exit_code != 0) "shell installer accepted a NUL config byte"
+        let nul_install_output = $nul_install.stdout + $nul_install.stderr
+        assert ($nul_install_output | str contains (path-for-bash $bash $nul_config)) "shell installer NUL diagnostic did not name the user config"
+        assert (not ($nul_install_output | str contains "config.original")) "shell installer NUL diagnostic named the staging copy"
+        assert ($nul_nurl | path exists) "shell installer NUL failure removed Nurl"
+        let nul_uninstall = (^$bash -lc $"($nul_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert ($nul_uninstall.exit_code != 0) "shell uninstaller accepted a NUL config byte"
+        let nul_uninstall_output = $nul_uninstall.stdout + $nul_uninstall.stderr
+        assert ($nul_uninstall_output | str contains (path-for-bash $bash $nul_config)) "shell uninstaller NUL diagnostic did not name the user config"
+        assert (not ($nul_uninstall_output | str contains "config-original")) "shell uninstaller NUL diagnostic named the staging copy"
+        assert ($nul_nurl | path exists) "shell uninstaller NUL failure removed Nurl"
         }
 
+        if not $huge_only {
         let perf_root = ($fixture | path join "performance")
         let perf_home = ($perf_root | path join "home")
         let perf_config_dir = ($perf_root | path join "config")
@@ -1906,6 +2077,55 @@ def test-shell-config-byte-reader-and-performance [--performance-only] {
         print $"  [large config timing] install=($install_seconds)s uninstall=($uninstall_seconds)s bytes=($large_config | str length)"
         assert ($install_seconds < 30) $"large-config shell install exceeded 30s: ($install_seconds)s; uninstall=($uninstall_seconds)s"
         assert ($uninstall_seconds < 30) $"large-config shell uninstall exceeded 30s: ($uninstall_seconds)s"
+        null
+        }
+
+        let huge_root = ($fixture | path join "performance-200k")
+        let huge_home = ($huge_root | path join "home")
+        let huge_config_dir = ($huge_root | path join "config")
+        mkdir $huge_home
+        mkdir $huge_config_dir
+        let huge_config = ($huge_config_dir | path join "config.nu")
+        let huge_content = (
+            0..3299
+            | each {|index| $"let realistic_setting_($index) = 'value-($index)-abcdefghijklmnopqrstuvwxyz'" }
+            | str join "\r\n"
+        )
+        assert (($huge_content | str length) >= 200_000) "huge performance config is smaller than 200KB"
+        let huge_saved_content = if $uninstall_only {
+            mkdir ($huge_home | path join ".nurl")
+            $huge_content + "\r\n# >>> nurl >>>\r\nsource ~/.nurl/api.nu\r\n# <<< nurl <<<"
+        } else {
+            $huge_content
+        }
+        $huge_saved_content | save -f $huge_config
+        let huge_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $huge_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $base_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $huge_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($huge_root | path join "curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($huge_root | path join "downloads.log")))
+        )
+        let huge_install_seconds = if $uninstall_only {
+            0
+        } else {
+            let huge_install_started = (date now)
+            let huge_install = (^$bash -lc $"($huge_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            let elapsed = (((date now) - $huge_install_started) / 1sec)
+            assert equal $huge_install.exit_code 0 $"200KB shell install failed: ($huge_install.stderr)"
+            $elapsed
+        }
+        let huge_uninstall_started = (date now)
+        let huge_uninstall = (^$bash -lc $"($huge_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        let huge_uninstall_seconds = (((date now) - $huge_uninstall_started) / 1sec)
+        assert equal $huge_uninstall.exit_code 0 $"200KB shell uninstall failed: ($huge_uninstall.stderr)"
+        print $"  [200KB config timing] install=($huge_install_seconds)s uninstall=($huge_uninstall_seconds)s bytes=($huge_content | str length)"
+        if not $uninstall_only {
+            assert ($huge_install_seconds < 30) $"200KB shell install exceeded 30s: ($huge_install_seconds)s"
+        }
+        assert ($huge_uninstall_seconds < 30) $"200KB shell uninstall exceeded 30s: ($huge_uninstall_seconds)s"
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -2100,17 +2320,22 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($shell_source | str contains "must not resolve inside") "shell config containment guard is missing"
         assert (not ($shell_source | str contains "done < <(od")) "shell config reader does not check od process-substitution failure"
         assert (not ($shell_source | str contains "$(printf '%03o'")) "shell config reader forks once per byte"
-        assert ($shell_source | str contains "decoded_count != source_size") "shell config reader does not validate decoded byte count"
+        assert ($shell_source | str contains '"$decoded_count" != "$source_size"') "shell config reader does not validate decoded byte count"
+        assert ($shell_source | str contains "perl -") "shell config transformation is not single-pass"
     }
     assert ($uninstall_sh | str contains "Could not create an atomic temp beside Nushell config") "uninstall does not preflight adjacent config temp creation"
+    assert (not ($uninstall_sh | str contains "restore_displaced_config \"$displaced\" \"$destination\" || true")) "shell uninstall swallows config restoration failures"
+    assert equal (($install_sh | parse --regex 'ROLLBACK_FAILED=false') | length) 1 "shell installer resets an earlier rollback failure"
+    assert (not ($install_sh | str contains "FRESH_SIGNATURE")) "shell installer retains dead fresh-signature state"
     for ps_source in [$install_ps $uninstall_ps] {
         assert ($ps_source | str contains "[AllowEmptyString()][string]$Line") "PowerShell legacy-source check rejects blank config lines"
         assert ($ps_source | str contains '$PSStyle.OutputRendering = $previousOutputRendering') "PowerShell host rendering state is not restored"
         assert ($ps_source | str contains "invalid or unsupported text encoding") "PowerShell encoding failure is not actionable"
     }
     assert ($install_ps | str contains "config temporary directory remains") "PowerShell install temp cleanup diagnostic is missing"
+    assert (not ($install_ps | str contains "Get-NurlTreeManifest")) "PowerShell installer retains dead fresh-manifest state"
     assert ($uninstall_ps | str contains '$configTemps') "PowerShell uninstall does not track config temps"
-    assert ($install_ps | str contains "Get-NurlTreeManifest") "PowerShell fresh rollback has no staged manifest"
+    assert ($uninstall_ps | str contains "read-only; Nurl was not moved") "PowerShell read-only config failure is not preflighted"
     assert ($install_ps | str contains "preserved the visible fresh installation") "PowerShell fresh rollback does not preserve concurrent data"
     assert ($install_ps | str contains "[System.IO.File]::Replace") "PowerShell installer config replacement is not atomic"
     assert ($uninstall_ps | str contains "[System.IO.File]::Replace") "PowerShell uninstaller config replacement is not atomic"
@@ -2124,6 +2349,18 @@ def test-reviewed-packaging-safety-contracts [] {
     let shell_track_index = ($uninstall_sh | str index-of 'CONFIG_TEMPS+=("$config_temp")')
     let shell_copy_index = ($uninstall_sh | str index-of 'cp "$candidate" "$config_temp"')
     assert ($shell_track_index >= 0 and $shell_track_index < $shell_copy_index) "shell uninstall tracks config temp after populating it"
+}
+
+def test-ubuntu-packaging-workflow-contract [] {
+    let repo = $env.NURL_REPO_ROOT
+    let workflow = (open ($repo | path join ".github" "workflows" "security-compatibility.yml") --raw)
+    let runner = (open ($repo | path join "tests" "run-packaging.nu") --raw)
+    assert ($workflow | str contains "packaging-ubuntu:") "Ubuntu behavioral packaging job is missing"
+    assert ($workflow | str contains "Packaging behavior / ubuntu-latest / Nushell 0.114.1") "Ubuntu packaging job is not visibly named"
+    assert ($workflow | str contains 'NURL_REQUIRE_POSIX_PACKAGING: "1"') "Ubuntu packaging job does not require PTY/symlink capabilities"
+    assert ($workflow | str contains "tests/run-packaging.nu") "Ubuntu packaging job does not run the focused packaging runner"
+    assert ($runner | str contains "run-suite-packaging") "focused packaging runner does not execute the packaging suite"
+    assert ($runner | str contains 'where status == "fail"') "focused packaging runner does not fail on test failures"
 }
 
 def test-command-discovery-source-duplicates [] {
@@ -2333,6 +2570,7 @@ export def run-suite-packaging []: nothing -> list<record> {
         (run-test "PowerShell config ownership and failures preserve the invoking host" { test-powershell-config-and-host-safety })
         (run-test "shell config byte reader fails closed and stays fast on 20KB files" { test-shell-config-byte-reader-and-performance })
         (run-test "reviewed packaging safety contracts remain explicit" { test-reviewed-packaging-safety-contracts })
+        (run-test "Ubuntu workflow runs required behavioral packaging coverage" { test-ubuntu-packaging-workflow-contract })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
         (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })
         (run-test "SAML CRUD commands and examples stay synchronized across help and coverage" { test-saml-help-coverage-integration })

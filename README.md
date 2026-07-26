@@ -32,6 +32,7 @@
 
 - [Nushell](https://www.nushell.sh/) >= 0.89.0
 - curl >= 7.75.0 (required for fileless framed response metadata)
+- Perl, `awk`, `od`, and `wc` for byte-safe shell installer config editing
 
 ---
 
