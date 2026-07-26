@@ -377,6 +377,7 @@ param()
         $createdDirectories = [System.Collections.Generic.List[string]]::new()
         $rollbackState = [pscustomobject]@{ Failed = $false }
         $configTemp = $null
+        $configTempDir = $null
 
         function Ensure-TrackedDirectory {
             param([Parameter(Mandatory)][string]$Path)
@@ -437,7 +438,9 @@ param()
                 [Parameter(Mandatory)][string]$Destination,
                 [Parameter(Mandatory)][bool]$OriginalExists,
                 [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$OriginalBytes,
-                [Parameter(Mandatory)][byte[]]$CandidateBytes
+                [Parameter(Mandatory)][byte[]]$CandidateBytes,
+                [Parameter(Mandatory)][ref]$SourceOwner,
+                [Parameter(Mandatory)][ref]$SourceDirectoryOwner
             )
             Ensure-TrackedDirectory (Split-Path -Parent $Destination)
             $existing = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
@@ -447,6 +450,16 @@ param()
                 }
                 $backup = Join-Path (Split-Path -Parent $Destination) (".config.nu.nurl.rollback." + [guid]::NewGuid().ToString("N"))
                 [System.IO.File]::Replace($Source, $Destination, $backup)
+                $SourceOwner.Value = $null
+                $consumedDirectory = [string]$SourceDirectoryOwner.Value
+                if (-not [string]::IsNullOrEmpty($consumedDirectory)) {
+                    try {
+                        [System.IO.Directory]::Delete($consumedDirectory, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: consumed temp directory was preserved: $consumedDirectory")
+                    }
+                    $SourceDirectoryOwner.Value = $null
+                }
                 $displacedBytes = [System.IO.File]::ReadAllBytes($backup)
                 if (-not $OriginalExists -or
                     [Convert]::ToBase64String($displacedBytes) -cne [Convert]::ToBase64String($OriginalBytes)) {
@@ -470,6 +483,16 @@ param()
                     throw "Nushell config disappeared during installation; no config changes were applied."
                 }
                 [System.IO.File]::Move($Source, $Destination)
+                $SourceOwner.Value = $null
+                $consumedDirectory = [string]$SourceDirectoryOwner.Value
+                if (-not [string]::IsNullOrEmpty($consumedDirectory)) {
+                    try {
+                        [System.IO.Directory]::Delete($consumedDirectory, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: consumed temp directory was preserved: $consumedDirectory")
+                    }
+                    $SourceDirectoryOwner.Value = $null
+                }
                 $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true; CandidateBytes = $CandidateBytes })
             }
         }
@@ -621,7 +644,9 @@ param()
             Write-Host "[4/4] Configuring Nushell..."
             if ($configEdit.Changed) {
                 Ensure-TrackedDirectory $NushellConfigDir
-                $configTemp = Join-Path $NushellConfigDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                $configTempDir = Join-Path $NushellConfigDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                [void][System.IO.Directory]::CreateDirectory($configTempDir)
+                $configTemp = Join-Path $configTempDir "candidate"
                 [System.IO.File]::WriteAllBytes($configTemp, $configEdit.Bytes)
                 if ($configEdit.OriginalExists) {
                     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
@@ -634,7 +659,7 @@ param()
                 } elseif (Test-Path -LiteralPath $ConfigPath) {
                     throw "Nushell config appeared during installation; no config changes were applied."
                 }
-                Promote-NurlConfig $configTemp $ConfigPath $configEdit.OriginalExists ([byte[]]$configEdit.OriginalBytes) ([byte[]]$configEdit.Bytes)
+                Promote-NurlConfig $configTemp $ConfigPath $configEdit.OriginalExists ([byte[]]$configEdit.OriginalBytes) ([byte[]]$configEdit.Bytes) ([ref]$configTemp) ([ref]$configTempDir)
                 Write-Host "  Added the owned Nurl block to $ConfigPath"
             } else {
                 Write-Host "  Nushell config already contains the owned Nurl block"
@@ -648,11 +673,20 @@ param()
             }
             Remove-Item -LiteralPath $RollbackRoot -Recurse -Force
         } finally {
-            if ($null -ne $configTemp -and (Test-Path -LiteralPath $configTemp)) {
+            if ($null -ne $configTempDir -and (Test-Path -LiteralPath $configTempDir -PathType Container)) {
                 try {
-                    Remove-Item -LiteralPath $configTemp -Force -ErrorAction Stop
+                    $ownedCandidate = Join-Path $configTempDir "candidate"
+                    if (Test-Path -LiteralPath $ownedCandidate -PathType Leaf) {
+                        $ownedBytes = [System.IO.File]::ReadAllBytes($ownedCandidate)
+                        if ([Convert]::ToBase64String($ownedBytes) -ceq [Convert]::ToBase64String([byte[]]$configEdit.Bytes)) {
+                            Remove-Item -LiteralPath $ownedCandidate -Force -ErrorAction Stop
+                        } else {
+                            throw "candidate bytes changed"
+                        }
+                    }
+                    [System.IO.Directory]::Delete($configTempDir, $false)
                 } catch {
-                    [Console]::Error.WriteLine("Warning: config temporary file remains at '$configTemp': $($_.Exception.Message)")
+                    [Console]::Error.WriteLine("Warning: config temporary directory remains at '$configTempDir': $($_.Exception.Message)")
                 }
             }
             if ($promotionStarted -and -not $committed) {

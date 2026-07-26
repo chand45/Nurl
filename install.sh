@@ -190,15 +190,34 @@ read_config_records() {
     local source="$1"
     local LC_ALL=C
     local body=''
-    local char='' line byte
+    local char='' line byte octal
     local pending_cr=false
     local CR=$'\r'
     local LF=$'\n'
+    local scratch_root="${STAGE_ROOT:-$HOME}"
+    local byte_stream source_size decoded_count=0
     CONFIG_BODIES=()
     CONFIG_EOLS=()
+    byte_stream="$(mktemp "$scratch_root/.nurl-config-bytes.XXXXXX")" || {
+        echo -e "${RED}Error: Could not create a temporary byte stream for Nushell config: $source${NC}" >&2
+        return 1
+    }
+    if ! od -An -v -tu1 "$source" > "$byte_stream"; then
+        rm -f "$byte_stream"
+        echo -e "${RED}Error: Could not read Nushell config bytes with od: $source${NC}" >&2
+        return 1
+    fi
+    if ! source_size="$(wc -c < "$source")"; then
+        rm -f "$byte_stream"
+        echo -e "${RED}Error: Could not determine Nushell config byte count: $source${NC}" >&2
+        return 1
+    fi
+    source_size="${source_size//[[:space:]]/}"
     while IFS= read -r line; do
         for byte in $line; do
+            decoded_count=$((decoded_count + 1))
             if [[ "$byte" == '0' ]]; then
+                rm -f "$byte_stream"
                 echo -e "${RED}Error: Nushell config contains an unsupported NUL byte: $source${NC}" >&2
                 return 1
             fi
@@ -222,11 +241,17 @@ read_config_records() {
                 CONFIG_EOLS+=("$LF")
                 body=''
             else
-                printf -v char "\\$(printf '%03o' "$byte")"
+                printf -v octal '%03o' "$byte"
+                printf -v char '%b' "\\$octal"
                 body+="$char"
             fi
         done
-    done < <(od -An -v -tu1 "$source")
+    done < "$byte_stream"
+    rm -f "$byte_stream"
+    if (( decoded_count != source_size )); then
+        echo -e "${RED}Error: Nushell config byte read was incomplete: expected $source_size bytes, decoded $decoded_count.${NC}" >&2
+        return 1
+    fi
     if [[ "$pending_cr" == true ]]; then
         CONFIG_BODIES+=("$body")
         CONFIG_EOLS+=("$CR")

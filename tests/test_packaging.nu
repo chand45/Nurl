@@ -1803,6 +1803,117 @@ Write-Output "PSSTYLE-PRESERVED"
     }
 }
 
+def test-shell-config-byte-reader-and-performance [--performance-only] {
+    let bash_candidates = (which bash | where type == "external" | get path? | default [])
+    if ($bash_candidates | is-empty) {
+        error make {msg: "SKIP: Bash is unavailable for config byte-reader fixtures"}
+    }
+    let bash = ($bash_candidates | first)
+    let fixture = (make-temp-dir "shell-byte-reader")
+    let failure = try {
+        let base_tools = ($fixture | path join "base-tools")
+        mkdir $base_tools
+        shell-installer-tools $base_tools $bash
+        let installer = (path-for-bash $bash ($env.NURL_REPO_ROOT | path join "install.sh"))
+        let uninstaller = (path-for-bash $bash ($env.NURL_REPO_ROOT | path join "uninstall.sh"))
+
+        if not $performance_only {
+        for case in [
+            {name: "missing", exit_code: 127, diagnostic: "od: command not found"}
+            {name: "nonzero", exit_code: 42, diagnostic: "forced od failure"}
+        ] {
+            let root = ($fixture | path join $case.name)
+            let home = ($root | path join "home")
+            let nurl = ($home | path join ".nurl")
+            let config_dir = ($root | path join "config")
+            let tools = ($root | path join "tools")
+            mkdir ($nurl | path join "collections")
+            mkdir $config_dir
+            mkdir $tools
+            cp ($base_tools | path join "nu") ($tools | path join "nu")
+            cp ($base_tools | path join "curl") ($tools | path join "curl")
+            $"#!/bin/bash\nprintf '%s\\n' (quote-for-bash $case.diagnostic) >&2\nexit ($case.exit_code)\n"
+            | str replace --all "\r" ""
+            | save -f ($tools | path join "od")
+            let chmod_result = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($tools | path join 'od')))" | complete)
+            assert equal $chmod_result.exit_code 0
+            "existing api bytes" | save -f ($nurl | path join "api.nu")
+            "existing user data" | save -f ($nurl | path join "collections" "user.nuon")
+            "existing config data" | save -f ($nurl | path join "config.nuon")
+            let config = ($config_dir | path join "config.nu")
+            let config_bytes = "# normal config\r\nlet keep = true\r\n"
+            $config_bytes | save -f $config
+            let environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $home))
+                + " PATH=" + (quote-for-bash $"(path-for-bash $bash $tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $config_dir))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($root | path join "curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($root | path join "downloads.log")))
+            )
+            let install_result = (^$bash -lc $"($environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert ($install_result.exit_code != 0) $"shell install accepted ($case.name) od failure"
+            let install_output = $install_result.stdout + $install_result.stderr
+            assert ($install_output | str contains "Could not read Nushell config bytes with od") $"shell install ($case.name) od failure was not actionable"
+            assert (not ($install_output | str contains "successfully")) $"shell install ($case.name) od failure printed success"
+            assert equal (open $config --raw) $config_bytes $"shell install ($case.name) od failure changed config"
+            assert equal (open ($nurl | path join "api.nu") --raw) "existing api bytes" $"shell install ($case.name) od failure changed api.nu"
+            assert equal (open ($nurl | path join "collections" "user.nuon") --raw) "existing user data" $"shell install ($case.name) od failure changed user data"
+            assert equal (open ($nurl | path join "config.nuon") --raw) "existing config data" $"shell install ($case.name) od failure changed config.nuon"
+            assert ((child-paths-starting $home ".nurl-stage.") | is-empty) $"shell install ($case.name) od failure leaked staging"
+
+            let uninstall_result = (^$bash -lc $"($environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+            assert ($uninstall_result.exit_code != 0) $"shell uninstall accepted ($case.name) od failure"
+            let uninstall_output = $uninstall_result.stdout + $uninstall_result.stderr
+            assert ($uninstall_output | str contains "Could not read Nushell config bytes with od") $"shell uninstall ($case.name) od failure was not actionable"
+            assert ($nurl | path exists) $"shell uninstall ($case.name) od failure removed Nurl"
+            assert equal (open $config --raw) $config_bytes $"shell uninstall ($case.name) od failure changed config"
+            assert ((child-paths-starting $home ".nurl-backup-") | is-empty) $"shell uninstall ($case.name) od failure created a backup"
+        }
+        }
+
+        let perf_root = ($fixture | path join "performance")
+        let perf_home = ($perf_root | path join "home")
+        let perf_config_dir = ($perf_root | path join "config")
+        mkdir $perf_home
+        mkdir $perf_config_dir
+        let perf_config = ($perf_config_dir | path join "config.nu")
+        let large_config = (
+            0..399
+            | each {|index| $"let realistic_setting_($index) = 'value-($index)-abcdefghijklmnopqrstuvwxyz'" }
+            | str join "\r\n"
+        )
+        assert (($large_config | str length) >= 20_000) "performance config is smaller than 20KB"
+        $large_config | save -f $perf_config
+        let perf_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $perf_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $base_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $perf_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($perf_root | path join "curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($perf_root | path join "downloads.log")))
+        )
+        let install_started = (date now)
+        let perf_install = (^$bash -lc $"($perf_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        let install_seconds = (((date now) - $install_started) / 1sec)
+        assert equal $perf_install.exit_code 0 $"large-config shell install failed: ($perf_install.stderr)"
+        let uninstall_started = (date now)
+        let perf_uninstall = (^$bash -lc $"($perf_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        let uninstall_seconds = (((date now) - $uninstall_started) / 1sec)
+        assert equal $perf_uninstall.exit_code 0 $"large-config shell uninstall failed: ($perf_uninstall.stderr)"
+        print $"  [large config timing] install=($install_seconds)s uninstall=($uninstall_seconds)s bytes=($large_config | str length)"
+        assert ($install_seconds < 30) $"large-config shell install exceeded 30s: ($install_seconds)s; uninstall=($uninstall_seconds)s"
+        assert ($uninstall_seconds < 30) $"large-config shell uninstall exceeded 30s: ($uninstall_seconds)s"
+        null
+    } catch {|error| $error }
+    cleanup $fixture
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
 def test-installer-module-payloads [] {
     let repo = $env.NURL_REPO_ROOT
     let tmp = (make-temp-dir "installer-payload")
@@ -1987,6 +2098,9 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($shell_source | str contains "resolve_config_path") "shell config symlink support is missing"
         assert ($shell_source | str contains "get_file_mode") "shell config mode preservation is missing"
         assert ($shell_source | str contains "must not resolve inside") "shell config containment guard is missing"
+        assert (not ($shell_source | str contains "done < <(od")) "shell config reader does not check od process-substitution failure"
+        assert (not ($shell_source | str contains "$(printf '%03o'")) "shell config reader forks once per byte"
+        assert ($shell_source | str contains "decoded_count != source_size") "shell config reader does not validate decoded byte count"
     }
     assert ($uninstall_sh | str contains "Could not create an atomic temp beside Nushell config") "uninstall does not preflight adjacent config temp creation"
     for ps_source in [$install_ps $uninstall_ps] {
@@ -1994,7 +2108,7 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($ps_source | str contains '$PSStyle.OutputRendering = $previousOutputRendering') "PowerShell host rendering state is not restored"
         assert ($ps_source | str contains "invalid or unsupported text encoding") "PowerShell encoding failure is not actionable"
     }
-    assert ($install_ps | str contains "config temporary file remains") "PowerShell install temp cleanup diagnostic is missing"
+    assert ($install_ps | str contains "config temporary directory remains") "PowerShell install temp cleanup diagnostic is missing"
     assert ($uninstall_ps | str contains '$configTemps') "PowerShell uninstall does not track config temps"
     assert ($install_ps | str contains "Get-NurlTreeManifest") "PowerShell fresh rollback has no staged manifest"
     assert ($install_ps | str contains "preserved the visible fresh installation") "PowerShell fresh rollback does not preserve concurrent data"
@@ -2217,6 +2331,7 @@ export def run-suite-packaging []: nothing -> list<record> {
         (run-test "shell uninstall requires explicit non-TTY consent and verifies complete backups" { test-shell-uninstall-backup-and-consent })
         (run-test "shell config ownership preserves unrelated bytes and honors resolved/XDG paths" { test-shell-config-ownership-and-resolution })
         (run-test "PowerShell config ownership and failures preserve the invoking host" { test-powershell-config-and-host-safety })
+        (run-test "shell config byte reader fails closed and stays fast on 20KB files" { test-shell-config-byte-reader-and-performance })
         (run-test "reviewed packaging safety contracts remain explicit" { test-reviewed-packaging-safety-contracts })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
         (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })

@@ -303,6 +303,7 @@ param(
         }
         $configEdits = [System.Collections.Generic.List[object]]::new()
         $configTemps = [System.Collections.Generic.List[string]]::new()
+        $configTempRecords = [System.Collections.Generic.List[object]]::new()
         $configReplacements = [System.Collections.Generic.List[object]]::new()
         foreach ($configPath in $configPaths) {
             if (Test-NurlPathContained $NurlHome $configPath) {
@@ -331,7 +332,11 @@ param(
         try {
             foreach ($edit in $configEdits) {
                 $configDir = Split-Path -Parent $edit.Path
-                $temp = Join-Path $configDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                $tempDir = Join-Path $configDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                [void][System.IO.Directory]::CreateDirectory($tempDir)
+                $temp = Join-Path $tempDir "candidate"
+                $tempRecord = [pscustomobject]@{ Dir = $tempDir; Candidate = $temp; Expected = $edit.Bytes; Retired = $false }
+                $configTempRecords.Add($tempRecord)
                 $configTemps.Add($temp)
                 [System.IO.File]::WriteAllBytes($temp, $edit.Bytes)
                 $edit | Add-Member -NotePropertyName Temp -NotePropertyValue $temp
@@ -364,13 +369,23 @@ param(
                 if ([Convert]::ToBase64String($currentConfigBytes) -cne [Convert]::ToBase64String([byte[]]$edit.OriginalBytes)) {
                     throw "Nushell config changed during uninstall. The Nurl backup remains at $BackupDir and config was not overwritten."
                 }
-                $replaceBackup = $edit.Temp + ".backup"
+                $replaceBackup = Join-Path (Split-Path -Parent $edit.Path) (".config.nu.nurl.rollback." + [guid]::NewGuid().ToString("N"))
                 $configReplacements.Add([pscustomobject]@{
                     Path = $edit.Path
                     Backup = $replaceBackup
                     CandidateBytes = $edit.Bytes
                 })
                 [System.IO.File]::Replace($edit.Temp, $edit.Path, $replaceBackup)
+                [void]$configTemps.Remove($edit.Temp)
+                $tempRecord = $configTempRecords | Where-Object Candidate -eq $edit.Temp | Select-Object -First 1
+                if ($null -ne $tempRecord) {
+                    try {
+                        [System.IO.Directory]::Delete($tempRecord.Dir, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: consumed temp directory was preserved: $($tempRecord.Dir)")
+                    }
+                    $tempRecord.Retired = $true
+                }
                 $displacedBytes = [System.IO.File]::ReadAllBytes($replaceBackup)
                 if ([Convert]::ToBase64String($displacedBytes) -cne [Convert]::ToBase64String([byte[]]$edit.OriginalBytes)) {
                     $candidateRecovery = $replaceBackup + ".candidate"
@@ -433,9 +448,21 @@ param(
             }
             throw
         } finally {
-            foreach ($temp in $configTemps) {
-                if (Test-Path -LiteralPath $temp) {
-                    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+            foreach ($tempRecord in $configTempRecords) {
+                if (-not $tempRecord.Retired -and (Test-Path -LiteralPath $tempRecord.Dir -PathType Container)) {
+                    try {
+                        if (Test-Path -LiteralPath $tempRecord.Candidate -PathType Leaf) {
+                            $ownedBytes = [System.IO.File]::ReadAllBytes($tempRecord.Candidate)
+                            if ([Convert]::ToBase64String($ownedBytes) -ceq [Convert]::ToBase64String([byte[]]$tempRecord.Expected)) {
+                                Remove-Item -LiteralPath $tempRecord.Candidate -Force -ErrorAction Stop
+                            } else {
+                                throw "candidate bytes changed"
+                            }
+                        }
+                        [System.IO.Directory]::Delete($tempRecord.Dir, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: config temporary directory remains at '$($tempRecord.Dir)': $($_.Exception.Message)")
+                    }
                 }
             }
         }
