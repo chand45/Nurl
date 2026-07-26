@@ -473,7 +473,7 @@ param(
         Write-Host ""
         Write-Host "Nurl uninstalled" -ForegroundColor Green
         Write-Host ""
-        Write-Host "A complete, byte-verified backup was copied to:"
+        Write-Host "A complete, byte-verified backup was moved to:"
         Write-Host "  $BackupDir" -ForegroundColor Blue
         Write-Host "The backup includes all files that were present under $NurlHome,"
         Write-Host "including collections, chains, history, and NUON configuration."

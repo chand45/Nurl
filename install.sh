@@ -91,6 +91,27 @@ get_file_mode() {
     stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null
 }
 
+probe_mv_no_clobber() {
+    local directory="$1"
+    local probe_dir source destination move_source move_destination
+    probe_dir="$(mktemp -d "$directory/.nurl-mv-probe.XXXXXX")" || return 1
+    source="$probe_dir/source"
+    destination="$probe_dir/destination"
+    printf 'source' > "$source"
+    printf 'destination' > "$destination"
+    mv -n "$source" "$destination" 2>/dev/null || true
+    move_source="$probe_dir/move-source"
+    move_destination="$probe_dir/move-destination"
+    printf 'move-source' > "$move_source"
+    mv -n "$move_source" "$move_destination" 2>/dev/null || true
+    if [[ ! -f "$source" || ! -f "$destination" || -e "$move_source" || ! -f "$move_destination" ]]; then
+        rm -rf "$probe_dir"
+        echo "Error: mv -n is not a safe no-clobber operation in config directory '$directory'." >&2
+        return 1
+    fi
+    rm -rf "$probe_dir"
+}
+
 restore_displaced_config() {
     local displaced="$1"
     local destination="$2"
@@ -100,7 +121,7 @@ restore_displaced_config() {
     if [[ -e "$destination" || -L "$destination" ]]; then
         return 1
     fi
-    if mv -n "$displaced" "$destination" && [[ ! -e "$displaced" && -e "$destination" ]]; then
+    if mv "$displaced" "$destination" && [[ ! -e "$displaced" && -e "$destination" ]]; then
         return 0
     fi
     return 1
@@ -113,6 +134,7 @@ replace_config_safely() {
     local original_exists="$4"
     local parent displaced
     LAST_CONFIG_BACKUP=''
+    probe_mv_no_clobber "$(dirname "$destination")" || return 1
 
     if [[ -e "$destination" || -L "$destination" ]]; then
         displaced="$(mktemp "$(dirname "$destination")/.config.nu.nurl.rollback.XXXXXX")"
@@ -406,6 +428,7 @@ rollback_install() {
     done
     if [[ "$FRESH_PROMOTED" == true ]]; then
         echo "Warning: rollback preserved the visible fresh installation to avoid deleting concurrent data." >&2
+        echo "Inspect '$NURL_HOME'; remove it manually only after preserving any data created there." >&2
     fi
     for ((index = ${#CREATED_DIRS[@]} - 1; index >= 0; index--)); do
         rmdir "${CREATED_DIRS[$index]}" 2>/dev/null || true

@@ -841,6 +841,9 @@ exec /bin/mv "$@"
         mkdir ($config_fail_install | path join "nu_modules")
         mkdir $config_fail_dir
         "old config-temp api" | save -f ($config_fail_install | path join "api.nu")
+        let config_fail_config = ($config_fail_dir | path join "config.nu")
+        let config_fail_original = "let config_failure_keep = true\n"
+        $config_fail_original | save -f $config_fail_config
         let config_fail_api = (open ($config_fail_install | path join "api.nu") --raw)
         let config_fail_tools = ($fixture | path join "config-fail-tools")
         mkdir $config_fail_tools
@@ -870,6 +873,7 @@ exec /bin/mv "$@"
         ) | complete)
         assert ($config_promotion_failure.exit_code != 0) "shell config promotion failure unexpectedly succeeded"
         assert equal (open ($config_fail_install | path join "api.nu") --raw) $config_fail_api "shell config promotion failure did not restore api.nu"
+        assert equal (open $config_fail_config --raw) $config_fail_original "shell config promotion failure did not restore config.nu"
         assert ((child-paths-starting $config_fail_dir ".config.nu.nurl.") | is-empty) "shell config promotion failure orphaned a config temp"
         assert ((child-paths-starting $config_fail_home ".nurl-stage.") | is-empty) "shell config promotion failure leaked staging"
 
@@ -1406,6 +1410,50 @@ exit 81
         assert equal (open $ln_failure_config --raw) $ln_failure_original "uninstall did not restore config bytes when ln failed"
         let ln_backup = (child-paths-starting $ln_failure_home ".nurl-backup-" | first)
         assert equal (open ($ln_backup | path join "collections" "user.nuon") --raw) "hard-link user data" "uninstall ln failure lost backup data"
+
+        let mvn_home = ($fixture | path join "mvn-home")
+        let mvn_nurl = ($mvn_home | path join ".nurl")
+        let mvn_config_dir = ($fixture | path join "mvn-config")
+        let mvn_tools = ($fixture | path join "mvn-tools")
+        mkdir $mvn_nurl
+        mkdir $mvn_config_dir
+        mkdir $mvn_tools
+        cp ($tools | path join "nu") ($mvn_tools | path join "nu")
+        cp ($tools | path join "curl") ($mvn_tools | path join "curl")
+        '#!/bin/bash
+if [[ "$1" == "-n" ]]; then
+    printf "%s\n" "mv: illegal option -- n" >&2
+    exit 64
+fi
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($mvn_tools | path join "mv")
+        let mvn_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($mvn_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($mvn_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($mvn_tools | path join 'mv')))" | complete)
+        assert equal $mvn_chmod.exit_code 0
+        "mvn Nurl data" | save -f ($mvn_nurl | path join "data.nuon")
+        let mvn_config = ($mvn_config_dir | path join "config.nu")
+        let mvn_original = "let mvn_keep = true\n"
+        $mvn_original | save -f $mvn_config
+        let mvn_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $mvn_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $mvn_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $mvn_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "mvn-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "mvn-downloads.log")))
+        )
+        let mvn_install = (^$bash -lc $"($mvn_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert ($mvn_install.exit_code != 0) "installer accepted unsupported mv -n"
+        assert (($mvn_install.stdout + $mvn_install.stderr) | str contains "not a safe no-clobber operation") "installer mv -n capability error was not actionable"
+        assert equal (open $mvn_config --raw) $mvn_original "installer mv -n failure changed config"
+        assert equal (open ($mvn_nurl | path join "data.nuon") --raw) "mvn Nurl data" "installer mv -n failure changed Nurl data"
+        "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\n" | save -f $mvn_config
+        let mvn_owned = (open $mvn_config --raw)
+        let mvn_uninstall = (^$bash -lc $"($mvn_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert ($mvn_uninstall.exit_code != 0) "uninstaller accepted unsupported mv -n"
+        assert (($mvn_uninstall.stdout + $mvn_uninstall.stderr) | str contains "not a safe no-clobber operation") "uninstaller mv -n capability error was not actionable"
+        assert equal (open $mvn_config --raw) $mvn_owned "uninstaller mv -n failure changed config"
+        assert ($mvn_nurl | path exists) "uninstaller mv -n failure detached Nurl"
 
         let readonly_home = ($fixture | path join "readonly-home")
         let readonly_nurl = ($readonly_home | path join ".nurl")
@@ -2402,6 +2450,7 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($shell_source | str contains "resolve_config_path") "shell config symlink support is missing"
         assert ($shell_source | str contains "get_file_mode") "shell config mode preservation is missing"
         assert ($shell_source | str contains "must not resolve inside") "shell config containment guard is missing"
+        assert ($shell_source | str contains "probe_mv_no_clobber") "shell config replacement does not probe mv -n capability"
         assert (not ($shell_source | str contains "done < <(od")) "shell config reader does not check od process-substitution failure"
         assert (not ($shell_source | str contains "$(printf '%03o'")) "shell config reader forks once per byte"
         assert ($shell_source | str contains '"$decoded_count" != "$source_size"') "shell config reader does not validate decoded byte count"

@@ -75,6 +75,27 @@ get_file_mode() {
     stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null
 }
 
+probe_mv_no_clobber() {
+    local directory="$1"
+    local probe_dir source destination move_source move_destination
+    probe_dir="$(mktemp -d "$directory/.nurl-mv-probe.XXXXXX")" || return 1
+    source="$probe_dir/source"
+    destination="$probe_dir/destination"
+    printf 'source' > "$source"
+    printf 'destination' > "$destination"
+    mv -n "$source" "$destination" 2>/dev/null || true
+    move_source="$probe_dir/move-source"
+    move_destination="$probe_dir/move-destination"
+    printf 'move-source' > "$move_source"
+    mv -n "$move_source" "$move_destination" 2>/dev/null || true
+    if [[ ! -f "$source" || ! -f "$destination" || -e "$move_source" || ! -f "$move_destination" ]]; then
+        rm -rf "$probe_dir"
+        echo "Error: mv -n is not a safe no-clobber operation in config directory '$directory'." >&2
+        return 1
+    fi
+    rm -rf "$probe_dir"
+}
+
 restore_displaced_config() {
     local displaced="$1"
     local destination="$2"
@@ -84,7 +105,7 @@ restore_displaced_config() {
     if [[ -e "$destination" || -L "$destination" ]]; then
         return 1
     fi
-    if mv -n "$displaced" "$destination" && [[ ! -e "$displaced" && -e "$destination" ]]; then
+    if mv "$displaced" "$destination" && [[ ! -e "$displaced" && -e "$destination" ]]; then
         return 0
     fi
     return 1
@@ -96,6 +117,7 @@ replace_config_safely() {
     local snapshot="$3"
     local displaced
     LAST_CONFIG_BACKUP=''
+    probe_mv_no_clobber "$(dirname "$destination")" || return 1
     displaced="$(mktemp "$(dirname "$destination")/.config.nu.nurl.rollback.XXXXXX")"
     rm -f "$displaced"
     CONFIG_DISPLACED="$displaced"
@@ -422,6 +444,7 @@ for raw_config_path in "${RAW_CONFIG_PATHS[@]}"; do
             echo -e "${RED}Error: Nushell config contains Nurl entries but is not writable: $config_path${NC}" >&2
             exit 1
         fi
+        probe_mv_no_clobber "$(dirname "$config_path")" || exit 1
         CONFIG_SOURCES+=("$config_path")
         CONFIG_ORIGINALS+=("$original")
         CONFIG_CANDIDATES+=("$candidate")
