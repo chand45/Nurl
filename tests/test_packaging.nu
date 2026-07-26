@@ -748,6 +748,40 @@ exec /bin/mv "$@"
         assert (($fresh_concurrent_result.stdout + $fresh_concurrent_result.stderr) | str contains "preserved the visible fresh installation") "fresh rollback did not report preserved concurrent data"
         assert ((child-paths-starting $fresh_concurrent_home ".nurl-stage.") | is-empty) "fresh preserved-data failure leaked an empty recovery stage"
 
+        let created_cmp_home = ($fixture | path join "created-cmp-home")
+        let created_cmp_config_dir = ($fixture | path join "created-cmp-config")
+        let created_cmp_tools = ($fixture | path join "created-cmp-tools")
+        mkdir $created_cmp_home
+        mkdir $created_cmp_config_dir
+        mkdir $created_cmp_tools
+        cp ($tools | path join "nu") ($created_cmp_tools | path join "nu")
+        cp ($tools | path join "curl") ($created_cmp_tools | path join "curl")
+        '#!/bin/bash
+if [[ "$*" == *"/dev/null /dev/null"* ]]; then exit 0; fi
+destination="${!#}"
+printf "%s\n" "# concurrent config data" >> "$destination"
+exit 42
+' | str replace --all "\r" "" | save -f ($created_cmp_tools | path join "cmp")
+        let created_cmp_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($created_cmp_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($created_cmp_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($created_cmp_tools | path join 'cmp')))" | complete)
+        assert equal $created_cmp_chmod.exit_code 0
+        let created_cmp_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $created_cmp_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $created_cmp_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $created_cmp_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "created-cmp-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "created-cmp-downloads.log")))
+        )
+        let created_cmp_result = (^$bash -lc $"($created_cmp_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert ($created_cmp_result.exit_code != 0) "post-config cmp failure unexpectedly succeeded"
+        assert (($created_cmp_result.stdout + $created_cmp_result.stderr) | str contains "cmp exit 42") "post-config cmp failure did not distinguish tool error"
+        let created_cmp_config = ($created_cmp_config_dir | path join "config.nu")
+        assert ($created_cmp_config | path exists) "post-config cmp rollback deleted live config"
+        assert ((open $created_cmp_config --raw) | str contains "concurrent config data") "post-config cmp rollback deleted concurrent config data"
+        assert (($created_cmp_home | path join ".nurl") | path exists) "post-config cmp rollback deleted visible fresh install"
+        assert ((child-paths-starting $created_cmp_home ".nurl-stage.") | is-empty) "post-config cmp rollback leaked empty stage"
+
         let incompatible_shell_path = ($modules | path join "auth.nu")
         mkdir $incompatible_shell_path
         "directory must survive" | save -f ($incompatible_shell_path | path join "keep.txt")
@@ -1402,18 +1436,32 @@ exit 81
             mkdir $readonly_changed_nurl
             mkdir $readonly_changed_config_dir
             "must remain" | save -f ($readonly_changed_nurl | path join "data.nuon")
-            "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\n" | save -f $readonly_changed_config
+            let readonly_roundtrip_original = "let readonly_roundtrip = true\n"
+            $readonly_roundtrip_original | save -f $readonly_changed_config
             ^$bash -lc $"chmod 444 (quote-for-bash (path-for-bash $bash $readonly_changed_config))"
+            let readonly_mode_before = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $readonly_changed_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $readonly_changed_config))" | complete)
             let readonly_changed_environment = (
                 "HOME=" + (quote-for-bash (path-for-bash $bash $readonly_changed_home))
                 + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
                 + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $readonly_changed_config_dir))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "readonly-curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "readonly-downloads.log")))
                 + " NURL_ASSUME_YES=1"
             )
+            let readonly_install = (^$bash -lc $"($readonly_changed_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert equal $readonly_install.exit_code 0 $"installer rejected mode-0444 config: ($readonly_install.stderr)"
+            assert ((open $readonly_changed_config --raw) | str contains "# >>> nurl >>>") "installer did not configure mode-0444 config"
+            let readonly_mode_after_install = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $readonly_changed_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $readonly_changed_config))" | complete)
+            assert equal ($readonly_mode_after_install.stdout | str trim) ($readonly_mode_before.stdout | str trim) "installer changed mode-0444 config mode"
             let readonly_changed = (^$bash -lc $"($readonly_changed_environment) /bin/bash (quote-for-bash $uninstaller)" | complete)
-            assert ($readonly_changed.exit_code != 0) "uninstaller accepted Nurl-owned read-only config"
-            assert (($readonly_changed.stdout + $readonly_changed.stderr) | str contains "contains Nurl entries but is not writable") "read-only config diagnostic was inaccurate"
-            assert ($readonly_changed_nurl | path exists) "read-only config failure detached Nurl"
+            assert equal $readonly_changed.exit_code 0 $"uninstaller rejected mode-0444 owned config: ($readonly_changed.stderr)"
+            assert equal (open $readonly_changed_config --raw) $readonly_roundtrip_original "mode-0444 install/uninstall did not restore exact config bytes"
+            let readonly_mode_after_remove = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $readonly_changed_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $readonly_changed_config))" | complete)
+            assert equal ($readonly_mode_after_remove.stdout | str trim) ($readonly_mode_before.stdout | str trim) "uninstaller changed mode-0444 config mode"
+            let readonly_backup = (child-paths-starting $readonly_changed_home ".nurl-backup-" | first)
+            assert equal (open ($readonly_backup | path join "data.nuon") --raw) "must remain" "mode-0444 roundtrip lost Nurl data"
             ^$bash -lc $"chmod 600 (quote-for-bash (path-for-bash $bash $readonly_changed_config))"
         } else if $require_posix {
             error make {msg: "required Ubuntu read-only config capability is unavailable"}
@@ -1492,6 +1540,8 @@ exit 81
             assert (($contained_remove.stdout + $contained_remove.stderr) | str contains "must not resolve inside") "uninstaller config-containment error was not actionable"
             assert ($contained_nurl | path exists) "uninstaller config-containment failure removed Nurl"
             assert ((child-paths-starting $contained_home ".nurl-backup-") | is-empty) "uninstaller config-containment failure created a backup"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu contained config-file symlink capability is unavailable"}
         }
 
         let contained_dir_home = ($fixture | path join "contained-dir-home")
@@ -1518,6 +1568,8 @@ exit 81
             let contained_dir_install = (^$bash -lc $"($contained_dir_environment) /bin/bash (quote-for-bash $installer)" | complete)
             assert ($contained_dir_install.exit_code != 0) "installer accepted config directory symlink into Nurl"
             assert equal (open ($contained_dir_nurl | path join "config.nu") --raw) "managed config bytes" "installer config directory symlink corrupted Nurl"
+        } else if $require_posix {
+            error make {msg: "required Ubuntu contained config-directory symlink capability is unavailable"}
         }
 
         let dot_home = ($fixture | path join "dot-home")
@@ -2041,6 +2093,38 @@ def test-shell-config-byte-reader-and-performance [--performance-only, --huge-on
         assert ($nul_uninstall_output | str contains (path-for-bash $bash $nul_config)) "shell uninstaller NUL diagnostic did not name the user config"
         assert (not ($nul_uninstall_output | str contains "config-original")) "shell uninstaller NUL diagnostic named the staging copy"
         assert ($nul_nurl | path exists) "shell uninstaller NUL failure removed Nurl"
+
+        let corrupt_root = ($fixture | path join "corrupt-sentinel")
+        let corrupt_home = ($corrupt_root | path join "home")
+        let corrupt_nurl = ($corrupt_home | path join ".nurl")
+        let corrupt_config_dir = ($corrupt_root | path join "config")
+        let corrupt_config = ($corrupt_config_dir | path join "config.nu")
+        mkdir $corrupt_nurl
+        mkdir $corrupt_config_dir
+        "corrupt sentinel user data" | save -f ($corrupt_nurl | path join "data.nuon")
+        let corrupt_bytes = "# <<< nurl <<<\nlet keep = true\n"
+        $corrupt_bytes | save -f $corrupt_config
+        let corrupt_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $corrupt_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $base_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $corrupt_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($corrupt_root | path join "curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($corrupt_root | path join "downloads.log")))
+        )
+        let corrupt_install = (^$bash -lc $"($corrupt_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert ($corrupt_install.exit_code != 0) "installer accepted corrupt sentinel"
+        let corrupt_install_output = $corrupt_install.stdout + $corrupt_install.stderr
+        assert ($corrupt_install_output | str contains (path-for-bash $bash $corrupt_config)) "installer sentinel diagnostic did not name live config"
+        assert (not ($corrupt_install_output | str contains "config.original")) "installer sentinel diagnostic named staging config"
+        assert equal (open $corrupt_config --raw) $corrupt_bytes "installer corrupt-sentinel failure changed config"
+        let corrupt_uninstall = (^$bash -lc $"($corrupt_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert ($corrupt_uninstall.exit_code != 0) "uninstaller accepted corrupt sentinel"
+        let corrupt_uninstall_output = $corrupt_uninstall.stdout + $corrupt_uninstall.stderr
+        assert ($corrupt_uninstall_output | str contains (path-for-bash $bash $corrupt_config)) "uninstaller sentinel diagnostic did not name live config"
+        assert (not ($corrupt_uninstall_output | str contains "config-original")) "uninstaller sentinel diagnostic named staging config"
+        assert ($corrupt_nurl | path exists) "uninstaller corrupt-sentinel failure detached Nurl"
         }
 
         if not $huge_only {
@@ -2324,6 +2408,8 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($shell_source | str contains "perl -") "shell config transformation is not single-pass"
     }
     assert ($uninstall_sh | str contains "Could not create an atomic temp beside Nushell config") "uninstall does not preflight adjacent config temp creation"
+    assert ($install_sh | str contains "required_tool in od awk perl wc sed tr uname dirname basename mktemp cp mv rm chmod cmp") "shell installer does not preflight cmp and required tools"
+    assert ($uninstall_sh | str contains "required_tool in od awk perl wc sed tr uname find dirname basename mktemp cp mv rm chmod cmp") "shell uninstaller does not preflight cmp and required tools"
     assert (not ($uninstall_sh | str contains "restore_displaced_config \"$displaced\" \"$destination\" || true")) "shell uninstall swallows config restoration failures"
     assert equal (($install_sh | parse --regex 'ROLLBACK_FAILED=false') | length) 1 "shell installer resets an earlier rollback failure"
     assert (not ($install_sh | str contains "FRESH_SIGNATURE")) "shell installer retains dead fresh-signature state"
@@ -2349,6 +2435,8 @@ def test-reviewed-packaging-safety-contracts [] {
     let shell_track_index = ($uninstall_sh | str index-of 'CONFIG_TEMPS+=("$config_temp")')
     let shell_copy_index = ($uninstall_sh | str index-of 'cp "$candidate" "$config_temp"')
     assert ($shell_track_index >= 0 and $shell_track_index < $shell_copy_index) "shell uninstall tracks config temp after populating it"
+    assert equal (($install_sh | parse --regex 'CREATED_PATHS\+=') | length) (($install_sh | parse --regex 'CREATED_CANDIDATES\+=') | length) "shell rollback created-path arrays are desynchronized"
+    assert ($install_sh | str contains "finish() {\n    local status=$?\n    set +e") "shell EXIT cleanup can abort before completing recovery"
 }
 
 def test-ubuntu-packaging-workflow-contract [] {

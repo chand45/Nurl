@@ -198,14 +198,14 @@ my ($inside, $owned) = (0, 0);
 for my $line (@body) {
     my $clean = $trim->($line);
     if ($clean eq '# >>> nurl >>>') {
-        die "Nushell config contains an invalid Nurl sentinel block: $source\n" if $inside || $owned;
+        die "Nushell config contains an invalid Nurl sentinel block: $display\n" if $inside || $owned;
         $inside = 1; $owned = 1;
     } elsif ($clean eq '# <<< nurl <<<') {
-        die "Nushell config contains an unmatched Nurl sentinel: $source\n" unless $inside;
+        die "Nushell config contains an unmatched Nurl sentinel: $display\n" unless $inside;
         $inside = 0;
     }
 }
-die "Nushell config contains an unterminated Nurl sentinel block: $source\n" if $inside;
+die "Nushell config contains an unterminated Nurl sentinel block: $display\n" if $inside;
 exit 3 if $mode eq 'install' && $owned;
 my $preferred = "\n";
 for my $ending (@eol) { if (length $ending) { $preferred = $ending; last; } }
@@ -334,12 +334,20 @@ if [[ "$ASSUME_YES" != true ]]; then
     fi
 fi
 
-for required_tool in od awk perl wc; do
+for required_tool in od awk perl wc sed tr uname find dirname basename mktemp cp mv rm chmod cmp stat readlink rmdir date tar cksum; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo -e "${RED}Error: $required_tool is required for byte-safe Nushell config editing.${NC}" >&2
         exit 1
     fi
 done
+set +e
+cmp -s /dev/null /dev/null
+CMP_PREFLIGHT_STATUS=$?
+set -e
+if [[ "$CMP_PREFLIGHT_STATUS" -ne 0 ]]; then
+    echo -e "${RED}Error: cmp is installed but could not compare files (exit $CMP_PREFLIGHT_STATUS).${NC}" >&2
+    exit 1
+fi
 
 unsafe_entry="$(find "$NURL_HOME" \( -type l -o \( ! -type d ! -type f \) \) -print -quit)"
 if [[ -n "$unsafe_entry" ]]; then
@@ -410,7 +418,7 @@ for raw_config_path in "${RAW_CONFIG_PATHS[@]}"; do
     candidate="$WORK_ROOT/config-${#CONFIG_CANDIDATES[@]}.nu"
     prepare_clean_config "$original" "$candidate" "$config_path"
     if [[ "$CLEAN_CONFIG_CHANGED" == true ]]; then
-        if [[ ! -w "$config_path" || ! -w "$(dirname "$config_path")" ]]; then
+        if [[ ! -w "$(dirname "$config_path")" ]]; then
             echo -e "${RED}Error: Nushell config contains Nurl entries but is not writable: $config_path${NC}" >&2
             exit 1
         fi

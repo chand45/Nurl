@@ -32,7 +32,9 @@
 
 - [Nushell](https://www.nushell.sh/) >= 0.89.0
 - curl >= 7.75.0 (required for fileless framed response metadata)
-- Perl, `awk`, `od`, and `wc` for byte-safe shell installer config editing
+- Perl and standard POSIX tools used by shell packaging (`awk`, `od`, `wc`, `cmp`, `tar`,
+  `cksum`, `sed`, `tr`, `find`, `stat`, `mktemp`, `cp`, `mv`, `rm`, `chmod`, `readlink`,
+  `dirname`, `basename`, `rmdir`, `date`, `uname`)
 
 ---
 

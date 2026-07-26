@@ -228,14 +228,14 @@ my ($inside, $owned) = (0, 0);
 for my $line (@body) {
     my $clean = $trim->($line);
     if ($clean eq '# >>> nurl >>>') {
-        die "Nushell config contains an invalid Nurl sentinel block: $source\n" if $inside || $owned;
+        die "Nushell config contains an invalid Nurl sentinel block: $display\n" if $inside || $owned;
         $inside = 1; $owned = 1;
     } elsif ($clean eq '# <<< nurl <<<') {
-        die "Nushell config contains an unmatched Nurl sentinel: $source\n" unless $inside;
+        die "Nushell config contains an unmatched Nurl sentinel: $display\n" unless $inside;
         $inside = 0;
     }
 }
-die "Nushell config contains an unterminated Nurl sentinel block: $source\n" if $inside;
+die "Nushell config contains an unterminated Nurl sentinel block: $display\n" if $inside;
 exit 3 if $mode eq 'install' && $owned;
 my $preferred = "\n";
 for my $ending (@eol) { if (length $ending) { $preferred = $ending; last; } }
@@ -385,7 +385,6 @@ rollback_install() {
     for ((index = ${#CREATED_PATHS[@]} - 1; index >= 0; index--)); do
         if [[ -n "${CREATED_CANDIDATES[$index]}" ]]; then
             echo "Warning: rollback preserved the live created config to avoid deleting concurrent data." >&2
-            ROLLBACK_FAILED=true
             continue
         fi
         if ! rm -rf "${CREATED_PATHS[$index]}"; then
@@ -415,8 +414,12 @@ rollback_install() {
 
 finish() {
     local status=$?
+    set +e
     if [[ -n "$CONFIG_TEMP" && -e "$CONFIG_TEMP" ]]; then
-        rm -f "$CONFIG_TEMP" || true
+        if ! rm -f "$CONFIG_TEMP"; then
+            echo "Warning: could not remove config temp '$CONFIG_TEMP'." >&2
+            ROLLBACK_FAILED=true
+        fi
     fi
     if [[ -n "$CONFIG_DISPLACED" && -e "$CONFIG_DISPLACED" ]]; then
         if ! restore_displaced_config "$CONFIG_DISPLACED" "$CONFIG_DISPLACED_DEST"; then
@@ -430,7 +433,9 @@ finish() {
     if [[ "$ROLLBACK_FAILED" == true ]]; then
         echo "Error: rollback was incomplete; recovery files remain at $ROLLBACK_DIR." >&2
     elif [[ -n "$STAGE_ROOT" && -d "$STAGE_ROOT" ]]; then
-        rm -rf "$STAGE_ROOT"
+        if ! rm -rf "$STAGE_ROOT"; then
+            echo "Warning: could not remove staging directory '$STAGE_ROOT'." >&2
+        fi
     fi
     exit "$status"
 }
@@ -486,12 +491,20 @@ if ! version_at_least "$CURL_MAJOR" "$CURL_MINOR" "$CURL_PATCH" "$MINIMUM_CURL_V
     exit 1
 fi
 
-for required_tool in od awk perl wc; do
+for required_tool in od awk perl wc sed tr uname dirname basename mktemp cp mv rm chmod cmp stat readlink rmdir; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo -e "${RED}Error: $required_tool is required for byte-safe Nushell config editing.${NC}" >&2
         exit 1
     fi
 done
+set +e
+cmp -s /dev/null /dev/null
+CMP_PREFLIGHT_STATUS=$?
+set -e
+if [[ "$CMP_PREFLIGHT_STATUS" -ne 0 ]]; then
+    echo -e "${RED}Error: cmp is installed but could not compare files (exit $CMP_PREFLIGHT_STATUS).${NC}" >&2
+    exit 1
+fi
 
 NUSHELL_CONFIG_DIR="$(
     nu --no-config-file -c '$nu.default-config-dir' 2>/dev/null \
@@ -671,6 +684,7 @@ else
     promote_if_absent "$PAYLOAD_ROOT/secrets.nuon" "$NURL_HOME/secrets.nuon" "secrets.nuon"
     if [[ -d "$PAYLOAD_ROOT/collections/jsonplaceholder" && ! -e "$NURL_HOME/collections/jsonplaceholder" && ! -L "$NURL_HOME/collections/jsonplaceholder" ]]; then
         CREATED_PATHS+=("$NURL_HOME/collections/jsonplaceholder")
+        CREATED_CANDIDATES+=('')
         mv "$PAYLOAD_ROOT/collections/jsonplaceholder" "$NURL_HOME/collections/jsonplaceholder"
     fi
     if [[ -f "$PAYLOAD_ROOT/chains/example-workflow.nuon" ]]; then
@@ -695,6 +709,18 @@ if [[ "$CONFIG_CHANGED" == true ]]; then
     else
         CREATED_PATHS+=("$NUSHELL_CONFIG")
         CREATED_CANDIDATES+=("$CONFIG_CANDIDATE")
+    fi
+    set +e
+    cmp -s "$CONFIG_CANDIDATE" "$NUSHELL_CONFIG"
+    compare_status=$?
+    set -e
+    if [[ "$compare_status" -ne 0 ]]; then
+        if [[ "$compare_status" -eq 1 ]]; then
+            echo -e "${RED}Error: Nushell config verification mismatch after promotion.${NC}" >&2
+        else
+            echo -e "${RED}Error: Could not verify Nushell config after promotion (cmp exit $compare_status).${NC}" >&2
+        fi
+        exit 1
     fi
     echo "  Added the owned Nurl block to $NUSHELL_CONFIG"
 else
