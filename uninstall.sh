@@ -53,40 +53,46 @@ read_config_records() {
     local source="$1"
     local LC_ALL=C
     local body=''
-    local char=''
+    local char='' line byte
     local pending_cr=false
+    local CR=$'\r'
+    local LF=$'\n'
     CONFIG_BODIES=()
     CONFIG_EOLS=()
-    while IFS= read -r -n 1 char; do
-        if [[ -z "$char" ]]; then
-            char=$'\n'
-        fi
-        if [[ "$pending_cr" == true ]]; then
-            if [[ "$char" == $'\n' ]]; then
+    while IFS= read -r line; do
+        for byte in $line; do
+            if [[ "$byte" == '0' ]]; then
+                echo -e "${RED}Error: Nushell config contains an unsupported NUL byte: $source${NC}" >&2
+                return 1
+            fi
+            if [[ "$pending_cr" == true ]]; then
+                if [[ "$byte" == '10' ]]; then
+                    CONFIG_BODIES+=("$body")
+                    CONFIG_EOLS+=("$CR$LF")
+                    body=''
+                    pending_cr=false
+                    continue
+                fi
                 CONFIG_BODIES+=("$body")
-                CONFIG_EOLS+=($'\r\n')
+                CONFIG_EOLS+=("$CR")
                 body=''
                 pending_cr=false
-                continue
             fi
-            CONFIG_BODIES+=("$body")
-            CONFIG_EOLS+=($'\r')
-            body=''
-            pending_cr=false
-        fi
-        if [[ "$char" == $'\r' ]]; then
-            pending_cr=true
-        elif [[ "$char" == $'\n' ]]; then
-            CONFIG_BODIES+=("$body")
-            CONFIG_EOLS+=($'\n')
-            body=''
-        else
-            body+="$char"
-        fi
-    done < "$source"
+            if [[ "$byte" == '13' ]]; then
+                pending_cr=true
+            elif [[ "$byte" == '10' ]]; then
+                CONFIG_BODIES+=("$body")
+                CONFIG_EOLS+=("$LF")
+                body=''
+            else
+                printf -v char "\\$(printf '%03o' "$byte")"
+                body+="$char"
+            fi
+        done
+    done < <(od -An -v -tu1 "$source")
     if [[ "$pending_cr" == true ]]; then
         CONFIG_BODIES+=("$body")
-        CONFIG_EOLS+=($'\r')
+        CONFIG_EOLS+=("$CR")
     elif [[ -n "$body" ]]; then
         CONFIG_BODIES+=("$body")
         CONFIG_EOLS+=('')

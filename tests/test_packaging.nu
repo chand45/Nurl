@@ -1062,7 +1062,12 @@ exec /bin/rm "$@"
         mkdir $link_target
         "external link target" | save -f ($link_target | path join "keep.txt")
         let link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $link_target)) (quote-for-bash (path-for-bash $bash ($link_nurl | path join 'linked')))" | complete)
-        if $link_result.exit_code == 0 {
+        let actual_link = if $link_result.exit_code == 0 {
+            ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash ($link_nurl | path join 'linked')))" | complete
+        } else {
+            {exit_code: 1}
+        }
+        if $actual_link.exit_code == 0 {
             let unsafe_result = (^$bash -lc (
                 "HOME=" + (quote-for-bash (path-for-bash $bash $link_home))
                 + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
@@ -1132,7 +1137,8 @@ def test-shell-config-ownership-and-resolution [] {
         "# unrelated source ~/.nurl/api.nu\r\n# Nurl - Terminal API Client\r\nsource ~/.nurl/api.nu\r\nlegacy keep" | save -f ($legacy_config | path join "config.nu")
         let removed = (^$bash -lc $"($base_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
         assert equal $removed.exit_code 0 $"shell config uninstall failed: ($removed.stderr)"
-        assert equal (open $config --raw) $original "sentinel add/remove did not restore config bytes"
+        let restored_config = (open $config --raw)
+        assert equal $restored_config $original $"sentinel add/remove did not restore config bytes: expected=($original | encode hex) actual=($restored_config | encode hex)"
         assert equal (open ($legacy_config | path join "config.nu") --raw) "# unrelated source ~/.nurl/api.nu\r\nlegacy keep" "legacy cleanup was broad or lossy"
 
         let xdg_home = ($fixture | path join "xdg-home")
