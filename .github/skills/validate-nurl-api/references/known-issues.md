@@ -238,7 +238,10 @@ request, interpolates variables, or touches `.nuon` files.
   user data. Config integration uses an owned `# >>> nurl >>>` block with exact legacy migration.
   Uninstall requires terminal or explicit consent, copies and verifies the complete data tree
   before deletion, cleans resolved and legacy config paths precisely, and preserves host control
-  in PowerShell. Shell files are repository-enforced LF.
+  in PowerShell. Config editing preserves blank lines, mixed/CR-only EOLs, supported encodings,
+  trailing-newline state, and host rendering settings. Unverifiable links/special files and invalid
+  encodings fail before deletion. Incomplete rollback retains recovery backups instead of deleting
+  them. Shell files are repository-enforced LF.
 - **Re-check:** run the packaging suite in `tests/test_packaging.nu`; it covers spaced/Unicode/
   apostrophe paths, forced copy and late-download failures, piped consent, byte-stable rollback,
   sentinel and legacy config ownership, encoding/EOL preservation, resolved/XDG config paths,

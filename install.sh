@@ -19,7 +19,7 @@ else
 fi
 
 NURL_HOME="$HOME/.nurl"
-REPO_URL="${NURL_REPO_URL:-https://raw.githubusercontent.com/chand45/Nurl/main}"
+REPO_URL="https://raw.githubusercontent.com/chand45/Nurl/main"
 MINIMUM_CURL_VERSION="7.75.0"
 MINIMUM_NUSHELL_VERSION="0.89.0"
 MODULES=("mod.nu" "http.nu" "auth.nu" "vars.nu" "history.nu" "chain.nu" "tui.nu" "log.nu" "resource-path.nu" "command-error.nu" "curl-capability.nu" "string-compat.nu")
@@ -35,6 +35,8 @@ BACKUP_DESTS=()
 BACKUP_PATHS=()
 CREATED_PATHS=()
 CREATED_DIRS=()
+CONFIG_TEMP=''
+ROLLBACK_FAILED=false
 
 version_at_least() {
     local actual_major="$1"
@@ -63,6 +65,59 @@ trim_ascii_space() {
     value="${value#"${value%%[!$' \t']*}"}"
     value="${value%"${value##*[!$' \t']}"}"
     printf '%s' "$value"
+}
+
+read_config_records() {
+    local source="$1"
+    local LC_ALL=C
+    local body=''
+    local char=''
+    local pending_cr=false
+    CONFIG_BODIES=()
+    CONFIG_EOLS=()
+    while IFS= read -r -n 1 char; do
+        if [[ -z "$char" ]]; then
+            char=$'\n'
+        fi
+        if [[ "$pending_cr" == true ]]; then
+            if [[ "$char" == $'\n' ]]; then
+                CONFIG_BODIES+=("$body")
+                CONFIG_EOLS+=($'\r\n')
+                body=''
+                pending_cr=false
+                continue
+            fi
+            CONFIG_BODIES+=("$body")
+            CONFIG_EOLS+=($'\r')
+            body=''
+            pending_cr=false
+        fi
+        if [[ "$char" == $'\r' ]]; then
+            pending_cr=true
+        elif [[ "$char" == $'\n' ]]; then
+            CONFIG_BODIES+=("$body")
+            CONFIG_EOLS+=($'\n')
+            body=''
+        else
+            body+="$char"
+        fi
+    done < "$source"
+    if [[ "$pending_cr" == true ]]; then
+        CONFIG_BODIES+=("$body")
+        CONFIG_EOLS+=($'\r')
+    elif [[ -n "$body" ]]; then
+        CONFIG_BODIES+=("$body")
+        CONFIG_EOLS+=('')
+    fi
+}
+
+write_config_records() {
+    local destination="$1"
+    local index
+    : > "$destination"
+    for ((index = 0; index < ${#output_bodies[@]}; index++)); do
+        printf '%s%s' "${output_bodies[$index]}" "${output_eols[$index]}" >> "$destination"
+    done
 }
 
 assert_safe_directory_chain() {
@@ -117,14 +172,17 @@ prepare_config_candidate() {
         return
     fi
 
-    local bodies=()
-    local line clean
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        bodies+=("$line")
-    done < "$source"
-
+    read_config_records "$source"
+    local preferred_eol=$'\n'
+    local eol
+    for eol in "${CONFIG_EOLS[@]}"; do
+        if [[ -n "$eol" ]]; then
+            preferred_eol="$eol"
+            break
+        fi
+    done
     local trailing_newline=false
-    if [[ -s "$source" ]] && [[ "$(tail -c 1 "$source" | od -An -t u1 | tr -d '[:space:]')" == '10' ]]; then
+    if (( ${#CONFIG_EOLS[@]} > 0 )) && [[ -n "${CONFIG_EOLS[$(( ${#CONFIG_EOLS[@]} - 1 ))]}" ]]; then
         trailing_newline=true
     fi
 
@@ -132,9 +190,8 @@ prepare_config_candidate() {
     local owned_end=-1
     local in_owned=false
     local index
-    for ((index = 0; index < ${#bodies[@]}; index++)); do
-        clean="${bodies[$index]%$'\r'}"
-        clean="$(trim_ascii_space "$clean")"
+    for ((index = 0; index < ${#CONFIG_BODIES[@]}; index++)); do
+        clean="$(trim_ascii_space "${CONFIG_BODIES[$index]}")"
         if [[ "$clean" == '# >>> nurl >>>' ]]; then
             if [[ "$in_owned" == true || "$owned_start" -ge 0 ]]; then
                 echo -e "${RED}Error: Nushell config contains an invalid Nurl sentinel block.${NC}" >&2
@@ -160,60 +217,45 @@ prepare_config_candidate() {
         return
     fi
 
-    local use_cr=false
-    for line in "${bodies[@]}"; do
-        if [[ "$line" == *$'\r' ]]; then
-            use_cr=true
-            break
-        fi
-    done
-    local suffix=''
-    if [[ "$use_cr" == true ]]; then
-        suffix=$'\r'
-    fi
-
-    local output=()
+    local output_bodies=()
+    local output_eols=()
     local inserted=false
-    for line in "${bodies[@]}"; do
+    local line
+    for ((index = 0; index < ${#CONFIG_BODIES[@]}; index++)); do
+        line="${CONFIG_BODIES[$index]}"
         if is_legacy_source_line "$line"; then
             if [[ "$inserted" != true ]]; then
-                local output_count=${#output[@]}
-                if (( output_count > 0 )) && is_legacy_comment_line "${output[$((output_count - 1))]}"; then
-                    unset 'output[output_count-1]'
-                    output=("${output[@]}")
+                local output_count=${#output_bodies[@]}
+                if (( output_count > 0 )) && is_legacy_comment_line "${output_bodies[$((output_count - 1))]}"; then
+                    unset 'output_bodies[output_count-1]'
+                    unset 'output_eols[output_count-1]'
+                    output_bodies=("${output_bodies[@]}")
+                    output_eols=("${output_eols[@]}")
                 fi
-                local final_suffix="$suffix"
-                if [[ "$trailing_newline" != true ]]; then
-                    final_suffix=''
-                fi
-                output+=("# >>> nurl >>>${suffix}" "source ~/.nurl/api.nu${suffix}" "# <<< nurl <<<${final_suffix}")
+                output_bodies+=("# >>> nurl >>>" "source ~/.nurl/api.nu" "# <<< nurl <<<")
+                output_eols+=("$preferred_eol" "$preferred_eol" "${CONFIG_EOLS[$index]}")
                 inserted=true
             fi
             continue
         fi
-        output+=("$line")
+        output_bodies+=("$line")
+        output_eols+=("${CONFIG_EOLS[$index]}")
     done
 
     if [[ "$inserted" != true ]]; then
-        local output_count=${#output[@]}
-        if [[ "$use_cr" == true && "$output_count" -gt 0 && "${output[$((output_count - 1))]}" != *$'\r' ]]; then
-            output[$((output_count - 1))]+=$'\r'
+        local output_count=${#output_bodies[@]}
+        if (( output_count > 0 )) && [[ -z "${output_eols[$((output_count - 1))]}" ]]; then
+            output_eols[$((output_count - 1))]="$preferred_eol"
         fi
-        local final_suffix="$suffix"
-        if [[ "$trailing_newline" != true ]]; then
-            final_suffix=''
+        local final_eol=''
+        if [[ "$trailing_newline" == true || "$output_count" -eq 0 ]]; then
+            final_eol="$preferred_eol"
         fi
-        output+=("# >>> nurl >>>${suffix}" "source ~/.nurl/api.nu${suffix}" "# <<< nurl <<<${final_suffix}")
+        output_bodies+=("# >>> nurl >>>" "source ~/.nurl/api.nu" "# <<< nurl <<<")
+        output_eols+=("$preferred_eol" "$preferred_eol" "$final_eol")
     fi
 
-    : > "$destination"
-    local last=$(( ${#output[@]} - 1 ))
-    for ((index = 0; index <= last; index++)); do
-        printf '%s' "${output[$index]}" >> "$destination"
-        if (( index < last )) || [[ "$trailing_newline" == true ]] || [[ ! -s "$source" ]]; then
-            printf '\n' >> "$destination"
-        fi
-    done
+    write_config_records "$destination"
 }
 
 remember_created_dir() {
@@ -272,16 +314,26 @@ promote_if_absent() {
 
 rollback_install() {
     set +e
+    ROLLBACK_FAILED=false
     local index
     for ((index = ${#CREATED_PATHS[@]} - 1; index >= 0; index--)); do
-        rm -rf "${CREATED_PATHS[$index]}"
+        if ! rm -rf "${CREATED_PATHS[$index]}"; then
+            echo "Warning: rollback could not remove '${CREATED_PATHS[$index]}'." >&2
+            ROLLBACK_FAILED=true
+        fi
     done
     for ((index = ${#BACKUP_DESTS[@]} - 1; index >= 0; index--)); do
-        rm -rf "${BACKUP_DESTS[$index]}"
-        mv -f "${BACKUP_PATHS[$index]}" "${BACKUP_DESTS[$index]}"
+        if ! rm -rf "${BACKUP_DESTS[$index]}" ||
+           ! mv -f "${BACKUP_PATHS[$index]}" "${BACKUP_DESTS[$index]}"; then
+            echo "Warning: rollback could not restore '${BACKUP_DESTS[$index]}'." >&2
+            ROLLBACK_FAILED=true
+        fi
     done
     if [[ "$FRESH_PROMOTED" == true ]]; then
-        rm -rf "$NURL_HOME"
+        if ! rm -rf "$NURL_HOME"; then
+            echo "Warning: rollback could not remove '$NURL_HOME'." >&2
+            ROLLBACK_FAILED=true
+        fi
     fi
     for ((index = ${#CREATED_DIRS[@]} - 1; index >= 0; index--)); do
         rmdir "${CREATED_DIRS[$index]}" 2>/dev/null || true
@@ -293,7 +345,12 @@ finish() {
     if [[ "$status" -ne 0 && "$PROMOTION_STARTED" == true && "$COMMITTED" != true ]]; then
         rollback_install
     fi
-    if [[ -n "$STAGE_ROOT" && -d "$STAGE_ROOT" ]]; then
+    if [[ -n "$CONFIG_TEMP" && -e "$CONFIG_TEMP" ]]; then
+        rm -f "$CONFIG_TEMP" || true
+    fi
+    if [[ "$ROLLBACK_FAILED" == true ]]; then
+        echo "Error: rollback was incomplete; recovery files remain at $ROLLBACK_DIR." >&2
+    elif [[ -n "$STAGE_ROOT" && -d "$STAGE_ROOT" ]]; then
         rm -rf "$STAGE_ROOT"
     fi
     exit "$status"
@@ -365,12 +422,6 @@ if [[ -z "$NUSHELL_CONFIG_DIR" ]]; then
     fi
 fi
 NUSHELL_CONFIG="$NUSHELL_CONFIG_DIR/config.nu"
-CONFIG_BOUNDARY='/'
-case "$NUSHELL_CONFIG_DIR" in
-    "$HOME"|"$HOME"/*)
-        CONFIG_BOUNDARY="$HOME"
-        ;;
-esac
 for install_directory in \
     "$NURL_HOME" \
     "$NURL_HOME/nu_modules" \
@@ -379,7 +430,10 @@ for install_directory in \
     "$NURL_HOME/history"; do
     assert_safe_directory_chain "$install_directory" "$HOME"
 done
-assert_safe_directory_chain "$NUSHELL_CONFIG_DIR" "$CONFIG_BOUNDARY"
+if [[ -L "$NUSHELL_CONFIG_DIR" || ( -e "$NUSHELL_CONFIG_DIR" && ! -d "$NUSHELL_CONFIG_DIR" ) ]]; then
+    echo -e "${RED}Error: Refusing to use a non-directory Nushell config path: $NUSHELL_CONFIG_DIR${NC}" >&2
+    exit 1
+fi
 if [[ -L "$NUSHELL_CONFIG" || ( -e "$NUSHELL_CONFIG" && ! -f "$NUSHELL_CONFIG" ) ]]; then
     echo -e "${RED}Error: Refusing to replace non-file Nushell config path: $NUSHELL_CONFIG${NC}" >&2
     exit 1
@@ -490,6 +544,7 @@ if [[ "$CONFIG_CHANGED" == true ]]; then
     CONFIG_TEMP="$(mktemp "$NUSHELL_CONFIG_DIR/.config.nu.nurl.XXXXXX")"
     cp "$CONFIG_CANDIDATE" "$CONFIG_TEMP"
     promote_file "$CONFIG_TEMP" "$NUSHELL_CONFIG" "nushell-config.nu"
+    CONFIG_TEMP=''
     echo "  Added the owned Nurl block to $NUSHELL_CONFIG"
 else
     echo "  Nushell config already contains the owned Nurl block"

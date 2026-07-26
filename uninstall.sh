@@ -24,6 +24,7 @@ ASSUME_YES=false
 BACKUP_DIR=''
 BACKUP_COMPLETE=false
 WORK_ROOT=''
+CONFIG_TEMP=''
 
 for argument in "$@"; do
     case "$argument" in
@@ -48,6 +49,59 @@ trim_ascii_space() {
     printf '%s' "$value"
 }
 
+read_config_records() {
+    local source="$1"
+    local LC_ALL=C
+    local body=''
+    local char=''
+    local pending_cr=false
+    CONFIG_BODIES=()
+    CONFIG_EOLS=()
+    while IFS= read -r -n 1 char; do
+        if [[ -z "$char" ]]; then
+            char=$'\n'
+        fi
+        if [[ "$pending_cr" == true ]]; then
+            if [[ "$char" == $'\n' ]]; then
+                CONFIG_BODIES+=("$body")
+                CONFIG_EOLS+=($'\r\n')
+                body=''
+                pending_cr=false
+                continue
+            fi
+            CONFIG_BODIES+=("$body")
+            CONFIG_EOLS+=($'\r')
+            body=''
+            pending_cr=false
+        fi
+        if [[ "$char" == $'\r' ]]; then
+            pending_cr=true
+        elif [[ "$char" == $'\n' ]]; then
+            CONFIG_BODIES+=("$body")
+            CONFIG_EOLS+=($'\n')
+            body=''
+        else
+            body+="$char"
+        fi
+    done < "$source"
+    if [[ "$pending_cr" == true ]]; then
+        CONFIG_BODIES+=("$body")
+        CONFIG_EOLS+=($'\r')
+    elif [[ -n "$body" ]]; then
+        CONFIG_BODIES+=("$body")
+        CONFIG_EOLS+=('')
+    fi
+}
+
+write_config_records() {
+    local destination="$1"
+    local index
+    : > "$destination"
+    for ((index = 0; index < ${#output_bodies[@]}; index++)); do
+        printf '%s%s' "${output_bodies[$index]}" "${output_eols[$index]}" >> "$destination"
+    done
+}
+
 is_legacy_source_line() {
     local line="${1%$'\r'}"
     line="$(trim_ascii_space "$line")"
@@ -70,25 +124,17 @@ prepare_clean_config() {
     local destination="$2"
     CLEAN_CONFIG_CHANGED=false
 
-    local bodies=()
-    local line clean
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        bodies+=("$line")
-    done < "$source"
+    read_config_records "$source"
 
-    local trailing_newline=false
-    if [[ -s "$source" ]] && [[ "$(tail -c 1 "$source" | od -An -t u1 | tr -d '[:space:]')" == '10' ]]; then
-        trailing_newline=true
-    fi
-
-    local output=()
+    local output_bodies=()
+    local output_eols=()
     local in_owned=false
     local removed=false
     local index
-    for ((index = 0; index < ${#bodies[@]}; index++)); do
-        line="${bodies[$index]}"
-        clean="${line%$'\r'}"
-        clean="$(trim_ascii_space "$clean")"
+    local line clean
+    for ((index = 0; index < ${#CONFIG_BODIES[@]}; index++)); do
+        line="${CONFIG_BODIES[$index]}"
+        clean="$(trim_ascii_space "$line")"
         if [[ "$clean" == '# >>> nurl >>>' ]]; then
             if [[ "$in_owned" == true ]]; then
                 echo -e "${RED}Error: Nushell config contains nested Nurl sentinel blocks: $source${NC}" >&2
@@ -104,9 +150,9 @@ prepare_clean_config() {
                 return 1
             fi
             in_owned=false
-            if [[ "$trailing_newline" != true && "$index" -eq $(( ${#bodies[@]} - 1 )) && ${#output[@]} -gt 0 ]]; then
-                local output_count=${#output[@]}
-                output[$((output_count - 1))]="${output[$((output_count - 1))]%$'\r'}"
+            if [[ -z "${CONFIG_EOLS[$index]}" && "$index" -eq $(( ${#CONFIG_BODIES[@]} - 1 )) && ${#output_bodies[@]} -gt 0 ]]; then
+                local output_count=${#output_bodies[@]}
+                output_eols[$((output_count - 1))]=''
             fi
             continue
         fi
@@ -114,15 +160,18 @@ prepare_clean_config() {
             continue
         fi
         if is_legacy_source_line "$line"; then
-            local output_count=${#output[@]}
-            if (( output_count > 0 )) && is_legacy_comment_line "${output[$((output_count - 1))]}"; then
-                unset 'output[output_count-1]'
-                output=("${output[@]}")
+            local output_count=${#output_bodies[@]}
+            if (( output_count > 0 )) && is_legacy_comment_line "${output_bodies[$((output_count - 1))]}"; then
+                unset 'output_bodies[output_count-1]'
+                unset 'output_eols[output_count-1]'
+                output_bodies=("${output_bodies[@]}")
+                output_eols=("${output_eols[@]}")
             fi
             removed=true
             continue
         fi
-        output+=("$line")
+        output_bodies+=("$line")
+        output_eols+=("${CONFIG_EOLS[$index]}")
     done
     if [[ "$in_owned" == true ]]; then
         echo -e "${RED}Error: Nushell config contains an unterminated Nurl sentinel block: $source${NC}" >&2
@@ -133,17 +182,7 @@ prepare_clean_config() {
         return
     fi
     CLEAN_CONFIG_CHANGED=true
-    : > "$destination"
-    if (( ${#output[@]} == 0 )); then
-        return
-    fi
-    local last=$(( ${#output[@]} - 1 ))
-    for ((index = 0; index <= last; index++)); do
-        printf '%s' "${output[$index]}" >> "$destination"
-        if (( index < last )) || [[ "$trailing_newline" == true ]]; then
-            printf '\n' >> "$destination"
-        fi
-    done
+    write_config_records "$destination"
 }
 
 cleanup_on_failure() {
@@ -153,6 +192,9 @@ cleanup_on_failure() {
     fi
     if [[ -n "$WORK_ROOT" && -d "$WORK_ROOT" ]]; then
         rm -rf "$WORK_ROOT"
+    fi
+    if [[ -n "$CONFIG_TEMP" && -e "$CONFIG_TEMP" ]]; then
+        rm -f "$CONFIG_TEMP"
     fi
     exit "$status"
 }
@@ -176,7 +218,7 @@ if [[ "$ASSUME_YES" != true ]]; then
     REPLY=''
     if [[ -t 0 ]]; then
         read -r -p "Continue? [y/N] " REPLY
-    elif exec 3<>/dev/tty 2>/dev/null; then
+    elif { exec 3<>/dev/tty; } 2>/dev/null; then
         printf 'Continue? [y/N] ' >&3
         IFS= read -r REPLY <&3
         exec 3>&-
@@ -188,6 +230,12 @@ if [[ "$ASSUME_YES" != true ]]; then
         echo "Cancelled"
         exit 0
     fi
+fi
+
+unsafe_entry="$(find "$NURL_HOME" \( -type l -o \( ! -type d ! -type f \) \) -print -quit)"
+if [[ -n "$unsafe_entry" ]]; then
+    echo -e "${RED}Error: Cannot create a verifiable backup while Nurl contains a link or special file: $unsafe_entry${NC}" >&2
+    exit 1
 fi
 
 RESOLVED_CONFIG_DIR=''
@@ -242,7 +290,10 @@ fi
 BACKUP_COMPLETE=true
 
 echo "[2/3] Removing $NURL_HOME..."
-rm -rf "$NURL_HOME"
+if ! rm -rf "$NURL_HOME"; then
+    echo -e "${RED}Error: Nurl could not be removed. The verified backup remains at $BACKUP_DIR.${NC}" >&2
+    exit 1
+fi
 if [[ -e "$NURL_HOME" || -L "$NURL_HOME" ]]; then
     echo -e "${RED}Error: Nurl could not be completely removed. The verified backup remains at $BACKUP_DIR.${NC}" >&2
     exit 1
@@ -252,9 +303,10 @@ echo "[3/3] Cleaning owned Nushell config entries..."
 for ((index = 0; index < ${#CONFIG_SOURCES[@]}; index++)); do
     config_path="${CONFIG_SOURCES[$index]}"
     config_dir="$(dirname "$config_path")"
-    config_temp="$(mktemp "$config_dir/.config.nu.nurl.XXXXXX")"
-    cp "${CONFIG_CANDIDATES[$index]}" "$config_temp"
-    mv -f "$config_temp" "$config_path"
+    CONFIG_TEMP="$(mktemp "$config_dir/.config.nu.nurl.XXXXXX")"
+    cp "${CONFIG_CANDIDATES[$index]}" "$CONFIG_TEMP"
+    mv -f "$CONFIG_TEMP" "$config_path"
+    CONFIG_TEMP=''
 done
 
 echo

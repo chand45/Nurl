@@ -6,10 +6,13 @@ param()
 
 & {
     $ErrorActionPreference = "Stop"
-    if ($null -ne $PSStyle) {
+    $hasOutputRendering = $null -ne $PSStyle
+    $previousOutputRendering = if ($hasOutputRendering) { $PSStyle.OutputRendering } else { $null }
+    if ($hasOutputRendering) {
         $PSStyle.OutputRendering = "PlainText"
     }
 
+    try {
     function Get-NurlTextFile {
         param([Parameter(Mandatory)][string]$Path)
 
@@ -42,10 +45,14 @@ param()
             $encoding = [System.Text.UTF8Encoding]::new($false, $true)
         }
 
-        $text = if ($bytes.Length -eq $offset) {
-            ""
-        } else {
-            $encoding.GetString($bytes, $offset, $bytes.Length - $offset)
+        try {
+            $text = if ($bytes.Length -eq $offset) {
+                ""
+            } else {
+                $encoding.GetString($bytes, $offset, $bytes.Length - $offset)
+            }
+        } catch {
+            throw "Nushell config contains invalid or unsupported text encoding: $Path"
         }
         [pscustomobject]@{
             Text = $text
@@ -89,7 +96,7 @@ param()
     }
 
     function Test-NurlLegacySource {
-        param([Parameter(Mandatory)][string]$Line)
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
         $trimmed = $Line.Trim()
         $trimmed -ceq 'source ~/.nurl/api.nu' -or
             $trimmed -ceq 'source "~/.nurl/api.nu"' -or
@@ -231,11 +238,7 @@ param()
 
     function Invoke-NurlInstall {
         $NurlHome = Join-Path $env:USERPROFILE ".nurl"
-        $RepoUrl = if ([string]::IsNullOrWhiteSpace($env:NURL_REPO_URL)) {
-            "https://raw.githubusercontent.com/chand45/Nurl/main"
-        } else {
-            $env:NURL_REPO_URL.TrimEnd("/")
-        }
+        $RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
         $MinimumCurlVersion = [version]"7.75.0"
         $MinimumNushellVersion = [version]"0.89.0"
         $Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu", "curl-capability.nu", "string-compat.nu")
@@ -317,6 +320,7 @@ param()
         $freshPromoted = $false
         $rollbackRecords = [System.Collections.Generic.List[object]]::new()
         $createdDirectories = [System.Collections.Generic.List[string]]::new()
+        $rollbackState = [pscustomobject]@{ Failed = $false }
 
         function Ensure-TrackedDirectory {
             param([Parameter(Mandatory)][string]$Path)
@@ -373,21 +377,46 @@ param()
 
         function Undo-NurlPromotion {
             $oldPreference = $ErrorActionPreference
-            $ErrorActionPreference = "SilentlyContinue"
-            for ($index = $rollbackRecords.Count - 1; $index -ge 0; $index--) {
-                $record = $rollbackRecords[$index]
-                Remove-Item -LiteralPath $record.Destination -Recurse -Force
-                if (-not $record.Created) {
-                    Move-Item -LiteralPath $record.Backup -Destination $record.Destination -Force
+            try {
+                $ErrorActionPreference = "Stop"
+                for ($index = $rollbackRecords.Count - 1; $index -ge 0; $index--) {
+                    $record = $rollbackRecords[$index]
+                    try {
+                        if ($null -ne (Get-Item -LiteralPath $record.Destination -Force -ErrorAction SilentlyContinue)) {
+                            Remove-Item -LiteralPath $record.Destination -Recurse -Force -ErrorAction Stop
+                        }
+                        if (-not $record.Created) {
+                            Move-Item -LiteralPath $record.Backup -Destination $record.Destination -Force -ErrorAction Stop
+                        }
+                    } catch {
+                        $rollbackState.Failed = $true
+                        [Console]::Error.WriteLine("Warning: rollback could not restore '$($record.Destination)': $($_.Exception.Message)")
+                    }
                 }
+                if ($freshPromoted) {
+                    try {
+                        Remove-Item -LiteralPath $NurlHome -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        $rollbackState.Failed = $true
+                        [Console]::Error.WriteLine("Warning: rollback could not remove '$NurlHome': $($_.Exception.Message)")
+                    }
+                }
+                for ($index = $createdDirectories.Count - 1; $index -ge 0; $index--) {
+                    $directory = $createdDirectories[$index]
+                    if ([System.IO.Directory]::Exists($directory)) {
+                        try {
+                            [System.IO.Directory]::Delete($directory, $false)
+                        } catch [System.IO.IOException] {
+                            # Concurrent or user-created content is preserved.
+                        } catch {
+                            $rollbackState.Failed = $true
+                            [Console]::Error.WriteLine("Warning: rollback could not remove directory '$directory': $($_.Exception.Message)")
+                        }
+                    }
+                }
+            } finally {
+                $ErrorActionPreference = $oldPreference
             }
-            if ($freshPromoted) {
-                Remove-Item -LiteralPath $NurlHome -Recurse -Force
-            }
-            for ($index = $createdDirectories.Count - 1; $index -ge 0; $index--) {
-                Remove-Item -LiteralPath $createdDirectories[$index] -Force
-            }
-            $ErrorActionPreference = $oldPreference
         }
 
         try {
@@ -503,10 +532,21 @@ param()
             Remove-Item -LiteralPath $RollbackRoot -Recurse -Force
         } finally {
             if ($promotionStarted -and -not $committed) {
-                Undo-NurlPromotion
+                try {
+                    Undo-NurlPromotion
+                } catch {
+                    $rollbackState.Failed = $true
+                    [Console]::Error.WriteLine("Warning: rollback encountered an unexpected failure: $($_.Exception.Message)")
+                }
             }
-            if (Test-Path -LiteralPath $StageRoot) {
-                Remove-Item -LiteralPath $StageRoot -Recurse -Force
+            if ($rollbackState.Failed) {
+                [Console]::Error.WriteLine("Error: rollback was incomplete; recovery files remain at '$RollbackRoot'.")
+            } elseif (Test-Path -LiteralPath $StageRoot) {
+                try {
+                    Remove-Item -LiteralPath $StageRoot -Recurse -Force -ErrorAction Stop
+                } catch {
+                    [Console]::Error.WriteLine("Warning: temporary staging remains at '$StageRoot': $($_.Exception.Message)")
+                }
             }
         }
 
@@ -526,4 +566,9 @@ param()
     }
 
     Invoke-NurlInstall
+    } finally {
+        if ($hasOutputRendering) {
+            $PSStyle.OutputRendering = $previousOutputRendering
+        }
+    }
 }

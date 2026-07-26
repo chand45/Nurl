@@ -283,6 +283,28 @@ function Invoke-WebRequest {
     [System.IO.File]::AppendAllText($env:NURL_INSTALLER_DOWNLOAD_LOG, "download`n")
 }
 
+function Move-Item {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$LiteralPath,
+        [Parameter(Mandatory)]$Destination,
+        [switch]$Force
+    )
+    if ($env:NURL_INSTALLER_INJECT_POST_PROMOTION -eq "1" -and
+        [string]$Destination -like "*\nu_modules\auth.nu") {
+        [System.IO.File]::WriteAllText(
+            [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName([string]$Destination), "concurrent.txt"),
+            "concurrent content"
+        )
+        throw "post-promotion failure sentinel"
+    }
+    if ($env:NURL_INSTALLER_FAIL_ROLLBACK_RESTORE -eq "1" -and
+        [string]$LiteralPath -like "*\rollback\*") {
+        throw "forced rollback restore failure"
+    }
+    Microsoft.PowerShell.Management\Move-Item @PSBoundParameters
+}
+
 & $Installer
 exit $LASTEXITCODE
 ' | save -f $harness
@@ -711,6 +733,70 @@ def test-installer-atomic-staging [] {
         assert equal (open ($config_dir | path join "config.nu") --raw) $old_config "shell rollback changed config"
         assert ((child-paths-starting $home ".nurl-stage.") | is-empty) "shell rollback leaked staging"
 
+        let rollback_fail_tools = ($fixture | path join "rollback-fail-tools")
+        mkdir $rollback_fail_tools
+        cp ($tools | path join "nu") ($rollback_fail_tools | path join "nu")
+        cp ($tools | path join "curl") ($rollback_fail_tools | path join "curl")
+        '#!/bin/bash
+if [[ "$NURL_INSTALLER_FAIL_ROLLBACK_RESTORE" == "1" && "$*" == *"/rollback/"* ]]; then
+    exit 75
+fi
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($rollback_fail_tools | path join "mv")
+        let rollback_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($rollback_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($rollback_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($rollback_fail_tools | path join 'mv')))" | complete)
+        assert equal $rollback_fail_chmod.exit_code 0
+        let restore_failure_command = (
+            "HOME=" + (quote-for-bash $bash_home)
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $rollback_fail_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "shell-restore-fail-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "shell-restore-fail-downloads.log")))
+            + " NURL_INSTALLER_FAIL_ROLLBACK_RESTORE=1"
+            + " /bin/bash " + (quote-for-bash $installer)
+        )
+        let restore_failure = (^$bash -lc $restore_failure_command | complete)
+        assert ($restore_failure.exit_code != 0) "shell rollback-restore failure unexpectedly succeeded"
+        assert (($restore_failure.stdout + $restore_failure.stderr) | str contains "rollback was incomplete") "shell rollback-restore failure was not reported"
+        let recovery_stages = (child-paths-starting $home ".nurl-stage.")
+        assert equal ($recovery_stages | length) 1 "shell rollback-restore failure deleted its recovery stage"
+        assert (($recovery_stages | first | path join "rollback" "api.nu") | path exists) "shell rollback-restore failure deleted its backup"
+
+        let config_fail_home = ($fixture | path join "config-temp-home")
+        let config_fail_install = ($config_fail_home | path join ".nurl")
+        let config_fail_dir = ($fixture | path join "config-temp-config")
+        mkdir ($config_fail_install | path join "nu_modules")
+        mkdir $config_fail_dir
+        "old config-temp api" | save -f ($config_fail_install | path join "api.nu")
+        let config_fail_api = (open ($config_fail_install | path join "api.nu") --raw)
+        let config_fail_tools = ($fixture | path join "config-fail-tools")
+        mkdir $config_fail_tools
+        cp ($tools | path join "nu") ($config_fail_tools | path join "nu")
+        cp ($tools | path join "curl") ($config_fail_tools | path join "curl")
+        '#!/bin/bash
+if [[ "$*" == *"/.config.nu.nurl."* ]]; then
+    exit 76
+fi
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($config_fail_tools | path join "mv")
+        let config_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'mv')))" | complete)
+        assert equal $config_fail_chmod.exit_code 0
+        let config_promotion_failure = (^$bash -lc (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $config_fail_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $config_fail_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $config_fail_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "config-fail-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "config-fail-downloads.log")))
+            + " /bin/bash " + (quote-for-bash $installer)
+        ) | complete)
+        assert ($config_promotion_failure.exit_code != 0) "shell config promotion failure unexpectedly succeeded"
+        assert equal (open ($config_fail_install | path join "api.nu") --raw) $config_fail_api "shell config promotion failure did not restore api.nu"
+        assert ((child-paths-starting $config_fail_dir ".config.nu.nurl.") | is-empty) "shell config promotion failure orphaned a config temp"
+        assert ((child-paths-starting $config_fail_home ".nurl-stage.") | is-empty) "shell config promotion failure leaked staging"
+
         if $nu.os-info.name == "windows" {
             let ps_tools = ($fixture | path join "powershell-tools")
             let ps_home = ($fixture | path join "powershell-home")
@@ -771,6 +857,60 @@ def test-installer-atomic-staging [] {
             assert equal (open ($incompatible_ps_path | path join "keep.txt") --raw) "PowerShell directory must survive" "PowerShell rollback damaged an incompatible path"
             assert (not (($ps_appdata | path join "nushell") | path exists)) "PowerShell rollback changed config"
             assert ((child-paths-starting $ps_home ".nurl-stage-") | is-empty) "PowerShell rollback leaked staging"
+
+            let injected_home = ($fixture | path join "powershell-injected-home")
+            let injected_appdata = ($fixture | path join "powershell-injected-appdata")
+            let injected_install = ($injected_home | path join ".nurl")
+            mkdir $injected_install
+            mkdir $injected_appdata
+            "old injected api" | save -f ($injected_install | path join "api.nu")
+            let injected_api = (open ($injected_install | path join "api.nu") --raw)
+            let injected_result = (with-env {
+                NURL_INSTALLER_NU_VERSION: "0.113.1"
+                NURL_INSTALLER_CURL_VERSION_LINE: "curl 8.13.0 libcurl/8.13.0"
+                NURL_INSTALLER_CURL_EXIT: "0"
+                NURL_INSTALLER_CURL_STDERR: ""
+                NURL_INSTALLER_CURL_LOG: ($fixture | path join "ps-injected-curl.log")
+                NURL_INSTALLER_DOWNLOAD_LOG: ($fixture | path join "ps-injected-downloads.log")
+                NURL_INSTALLER_DOWNLOAD_COUNT: ($fixture | path join "ps-injected-download-count")
+                NURL_INSTALLER_FAIL_DOWNLOAD: ""
+                NURL_INSTALLER_INJECT_POST_PROMOTION: "1"
+            } {
+                ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness ($env.NURL_REPO_ROOT | path join "install.ps1") $injected_home $injected_appdata $ps_tools | complete
+            })
+            assert ($injected_result.exit_code != 0) "PowerShell injected post-promotion failure unexpectedly succeeded"
+            assert (($injected_result.stdout + $injected_result.stderr) | str contains "post-promotion failure sentinel") "PowerShell rollback masked the original failure"
+            assert equal (open ($injected_install | path join "api.nu") --raw) $injected_api "PowerShell injected rollback did not restore api.nu"
+            assert equal (open ($injected_install | path join "nu_modules" "concurrent.txt") --raw) "concurrent content" "PowerShell rollback deleted concurrent directory content"
+            assert ((child-paths-starting $injected_home ".nurl-stage-") | is-empty) "PowerShell injected rollback leaked staging"
+
+            let ps_restore_home = ($fixture | path join "powershell-restore-home")
+            let ps_restore_appdata = ($fixture | path join "powershell-restore-appdata")
+            let ps_restore_install = ($ps_restore_home | path join ".nurl")
+            let ps_restore_modules = ($ps_restore_install | path join "nu_modules")
+            mkdir ($ps_restore_modules | path join "auth.nu")
+            mkdir $ps_restore_appdata
+            "restore api" | save -f ($ps_restore_install | path join "api.nu")
+            "restore mod" | save -f ($ps_restore_modules | path join "mod.nu")
+            "preserve directory" | save -f ($ps_restore_modules | path join "auth.nu" "keep.txt")
+            let ps_restore_result = (with-env {
+                NURL_INSTALLER_NU_VERSION: "0.113.1"
+                NURL_INSTALLER_CURL_VERSION_LINE: "curl 8.13.0 libcurl/8.13.0"
+                NURL_INSTALLER_CURL_EXIT: "0"
+                NURL_INSTALLER_CURL_STDERR: ""
+                NURL_INSTALLER_CURL_LOG: ($fixture | path join "ps-restore-curl.log")
+                NURL_INSTALLER_DOWNLOAD_LOG: ($fixture | path join "ps-restore-downloads.log")
+                NURL_INSTALLER_DOWNLOAD_COUNT: ($fixture | path join "ps-restore-download-count")
+                NURL_INSTALLER_FAIL_DOWNLOAD: ""
+                NURL_INSTALLER_FAIL_ROLLBACK_RESTORE: "1"
+            } {
+                ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness ($env.NURL_REPO_ROOT | path join "install.ps1") $ps_restore_home $ps_restore_appdata $ps_tools | complete
+            })
+            assert ($ps_restore_result.exit_code != 0) "PowerShell rollback-restore failure unexpectedly succeeded"
+            assert (($ps_restore_result.stdout + $ps_restore_result.stderr) | str contains "rollback was incomplete") "PowerShell rollback-restore failure was not reported"
+            let ps_recovery_stages = (child-paths-starting $ps_restore_home ".nurl-stage-")
+            assert equal ($ps_recovery_stages | length) 1 "PowerShell rollback-restore failure deleted its recovery stage"
+            assert (($ps_recovery_stages | first | path join "rollback" "api.nu") | path exists) "PowerShell rollback-restore failure deleted its backup"
         }
         null
     } catch {|error| $error }
@@ -880,6 +1020,61 @@ exit 73
         assert ($failure_nurl | path exists) "forced backup copy failure removed Nurl"
         assert equal (open ($failure_nurl | path join "collections" "data.nuon") --raw) "must survive"
         assert ((child-paths-starting $failure_home ".nurl-backup-") | is-empty) "forced copy failure left a success-shaped backup"
+
+        let pty_available = (^$bash -lc "command -v script >/dev/null 2>&1" | complete)
+        if $pty_available.exit_code == 0 {
+            let pty_home = ($fixture | path join "pty-home")
+            let pty_nurl = ($pty_home | path join ".nurl")
+            let pty_tools = ($fixture | path join "pty-tools")
+            mkdir $pty_nurl
+            mkdir $pty_tools
+            shell-installer-tools $pty_tools $bash
+            "pty data" | save -f ($pty_nurl | path join "data.nuon")
+            '#!/bin/bash
+if [[ "$NURL_UNINSTALL_FAIL_REMOVE" == "1" && "$*" == *"/.nurl" ]]; then
+    printf "%s\n" "forced removal failure" >&2
+    exit 77
+fi
+exec /bin/rm "$@"
+' | str replace --all "\r" "" | save -f ($pty_tools | path join "rm")
+            let pty_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'rm')))" | complete)
+            assert equal $pty_chmod.exit_code 0
+            let pty_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $pty_home))
+                + " PATH=" + (quote-for-bash $"(path-for-bash $bash $pty_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_UNINSTALL_FAIL_REMOVE=1"
+            )
+            let piped_command = $"cat (quote-for-bash $script) | /bin/bash"
+            let pty_inner = $"($pty_environment) /bin/bash -c (quote-for-bash $piped_command)"
+            let pty_result = (^$bash -lc $"printf 'y\\n' | script -qfec (quote-for-bash $pty_inner) /dev/null" | complete)
+            assert ($pty_result.exit_code != 0) "PTY piped uninstall removal failure unexpectedly succeeded"
+            let pty_output = $pty_result.stdout + $pty_result.stderr
+            assert ($pty_output | str contains "Nurl could not be removed") "PTY piped uninstall lost later stderr"
+            assert ($pty_output | str contains "verified backup remains at") "PTY piped uninstall omitted the backup location"
+            assert ($pty_nurl | path exists) "PTY removal failure deleted Nurl"
+            assert equal ((child-paths-starting $pty_home ".nurl-backup-") | length) 1 "PTY removal failure did not preserve the verified backup"
+        }
+
+        let link_home = ($fixture | path join "link-home")
+        let link_nurl = ($link_home | path join ".nurl")
+        let link_target = ($fixture | path join "link-target")
+        mkdir $link_nurl
+        mkdir $link_target
+        "external link target" | save -f ($link_target | path join "keep.txt")
+        let link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $link_target)) (quote-for-bash (path-for-bash $bash ($link_nurl | path join 'linked')))" | complete)
+        if $link_result.exit_code == 0 {
+            let unsafe_result = (^$bash -lc (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $link_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_ASSUME_YES=1"
+                + " /bin/bash " + (quote-for-bash $script)
+            ) | complete)
+            assert ($unsafe_result.exit_code != 0) "shell uninstall accepted internal link data"
+            assert (($unsafe_result.stdout + $unsafe_result.stderr) | str contains "verifiable backup") "shell internal-link rejection was not actionable"
+            assert ($link_nurl | path exists) "shell internal-link rejection removed Nurl"
+            assert equal (open ($link_target | path join "keep.txt") --raw) "external link target" "shell internal-link rejection damaged external data"
+            assert ((child-paths-starting $link_home ".nurl-backup-") | is-empty) "shell internal-link rejection created a success-shaped backup"
+        }
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -960,6 +1155,35 @@ def test-shell-config-ownership-and-resolution [] {
         let xdg_remove = (^$bash -lc $"($xdg_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
         assert equal $xdg_remove.exit_code 0 $"XDG shell uninstall failed: ($xdg_remove.stderr)"
         assert equal (open ($xdg_root | path join "nushell" "config.nu") --raw) "" "XDG config sentinel was not removed"
+
+        let mixed_home = ($fixture | path join "mixed-home")
+        let mixed_target = ($fixture | path join "mixed-target")
+        let mixed_link = ($fixture | path join "mixed-link")
+        let mixed_config_dir = ($mixed_target | path join "nushell")
+        mkdir $mixed_home
+        mkdir $mixed_config_dir
+        let mixed_original = "# alpha\r\n\r# beta\n# gamma\r"
+        $mixed_original | save -f ($mixed_config_dir | path join "config.nu")
+        let mixed_link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $mixed_target)) (quote-for-bash (path-for-bash $bash $mixed_link))" | complete)
+        let mixed_resolved = if $mixed_link_result.exit_code == 0 {
+            $mixed_link | path join "nushell"
+        } else {
+            $mixed_config_dir
+        }
+        let mixed_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $mixed_home))
+            + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $mixed_resolved))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "mixed-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "mixed-downloads.log")))
+        )
+        let mixed_install = (^$bash -lc $"($mixed_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert equal $mixed_install.exit_code 0 $"mixed-EOL shell install failed: ($mixed_install.stderr)"
+        let mixed_remove = (^$bash -lc $"($mixed_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert equal $mixed_remove.exit_code 0 $"mixed-EOL shell uninstall failed: ($mixed_remove.stderr)"
+        assert equal (open ($mixed_config_dir | path join "config.nu") --raw) $mixed_original "mixed/CR-only config bytes did not round-trip"
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -984,7 +1208,7 @@ def test-powershell-config-and-host-safety [] {
         mkdir $resolved
         compile-powershell-installer-curl $tools
         let config = ($resolved | path join "config.nu")
-        let original_text = "# comment source ~/.nurl/api.nu\r\nalias nurl-note = echo ~/.nurl/api.nu\r\n# tail"
+        let original_text = "# comment source ~/.nurl/api.nu\r\n\r\nlet normal = true\r\nalias nurl-note = echo ~/.nurl/api.nu\r\n# tail"
         let write_utf16 = '[System.IO.File]::WriteAllText($env:NURL_TEST_CONFIG_PATH, $env:NURL_TEST_CONFIG_TEXT, [System.Text.UnicodeEncoding]::new($false, $true))'
         let written = (with-env {NURL_TEST_CONFIG_PATH: $config, NURL_TEST_CONFIG_TEXT: $original_text} {
             ^powershell.exe -NoProfile -NonInteractive -Command $write_utf16 | complete
@@ -1079,6 +1303,48 @@ $env:Path = $ToolsPath
         assert equal (open ($reparse_external | path join "keep.txt") --raw) "external data" "PowerShell reparse rejection damaged external data"
         assert ((child-paths-starting $reparse_home ".nurl-backup-") | is-empty) "PowerShell reparse rejection created a success-shaped backup"
 
+        let invalid_home = ($fixture | path join "invalid-home")
+        let invalid_appdata = ($fixture | path join "invalid-appdata")
+        let invalid_resolved = ($fixture | path join "invalid-resolved")
+        mkdir $invalid_home
+        mkdir $invalid_appdata
+        mkdir $invalid_resolved
+        let invalid_config = ($invalid_resolved | path join "config.nu")
+        let write_invalid = '[System.IO.File]::WriteAllBytes($env:NURL_TEST_CONFIG_PATH, [byte[]](0xC3, 0x28, 0xFF))'
+        let invalid_written = (with-env {NURL_TEST_CONFIG_PATH: $invalid_config} {
+            ^powershell.exe -NoProfile -NonInteractive -Command $write_invalid | complete
+        })
+        assert equal $invalid_written.exit_code 0
+        let invalid_bytes = (open $invalid_config --raw)
+        let invalid_install = (with-env {
+            NURL_INSTALLER_NU_VERSION: "0.113.1"
+            NURL_INSTALLER_CONFIG_DIR: $invalid_resolved
+            NURL_INSTALLER_CURL_VERSION_LINE: "curl 8.13.0 libcurl/8.13.0"
+            NURL_INSTALLER_CURL_EXIT: "0"
+            NURL_INSTALLER_CURL_STDERR: ""
+            NURL_INSTALLER_CURL_LOG: ($fixture | path join "invalid-curl.log")
+            NURL_INSTALLER_DOWNLOAD_LOG: ($fixture | path join "invalid-downloads.log")
+            NURL_INSTALLER_DOWNLOAD_COUNT: ($fixture | path join "invalid-download-count")
+        } {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer_harness ($env.NURL_REPO_ROOT | path join "install.ps1") $invalid_home $invalid_appdata $tools | complete
+        })
+        assert ($invalid_install.exit_code != 0) "PowerShell installer accepted invalid config encoding"
+        assert (($invalid_install.stdout + $invalid_install.stderr) | str contains "invalid or unsupported text encoding") "PowerShell invalid-encoding install error was not actionable"
+        assert equal (open $invalid_config --raw) $invalid_bytes "PowerShell invalid-encoding install changed config bytes"
+        assert (not (($invalid_home | path join ".nurl") | path exists)) "PowerShell invalid-encoding install mutated Nurl"
+        assert ((child-paths-starting $invalid_home ".nurl-stage-") | is-empty) "PowerShell invalid-encoding install leaked staging"
+
+        mkdir ($invalid_home | path join ".nurl")
+        "must remain" | save -f ($invalid_home | path join ".nurl" "data.nuon")
+        let invalid_uninstall = (with-env {NURL_INSTALLER_CONFIG_DIR: $invalid_resolved} {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstall_harness ($env.NURL_REPO_ROOT | path join "uninstall.ps1") $invalid_home $invalid_appdata $tools | complete
+        })
+        assert ($invalid_uninstall.exit_code != 0) "PowerShell uninstaller accepted invalid config encoding"
+        assert (($invalid_uninstall.stdout + $invalid_uninstall.stderr) | str contains "invalid or unsupported text encoding") "PowerShell invalid-encoding uninstall error was not actionable"
+        assert (($invalid_home | path join ".nurl") | path exists) "PowerShell invalid-encoding uninstall removed Nurl"
+        assert equal (open $invalid_config --raw) $invalid_bytes "PowerShell invalid-encoding uninstall changed config bytes"
+        assert ((child-paths-starting $invalid_home ".nurl-backup-") | is-empty) "PowerShell invalid-encoding uninstall created a backup"
+
         let installer_source = (open ($env.NURL_REPO_ROOT | path join "install.ps1") --raw)
         let uninstaller_source = (open ($env.NURL_REPO_ROOT | path join "uninstall.ps1") --raw)
         assert equal ($installer_source | parse --regex '(?m)^\s*exit(?:\s|$)' | length) 0 "PowerShell installer contains a host-killing exit"
@@ -1139,6 +1405,33 @@ Write-Output "HOST-ALIVE-UNINSTALL"
         assert ($host_failure.stdout | str contains "CAUGHT-UNINSTALL") "PowerShell uninstall failure was not catchable"
         assert ($host_failure.stdout | str contains "HOST-ALIVE-UNINSTALL") "PowerShell uninstall failure killed its host"
         assert (($host_home | path join ".nurl") | path exists) "PowerShell uninstall failure removed Nurl"
+
+        if (which pwsh | is-not-empty) {
+            let style_home = ($fixture | path join "style-home")
+            let style_appdata = ($fixture | path join "style-appdata")
+            mkdir ($style_home | path join ".nurl")
+            mkdir $style_appdata
+            let style_harness = ($fixture | path join "style-host.ps1")
+            'param($Installer, $Uninstaller, $HomePath, $AppDataPath, $ToolsPath)
+$env:USERPROFILE = $HomePath
+$env:HOME = $HomePath
+$env:APPDATA = $AppDataPath
+$env:Path = $ToolsPath
+$env:NURL_INSTALLER_NU_VERSION = "0.88.0"
+$PSStyle.OutputRendering = "Ansi"
+$beforeInstall = $PSStyle.OutputRendering
+try { Invoke-Expression ([System.IO.File]::ReadAllText($Installer)) } catch {}
+if ($PSStyle.OutputRendering -ne $beforeInstall) { throw "installer changed PSStyle.OutputRendering" }
+function Read-Host { return "n" }
+$beforeUninstall = $PSStyle.OutputRendering
+Invoke-Expression ([System.IO.File]::ReadAllText($Uninstaller))
+if ($PSStyle.OutputRendering -ne $beforeUninstall) { throw "uninstaller changed PSStyle.OutputRendering" }
+Write-Output "PSSTYLE-PRESERVED"
+' | save -f $style_harness
+            let style_result = (^pwsh -NoProfile -NonInteractive -File $style_harness ($env.NURL_REPO_ROOT | path join "install.ps1") ($env.NURL_REPO_ROOT | path join "uninstall.ps1") $style_home $style_appdata $tools | complete)
+            assert equal $style_result.exit_code 0 $"PowerShell scripts changed host PSStyle: ($style_result.stderr)"
+            assert ($style_result.stdout | str contains "PSSTYLE-PRESERVED") "PowerShell host style preservation fixture did not finish"
+        }
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -1304,11 +1597,17 @@ def test-installer-script-syntax [] {
     let attributes = (open ($repo | path join ".gitattributes") --raw)
     assert ($attributes | str contains "*.sh text eol=lf") "shell line-ending policy is missing"
     assert ($attributes | str contains "*.ps1 text eol=crlf") "PowerShell text policy is missing"
+    for installer in ["install.sh" "install.ps1"] {
+        assert (not ((open ($repo | path join $installer) --raw) | str contains "NURL_REPO_URL")) $"($installer) exposes an undocumented repository override"
+    }
     for shell_script in ["install.sh" "uninstall.sh"] {
         let shell_source = (open ($repo | path join $shell_script) --raw)
         assert ($shell_source | str contains "Library/Application Support/nushell") $"($shell_script) is missing the macOS config fallback"
         assert (not ($shell_source | str contains "set -euo pipefail")) $"($shell_script) uses nounset, which breaks empty arrays on macOS Bash 3.2"
     }
+    let uninstall_source = (open ($repo | path join "uninstall.sh") --raw)
+    assert ($uninstall_source | str contains "elif { exec 3<>/dev/tty; } 2>/dev/null; then") "shell /dev/tty probe permanently redirects stderr"
+    assert ($uninstall_source | str contains "! -type d ! -type f") "shell uninstall does not reject special backup entries"
 }
 
 def test-command-discovery-source-duplicates [] {

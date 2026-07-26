@@ -54,7 +54,8 @@ This installs Nurl to `~/.nurl` and adds an owned Nurl block to the `config.nu` 
 temporary staging directory before replacing live files. Failed downloads, HTTP errors, an
 unsupported Nushell version, or parse failures leave an existing installation and Nushell
 configuration unchanged. Collections, chains, history, and user `.nuon` files are never replaced
-during an update.
+during an update. Unsupported config encodings and install/config paths that cannot be updated
+without following a link are rejected before live files change.
 
 ### Manual Install (Alternative)
 
@@ -101,7 +102,9 @@ Uninstall copies the complete `~/.nurl` tree to a timestamped backup and verifie
 file length, and file hash before removing the installation. If copying or verification fails,
 `~/.nurl` is left intact. The uninstaller removes only the owned Nurl config block, plus the exact
 legacy source line used by older releases, from both the resolved and legacy config locations.
-Comments, aliases, encoding, line endings, and trailing-newline state are preserved.
+Comments, aliases, encoding, mixed line endings, and trailing-newline state are preserved. Links
+and special files inside `~/.nurl` are rejected because they cannot be copied and verified as a
+self-contained backup.
 
 ---
 

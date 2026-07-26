@@ -10,10 +10,13 @@ param(
 & {
     param([bool]$ExplicitYes)
     $ErrorActionPreference = "Stop"
-    if ($null -ne $PSStyle) {
+    $hasOutputRendering = $null -ne $PSStyle
+    $previousOutputRendering = if ($hasOutputRendering) { $PSStyle.OutputRendering } else { $null }
+    if ($hasOutputRendering) {
         $PSStyle.OutputRendering = "PlainText"
     }
 
+    try {
     function Get-NurlTextFile {
         param([Parameter(Mandatory)][string]$Path)
 
@@ -44,7 +47,11 @@ param(
         } else {
             $encoding = [System.Text.UTF8Encoding]::new($false, $true)
         }
-        $text = if ($bytes.Length -eq $offset) { "" } else { $encoding.GetString($bytes, $offset, $bytes.Length - $offset) }
+        try {
+            $text = if ($bytes.Length -eq $offset) { "" } else { $encoding.GetString($bytes, $offset, $bytes.Length - $offset) }
+        } catch {
+            throw "Nushell config contains invalid or unsupported text encoding: $Path"
+        }
         [pscustomobject]@{ Text = $text; Encoding = $encoding; Preamble = $preamble; Bytes = $bytes }
     }
 
@@ -77,7 +84,7 @@ param(
     }
 
     function Test-NurlLegacySource {
-        param([Parameter(Mandatory)][string]$Line)
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
         $trimmed = $Line.Trim()
         $trimmed -ceq 'source ~/.nurl/api.nu' -or
             $trimmed -ceq 'source "~/.nurl/api.nu"' -or
@@ -336,4 +343,9 @@ param(
     }
 
     Invoke-NurlUninstall -AssumeYes:$ExplicitYes
+    } finally {
+        if ($hasOutputRendering) {
+            $PSStyle.OutputRendering = $previousOutputRendering
+        }
+    }
 } ([bool]$Yes)
