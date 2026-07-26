@@ -352,6 +352,10 @@ if [[ -f "$count_file" ]]; then
     count=$(( $(cat "$count_file") + 1 ))
 fi
 printf "%s" "$count" > "$count_file"
+if [[ -n "$NURL_INSTALLER_CREATE_HOME_AT" && "$count" -eq "$NURL_INSTALLER_CREATE_HOME_AT" ]]; then
+    mkdir -p "$HOME/.nurl"
+    printf "%s" "concurrent home data" > "$HOME/.nurl/concurrent.txt"
+fi
 if [[ -n "$NURL_INSTALLER_FAIL_DOWNLOAD" && "$count" -eq "$NURL_INSTALLER_FAIL_DOWNLOAD" ]]; then
     exit 22
 fi
@@ -713,6 +717,26 @@ def test-installer-atomic-staging [] {
         assert (not (($fresh_home | path join ".nurl") | path exists)) "shell 404-style fixture installed a broken payload"
         assert (not (($fresh_home | path join ".config" "nushell") | path exists)) "shell 404-style fixture touched config"
         assert ((child-paths-starting $fresh_home ".nurl-stage.") | is-empty) "shell 404-style fixture leaked staging"
+
+        let appearing_home = ($fixture | path join "appearing-home")
+        mkdir $appearing_home
+        let appearing_result = (^$bash -lc (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $appearing_home))
+            + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "appearing-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "appearing-downloads.log")))
+            + " NURL_INSTALLER_CREATE_HOME_AT=4"
+            + " /bin/bash " + (quote-for-bash $installer)
+        ) | complete)
+        assert ($appearing_result.exit_code != 0) "fresh installer succeeded after Nurl home appeared"
+        assert (not (($appearing_result.stdout + $appearing_result.stderr) | str contains "successfully")) "fresh concurrent-home failure printed success"
+        assert equal (open ($appearing_home | path join ".nurl" "concurrent.txt") --raw) "concurrent home data" "fresh installer changed concurrent Nurl data"
+        assert (not (($appearing_home | path join ".nurl" "install") | path exists)) "fresh installer nested payload into concurrent Nurl home"
+        assert (not (($appearing_home | path join ".nurl" "api.nu") | path exists)) "fresh installer partially published into concurrent Nurl home"
+        assert (not (($appearing_home | path join ".config" "nushell") | path exists)) "fresh concurrent-home failure touched config"
+        assert ((child-paths-starting $appearing_home ".nurl-stage.") | is-empty) "fresh concurrent-home failure leaked staging"
 
         let fresh_concurrent_home = ($fixture | path join "shell-fresh-concurrent")
         let fresh_concurrent_tools = ($fixture | path join "shell-fresh-concurrent-tools")
@@ -1511,6 +1535,27 @@ exec /bin/mv "$@"
             let readonly_backup = (child-paths-starting $readonly_changed_home ".nurl-backup-" | first)
             assert equal (open ($readonly_backup | path join "data.nuon") --raw) "must remain" "mode-0444 roundtrip lost Nurl data"
             ^$bash -lc $"chmod 600 (quote-for-bash (path-for-bash $bash $readonly_changed_config))"
+
+            let readonly_dir_home = ($fixture | path join "readonly-dir-home")
+            let readonly_dir_nurl = ($readonly_dir_home | path join ".nurl")
+            let readonly_dir_config = ($fixture | path join "readonly-dir-config")
+            mkdir ($readonly_dir_nurl | path join "nu_modules")
+            mkdir $readonly_dir_config
+            "old api" | save -f ($readonly_dir_nurl | path join "api.nu")
+            "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\n" | save -f ($readonly_dir_config | path join "config.nu")
+            ^$bash -lc $"chmod 555 (quote-for-bash (path-for-bash $bash $readonly_dir_config))"
+            let readonly_dir_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $readonly_dir_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $readonly_dir_config))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "readonly-dir-curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "readonly-dir-downloads.log")))
+            )
+            let readonly_dir_update = (^$bash -lc $"($readonly_dir_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert equal $readonly_dir_update.exit_code 0 $"idempotent config in read-only directory blocked payload update: ($readonly_dir_update.stderr)"
+            ^$bash -lc $"chmod 755 (quote-for-bash (path-for-bash $bash $readonly_dir_config))"
         } else if $require_posix {
             error make {msg: "required Ubuntu read-only config capability is unavailable"}
         }
@@ -1525,6 +1570,8 @@ exec /bin/mv "$@"
         mkdir $symlink_config_dir
         mkdir $symlink_dotfiles
         "dotfile content" | save -f $symlink_target
+        ^$bash -lc $"chmod 444 (quote-for-bash (path-for-bash $bash $symlink_target))"
+        let symlink_mode_before = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $symlink_target)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $symlink_target))" | complete)
         let config_link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $symlink_target)) (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
         let actual_config_link = if $config_link_result.exit_code == 0 {
             ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete
@@ -1551,9 +1598,12 @@ exec /bin/mv "$@"
             assert equal (open $symlink_target --raw) "dotfile content" "symlinked config target did not round-trip"
             let link_after_remove = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
             assert equal $link_after_remove.exit_code 0 "uninstaller replaced config symlink"
+            let symlink_mode_after = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $symlink_target)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $symlink_target))" | complete)
+            assert equal ($symlink_mode_after.stdout | str trim) ($symlink_mode_before.stdout | str trim) "symlinked read-only config target mode changed"
         } else if $require_posix {
             error make {msg: "required Ubuntu config-file symlink capability is unavailable"}
         }
+        ^$bash -lc $"chmod 600 (quote-for-bash (path-for-bash $bash $symlink_target))"
 
         let contained_home = ($fixture | path join "contained-home")
         let contained_nurl = ($contained_home | path join ".nurl")
@@ -2457,8 +2507,9 @@ def test-reviewed-packaging-safety-contracts [] {
         assert ($shell_source | str contains "perl -") "shell config transformation is not single-pass"
     }
     assert ($uninstall_sh | str contains "Could not create an atomic temp beside Nushell config") "uninstall does not preflight adjacent config temp creation"
-    assert ($install_sh | str contains "required_tool in od awk perl wc sed tr uname dirname basename mktemp cp mv rm chmod cmp") "shell installer does not preflight cmp and required tools"
+    assert ($install_sh | str contains "required_tool in od awk perl wc sed tr uname dirname basename mktemp mkdir cat cp mv rm chmod cmp") "shell installer does not preflight cmp and required tools"
     assert ($uninstall_sh | str contains "required_tool in od awk perl wc sed tr uname find dirname basename mktemp cp mv rm chmod cmp") "shell uninstaller does not preflight cmp and required tools"
+    assert ($install_sh | str contains "mktemp mkdir cat cp") "shell installer does not preflight mkdir and cat"
     assert (not ($uninstall_sh | str contains "restore_displaced_config \"$displaced\" \"$destination\" || true")) "shell uninstall swallows config restoration failures"
     assert equal (($install_sh | parse --regex 'ROLLBACK_FAILED=false') | length) 1 "shell installer resets an earlier rollback failure"
     assert (not ($install_sh | str contains "FRESH_SIGNATURE")) "shell installer retains dead fresh-signature state"
@@ -2471,6 +2522,7 @@ def test-reviewed-packaging-safety-contracts [] {
     assert (not ($install_ps | str contains "Get-NurlTreeManifest")) "PowerShell installer retains dead fresh-manifest state"
     assert ($uninstall_ps | str contains '$configTemps') "PowerShell uninstall does not track config temps"
     assert ($uninstall_ps | str contains "read-only; Nurl was not moved") "PowerShell read-only config failure is not preflighted"
+    assert ($uninstall_ps | str contains "backup was moved to") "PowerShell uninstall reports moved backup as copied"
     assert ($install_ps | str contains "preserved the visible fresh installation") "PowerShell fresh rollback does not preserve concurrent data"
     assert ($install_ps | str contains "[System.IO.File]::Replace") "PowerShell installer config replacement is not atomic"
     assert ($uninstall_ps | str contains "[System.IO.File]::Replace") "PowerShell uninstaller config replacement is not atomic"
@@ -2486,6 +2538,8 @@ def test-reviewed-packaging-safety-contracts [] {
     assert ($shell_track_index >= 0 and $shell_track_index < $shell_copy_index) "shell uninstall tracks config temp after populating it"
     assert equal (($install_sh | parse --regex 'CREATED_PATHS\+=') | length) (($install_sh | parse --regex 'CREATED_CANDIDATES\+=') | length) "shell rollback created-path arrays are desynchronized"
     assert ($install_sh | str contains "finish() {\n    local status=$?\n    set +e") "shell EXIT cleanup can abort before completing recovery"
+    assert ($uninstall_sh | str contains "cleanup_on_failure() {\n    local status=$?\n    set +e") "shell uninstall EXIT cleanup can abort before completing recovery"
+    assert ($uninstall_sh | str contains "live config changed concurrently; recovery retained at") "shell uninstall silently leaves concurrent config recovery"
 }
 
 def test-ubuntu-packaging-workflow-contract [] {

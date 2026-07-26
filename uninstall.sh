@@ -291,6 +291,7 @@ prepare_clean_config() {
 
 cleanup_on_failure() {
     local status=$?
+    set +e
     local index
     if [[ -n "$CONFIG_DISPLACED" && -e "$CONFIG_DISPLACED" ]]; then
         if ! restore_displaced_config "$CONFIG_DISPLACED" "$CONFIG_DISPLACED_DEST"; then
@@ -298,13 +299,25 @@ cleanup_on_failure() {
         fi
     fi
     for ((index = ${#CONFIG_REPLACEMENT_PATHS[@]} - 1; index >= 0; index--)); do
-        if [[ -e "${CONFIG_REPLACEMENT_BACKUPS[$index]}" ]] &&
-           [[ -f "${CONFIG_REPLACEMENT_PATHS[$index]}" ]] &&
-           cmp -s "${CONFIG_REPLACEMENT_CANDIDATES[$index]}" "${CONFIG_REPLACEMENT_PATHS[$index]}"; then
+        if [[ ! -e "${CONFIG_REPLACEMENT_BACKUPS[$index]}" ]]; then
+            echo "Warning: config recovery backup is missing: ${CONFIG_REPLACEMENT_BACKUPS[$index]}." >&2
+            continue
+        fi
+        if [[ ! -f "${CONFIG_REPLACEMENT_PATHS[$index]}" ]]; then
+            echo "Warning: live config is missing or non-regular; recovery retained at ${CONFIG_REPLACEMENT_BACKUPS[$index]}." >&2
+            continue
+        fi
+        cmp -s "${CONFIG_REPLACEMENT_CANDIDATES[$index]}" "${CONFIG_REPLACEMENT_PATHS[$index]}"
+        compare_status=$?
+        if [[ "$compare_status" -eq 0 ]]; then
             rm -f "${CONFIG_REPLACEMENT_PATHS[$index]}"
             if ! restore_displaced_config "${CONFIG_REPLACEMENT_BACKUPS[$index]}" "${CONFIG_REPLACEMENT_PATHS[$index]}"; then
                 echo "Error: config recovery remains at ${CONFIG_REPLACEMENT_BACKUPS[$index]}." >&2
             fi
+        elif [[ "$compare_status" -eq 1 ]]; then
+            echo "Warning: live config changed concurrently; recovery retained at ${CONFIG_REPLACEMENT_BACKUPS[$index]}." >&2
+        else
+            echo "Warning: config comparison failed with cmp exit $compare_status; recovery retained at ${CONFIG_REPLACEMENT_BACKUPS[$index]}." >&2
         fi
     done
     if [[ -n "$WORK_ROOT" && -d "$WORK_ROOT" ]]; then

@@ -91,6 +91,12 @@ get_file_mode() {
     stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null
 }
 
+publish_directory_exact() {
+    local source="$1"
+    local destination="$2"
+    perl -e 'use strict; use warnings; rename($ARGV[0], $ARGV[1]) or die "rename failed: $!\n";' "$source" "$destination"
+}
+
 probe_mv_no_clobber() {
     local directory="$1"
     local probe_dir source destination move_source move_destination
@@ -514,7 +520,7 @@ if ! version_at_least "$CURL_MAJOR" "$CURL_MINOR" "$CURL_PATCH" "$MINIMUM_CURL_V
     exit 1
 fi
 
-for required_tool in od awk perl wc sed tr uname dirname basename mktemp cp mv rm chmod cmp stat readlink rmdir; do
+for required_tool in od awk perl wc sed tr uname dirname basename mktemp mkdir cat cp mv rm chmod cmp stat readlink rmdir; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo -e "${RED}Error: $required_tool is required for byte-safe Nushell config editing.${NC}" >&2
         exit 1
@@ -573,8 +579,8 @@ if [[ -L "$NUSHELL_CONFIG" ]]; then
         echo -e "${RED}Error: Nushell config link could not be resolved safely: $NUSHELL_CONFIG${NC}" >&2
         exit 1
     }
-    if [[ ! -f "$RESOLVED_CONFIG_FILE" || ! -w "$RESOLVED_CONFIG_FILE" ]]; then
-        echo -e "${RED}Error: Nushell config link does not resolve to a writable file: $NUSHELL_CONFIG${NC}" >&2
+    if [[ ! -f "$RESOLVED_CONFIG_FILE" ]]; then
+        echo -e "${RED}Error: Nushell config link does not resolve to a regular file: $NUSHELL_CONFIG${NC}" >&2
         exit 1
     fi
     NUSHELL_CONFIG="$RESOLVED_CONFIG_FILE"
@@ -583,14 +589,6 @@ elif [[ -e "$NUSHELL_CONFIG" && ! -f "$NUSHELL_CONFIG" ]]; then
     exit 1
 fi
 CONFIG_TARGET_DIR="$(dirname "$NUSHELL_CONFIG")"
-CONFIG_WRITABLE_PARENT="$CONFIG_TARGET_DIR"
-while [[ ! -e "$CONFIG_WRITABLE_PARENT" ]]; do
-    CONFIG_WRITABLE_PARENT="$(dirname "$CONFIG_WRITABLE_PARENT")"
-done
-if [[ ! -d "$CONFIG_WRITABLE_PARENT" || ! -w "$CONFIG_WRITABLE_PARENT" ]]; then
-    echo -e "${RED}Error: Nushell config target directory is not writable: $CONFIG_TARGET_DIR${NC}" >&2
-    exit 1
-fi
 case "$NUSHELL_CONFIG_DIR/" in
     "$NURL_HOME/"*)
         echo -e "${RED}Error: Nushell config directory must not resolve inside $NURL_HOME.${NC}" >&2
@@ -690,7 +688,18 @@ prepare_config_candidate "$CONFIG_ORIGINAL" "$CONFIG_CANDIDATE" "$NUSHELL_CONFIG
 echo "[3/4] Promoting validated payloads..."
 PROMOTION_STARTED=true
 if [[ "$IS_UPDATE" != true ]]; then
-    mv "$PAYLOAD_ROOT" "$NURL_HOME"
+    if [[ -e "$NURL_HOME" || -L "$NURL_HOME" ]]; then
+        echo -e "${RED}Error: $NURL_HOME appeared during download; concurrent data was preserved and installation was not published.${NC}" >&2
+        exit 1
+    fi
+    if ! publish_directory_exact "$PAYLOAD_ROOT" "$NURL_HOME"; then
+        echo -e "${RED}Error: Could not atomically publish $NURL_HOME; any concurrent destination was preserved.${NC}" >&2
+        exit 1
+    fi
+    if [[ ! -f "$NURL_HOME/api.nu" || ! -f "$NURL_HOME/nu_modules/mod.nu" ]]; then
+        echo -e "${RED}Error: Published Nurl layout is incomplete; success was not reported.${NC}" >&2
+        exit 1
+    fi
     FRESH_PROMOTED=true
 else
     remember_created_dir "$NURL_HOME"
@@ -717,6 +726,14 @@ fi
 
 echo "[4/4] Configuring Nushell..."
 if [[ "$CONFIG_CHANGED" == true ]]; then
+    CONFIG_WRITABLE_PARENT="$CONFIG_TARGET_DIR"
+    while [[ ! -e "$CONFIG_WRITABLE_PARENT" ]]; do
+        CONFIG_WRITABLE_PARENT="$(dirname "$CONFIG_WRITABLE_PARENT")"
+    done
+    if [[ ! -d "$CONFIG_WRITABLE_PARENT" || ! -w "$CONFIG_WRITABLE_PARENT" ]]; then
+        echo -e "${RED}Error: Nushell config target directory is not writable: $CONFIG_TARGET_DIR${NC}" >&2
+        exit 1
+    fi
     remember_created_dir "$CONFIG_TARGET_DIR"
     CONFIG_TEMP="$(mktemp "$CONFIG_TARGET_DIR/.config.nu.nurl.XXXXXX")"
     cp "$CONFIG_CANDIDATE" "$CONFIG_TEMP"
