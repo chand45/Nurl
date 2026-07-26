@@ -302,6 +302,10 @@ function Move-Item {
         [string]$LiteralPath -like "*\rollback\*") {
         throw "forced rollback restore failure"
     }
+    if ($env:NURL_INSTALLER_MUTATE_CONFIG_PATH -and
+        [string]$Destination -like "*\nu_modules\string-compat.nu") {
+        [System.IO.File]::WriteAllText($env:NURL_INSTALLER_MUTATE_CONFIG_PATH, "concurrent config")
+    }
     Microsoft.PowerShell.Management\Move-Item @PSBoundParameters
 }
 
@@ -478,7 +482,7 @@ def test-powershell-installer-curl-preflight [] {
             if $case.accepted {
                 assert equal $result.exit_code 0 $"PowerShell installer rejected ($case.name): ($result.stderr)"
                 assert (($home | path join ".nurl" "api.nu") | path exists) $"PowerShell installer did not continue for ($case.name)"
-                assert (($appdata | path join "nushell" "config.nu") | path exists) $"PowerShell installer did not configure Nushell for ($case.name)"
+                assert (($appdata | path join "nushell" "config.nu") | path exists) $"PowerShell installer did not configure Nushell for ($case.name): (($result.stdout + $result.stderr) | to nuon)"
                 assert ((open $download_log --raw | lines | length) > 10) $"PowerShell accepted fixture did not exercise downloads: ($case.name)"
                 assert equal (open $curl_log --raw | lines) ["version"] $"PowerShell accepted fixture repeated or bypassed the version probe: ($case.name)"
             } else {
@@ -710,6 +714,35 @@ def test-installer-atomic-staging [] {
         assert (not (($fresh_home | path join ".config" "nushell") | path exists)) "shell 404-style fixture touched config"
         assert ((child-paths-starting $fresh_home ".nurl-stage.") | is-empty) "shell 404-style fixture leaked staging"
 
+        let fresh_concurrent_home = ($fixture | path join "shell-fresh-concurrent")
+        let fresh_concurrent_tools = ($fixture | path join "shell-fresh-concurrent-tools")
+        mkdir $fresh_concurrent_home
+        mkdir $fresh_concurrent_tools
+        cp ($tools | path join "nu") ($fresh_concurrent_tools | path join "nu")
+        cp ($tools | path join "curl") ($fresh_concurrent_tools | path join "curl")
+        '#!/bin/bash
+if [[ "$NURL_INSTALLER_INJECT_FRESH_DATA" == "1" && "$*" == *"/.config.nu.nurl."* ]]; then
+    printf "%s" "concurrent fresh data" > "$HOME/.nurl/only-copy.txt"
+    exit 80
+fi
+exec /bin/ln "$@"
+' | str replace --all "\r" "" | save -f ($fresh_concurrent_tools | path join "ln")
+        let fresh_concurrent_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($fresh_concurrent_tools | path join 'ln')))" | complete)
+        assert equal $fresh_concurrent_chmod.exit_code 0
+        let fresh_concurrent_result = (^$bash -lc (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $fresh_concurrent_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $fresh_concurrent_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "fresh-concurrent-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "fresh-concurrent-downloads.log")))
+            + " NURL_INSTALLER_INJECT_FRESH_DATA=1"
+            + " /bin/bash " + (quote-for-bash $installer)
+        ) | complete)
+        assert ($fresh_concurrent_result.exit_code != 0) "fresh concurrent-data fixture unexpectedly succeeded"
+        assert equal (open ($fresh_concurrent_home | path join ".nurl" "only-copy.txt") --raw) "concurrent fresh data" "fresh rollback deleted concurrent data"
+        assert (($fresh_concurrent_result.stdout + $fresh_concurrent_result.stderr) | str contains "preserved the visible fresh installation") "fresh rollback did not report preserved concurrent data"
+
         let incompatible_shell_path = ($modules | path join "auth.nu")
         mkdir $incompatible_shell_path
         "directory must survive" | save -f ($incompatible_shell_path | path join "keep.txt")
@@ -778,9 +811,9 @@ exec /bin/mv "$@"
 if [[ "$*" == *"/.config.nu.nurl."* ]]; then
     exit 76
 fi
-exec /bin/mv "$@"
-' | str replace --all "\r" "" | save -f ($config_fail_tools | path join "mv")
-        let config_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'mv')))" | complete)
+exec /bin/ln "$@"
+' | str replace --all "\r" "" | save -f ($config_fail_tools | path join "ln")
+        let config_fail_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($config_fail_tools | path join 'ln')))" | complete)
         assert equal $config_fail_chmod.exit_code 0
         let config_promotion_failure = (^$bash -lc (
             "HOME=" + (quote-for-bash (path-for-bash $bash $config_fail_home))
@@ -883,6 +916,36 @@ exec /bin/mv "$@"
             assert equal (open ($injected_install | path join "api.nu") --raw) $injected_api "PowerShell injected rollback did not restore api.nu"
             assert equal (open ($injected_install | path join "nu_modules" "concurrent.txt") --raw) "concurrent content" "PowerShell rollback deleted concurrent directory content"
             assert ((child-paths-starting $injected_home ".nurl-stage-") | is-empty) "PowerShell injected rollback leaked staging"
+
+            let ps_config_fail_home = ($fixture | path join "powershell-config-fail-home")
+            let ps_config_fail_appdata = ($fixture | path join "powershell-config-fail-appdata")
+            let ps_config_fail_install = ($ps_config_fail_home | path join ".nurl")
+            let ps_config_fail_dir = ($ps_config_fail_appdata | path join "nushell")
+            let ps_config_fail_config = ($ps_config_fail_dir | path join "config.nu")
+            mkdir $ps_config_fail_install
+            mkdir $ps_config_fail_dir
+            "old config-fail api" | save -f ($ps_config_fail_install | path join "api.nu")
+            "original config" | save -f $ps_config_fail_config
+            let ps_config_fail_api = (open ($ps_config_fail_install | path join "api.nu") --raw)
+            let ps_config_fail_result = (with-env {
+                NURL_INSTALLER_NU_VERSION: "0.113.1"
+                NURL_INSTALLER_CURL_VERSION_LINE: "curl 8.13.0 libcurl/8.13.0"
+                NURL_INSTALLER_CURL_EXIT: "0"
+                NURL_INSTALLER_CURL_STDERR: ""
+                NURL_INSTALLER_CURL_LOG: ($fixture | path join "ps-config-fail-curl.log")
+                NURL_INSTALLER_DOWNLOAD_LOG: ($fixture | path join "ps-config-fail-downloads.log")
+                NURL_INSTALLER_DOWNLOAD_COUNT: ($fixture | path join "ps-config-fail-download-count")
+                NURL_INSTALLER_FAIL_DOWNLOAD: ""
+                NURL_INSTALLER_MUTATE_CONFIG_PATH: $ps_config_fail_config
+            } {
+                ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness ($env.NURL_REPO_ROOT | path join "install.ps1") $ps_config_fail_home $ps_config_fail_appdata $ps_tools | complete
+            })
+            assert ($ps_config_fail_result.exit_code != 0) "PowerShell config promotion failure unexpectedly succeeded"
+            assert (($ps_config_fail_result.stdout + $ps_config_fail_result.stderr) | str contains "config changed during installation") "PowerShell config conflict was not actionable"
+            assert equal (open ($ps_config_fail_install | path join "api.nu") --raw) $ps_config_fail_api "PowerShell config promotion failure did not restore api.nu"
+            assert equal (open $ps_config_fail_config --raw) "concurrent config" "PowerShell config conflict overwrote the concurrent edit"
+            assert ((child-paths-starting $ps_config_fail_dir ".config.nu.nurl.") | is-empty) "PowerShell install config promotion failure leaked a temp"
+            assert ((child-paths-starting $ps_config_fail_home ".nurl-stage-") | is-empty) "PowerShell config promotion failure leaked staging"
 
             let ps_restore_home = ($fixture | path join "powershell-restore-home")
             let ps_restore_appdata = ($fixture | path join "powershell-restore-appdata")
@@ -998,61 +1061,133 @@ def test-shell-uninstall-backup-and-consent [] {
         assert (not ($resolved_after | str ends-with "\n")) "config trailing-newline state changed"
         assert equal (open ($legacy_config | path join "config.nu") --raw) "legacy keep\n" "legacy config path was not cleaned precisely"
 
-        let failure_home = ($fixture | path join "copy failure home")
+        let failure_home = ($fixture | path join "detach failure home")
         let failure_nurl = ($failure_home | path join ".nurl")
         mkdir ($failure_nurl | path join "collections")
         "must survive" | save -f ($failure_nurl | path join "collections" "data.nuon")
         let fail_tools = ($fixture | path join "fail-tools")
         mkdir $fail_tools
-        '#!/bin/sh
-exit 73
-' | str replace --all "\r" "" | save -f ($fail_tools | path join "cp")
-        let bash_cp = (path-for-bash $bash ($fail_tools | path join "cp"))
-        let chmod_result = (^$bash -lc $"chmod 700 (quote-for-bash $bash_cp)" | complete)
+        '#!/bin/bash
+if [[ "$*" == *"/.nurl "* ]]; then
+    exit 73
+fi
+exec /bin/mv "$@"
+' | str replace --all "\r" "" | save -f ($fail_tools | path join "mv")
+        let bash_mv = (path-for-bash $bash ($fail_tools | path join "mv"))
+        let chmod_result = (^$bash -lc $"chmod 700 (quote-for-bash $bash_mv)" | complete)
         assert equal $chmod_result.exit_code 0
         let fail_environment = (
             "HOME=" + (quote-for-bash (path-for-bash $bash $failure_home))
             + " PATH=" + (quote-for-bash $"(path-for-bash $bash $fail_tools):($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             + " NURL_ASSUME_YES=1"
         )
-        let copy_failure = (^$bash -lc $"($fail_environment) /bin/bash (quote-for-bash $script)" | complete)
-        assert ($copy_failure.exit_code != 0) "forced backup copy failure unexpectedly succeeded"
-        assert ($failure_nurl | path exists) "forced backup copy failure removed Nurl"
+        let detach_failure = (^$bash -lc $"($fail_environment) /bin/bash (quote-for-bash $script)" | complete)
+        assert ($detach_failure.exit_code != 0) "forced backup detach failure unexpectedly succeeded"
+        assert ($failure_nurl | path exists) "forced backup detach failure removed Nurl"
         assert equal (open ($failure_nurl | path join "collections" "data.nuon") --raw) "must survive"
-        assert ((child-paths-starting $failure_home ".nurl-backup-") | is-empty) "forced copy failure left a success-shaped backup"
+        assert ((child-paths-starting $failure_home ".nurl-backup-") | is-empty) "forced detach failure left a success-shaped backup"
 
-        let pty_available = (^$bash -lc "command -v script >/dev/null 2>&1" | complete)
+        let temp_failure_home = ($fixture | path join "temp-failure-home")
+        let temp_failure_nurl = ($temp_failure_home | path join ".nurl")
+        let temp_failure_config_dir = ($fixture | path join "temp-failure-config")
+        let temp_failure_config = ($temp_failure_config_dir | path join "config.nu")
+        let temp_failure_tools = ($fixture | path join "temp-failure-tools")
+        mkdir $temp_failure_nurl
+        mkdir $temp_failure_config_dir
+        mkdir $temp_failure_tools
+        shell-installer-tools $temp_failure_tools $bash
+        "must survive temp failure" | save -f ($temp_failure_nurl | path join "data.nuon")
+        "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\nkeep\n" | save -f $temp_failure_config
+        let temp_failure_config_bytes = (open $temp_failure_config --raw)
+        '#!/bin/bash
+if [[ "$*" == *"/.config.nu.nurl."* ]]; then
+    exit 78
+fi
+exec /usr/bin/mktemp "$@"
+' | str replace --all "\r" "" | save -f ($temp_failure_tools | path join "mktemp")
+        let temp_failure_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($temp_failure_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($temp_failure_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($temp_failure_tools | path join 'mktemp')))" | complete)
+        assert equal $temp_failure_chmod.exit_code 0
+        let temp_failure_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $temp_failure_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $temp_failure_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $temp_failure_config_dir))
+            + " NURL_ASSUME_YES=1"
+        )
+        let temp_failure = (^$bash -lc $"($temp_failure_environment) /bin/bash (quote-for-bash $script)" | complete)
+        assert ($temp_failure.exit_code != 0) "uninstall config-temp preflight failure unexpectedly succeeded"
+        assert (($temp_failure.stdout + $temp_failure.stderr) | str contains "Could not create an atomic temp") "uninstall config-temp failure was not actionable"
+        assert ($temp_failure_nurl | path exists) "uninstall config-temp failure removed Nurl"
+        assert equal (open $temp_failure_config --raw) $temp_failure_config_bytes "uninstall config-temp failure changed config"
+        assert ((child-paths-starting $temp_failure_home ".nurl-backup-") | is-empty) "uninstall config-temp failure created a backup"
+        assert ((child-paths-starting $temp_failure_config_dir ".config.nu.nurl.") | is-empty) "uninstall config-temp failure leaked a temp"
+
+        let populate_failure_home = ($fixture | path join "populate-failure-home")
+        let populate_failure_nurl = ($populate_failure_home | path join ".nurl")
+        let populate_failure_config_dir = ($fixture | path join "populate-failure-config")
+        let populate_failure_tools = ($fixture | path join "populate-failure-tools")
+        mkdir $populate_failure_nurl
+        mkdir $populate_failure_config_dir
+        mkdir $populate_failure_tools
+        shell-installer-tools $populate_failure_tools $bash
+        "must survive population failure" | save -f ($populate_failure_nurl | path join "data.nuon")
+        "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\nkeep\n" | save -f ($populate_failure_config_dir | path join "config.nu")
+        '#!/bin/bash
+destination="${!#}"
+if [[ "$destination" == *"/.config.nu.nurl."* ]]; then
+    exit 79
+fi
+exec /bin/cp "$@"
+' | str replace --all "\r" "" | save -f ($populate_failure_tools | path join "cp")
+        let populate_failure_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($populate_failure_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($populate_failure_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($populate_failure_tools | path join 'cp')))" | complete)
+        assert equal $populate_failure_chmod.exit_code 0
+        let populate_failure_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $populate_failure_home))
+            + " PATH=" + (quote-for-bash $"(path-for-bash $bash $populate_failure_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $populate_failure_config_dir))
+            + " NURL_ASSUME_YES=1"
+        )
+        let populate_failure = (^$bash -lc $"($populate_failure_environment) /bin/bash (quote-for-bash $script)" | complete)
+        assert ($populate_failure.exit_code != 0) "uninstall config-temp population failure unexpectedly succeeded"
+        assert ($populate_failure_nurl | path exists) "uninstall config-temp population failure removed Nurl"
+        assert ((child-paths-starting $populate_failure_home ".nurl-backup-") | is-empty) "uninstall config-temp population failure created a backup"
+        assert ((child-paths-starting $populate_failure_config_dir ".config.nu.nurl.") | is-empty) "uninstall config-temp population failure leaked a temp"
+
+        let pty_available = (^$bash -lc "command -v script >/dev/null 2>&1 && printf '' | script -qfec 'exit 0' /dev/null >/dev/null 2>&1" | complete)
         if $pty_available.exit_code == 0 {
             let pty_home = ($fixture | path join "pty-home")
             let pty_nurl = ($pty_home | path join ".nurl")
             let pty_tools = ($fixture | path join "pty-tools")
+            let pty_config_dir = ($fixture | path join "pty-config")
             mkdir $pty_nurl
             mkdir $pty_tools
+            mkdir $pty_config_dir
             shell-installer-tools $pty_tools $bash
             "pty data" | save -f ($pty_nurl | path join "data.nuon")
+            "# >>> nurl >>>\nsource ~/.nurl/api.nu\n# <<< nurl <<<\nkeep\n" | save -f ($pty_config_dir | path join "config.nu")
             '#!/bin/bash
-if [[ "$NURL_UNINSTALL_FAIL_REMOVE" == "1" && "$*" == *"/.nurl" ]]; then
-    printf "%s\n" "forced removal failure" >&2
+if [[ "$NURL_UNINSTALL_FAIL_CONFIG" == "1" && "$*" == *"/.config.nu.nurl."* ]]; then
+    printf "%s\n" "forced config failure" >&2
     exit 77
 fi
-exec /bin/rm "$@"
-' | str replace --all "\r" "" | save -f ($pty_tools | path join "rm")
-            let pty_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'rm')))" | complete)
+exec /bin/ln "$@"
+' | str replace --all "\r" "" | save -f ($pty_tools | path join "ln")
+            let pty_chmod = (^$bash -lc $"chmod 700 (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'nu'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'curl'))) (quote-for-bash (path-for-bash $bash ($pty_tools | path join 'ln')))" | complete)
             assert equal $pty_chmod.exit_code 0
             let pty_environment = (
                 "HOME=" + (quote-for-bash (path-for-bash $bash $pty_home))
                 + " PATH=" + (quote-for-bash $"(path-for-bash $bash $pty_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                + " NURL_UNINSTALL_FAIL_REMOVE=1"
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $pty_config_dir))
+                + " NURL_UNINSTALL_FAIL_CONFIG=1"
             )
             let piped_command = $"cat (quote-for-bash $script) | /bin/bash"
             let pty_inner = $"($pty_environment) /bin/bash -c (quote-for-bash $piped_command)"
             let pty_result = (^$bash -lc $"printf 'y\\n' | script -qfec (quote-for-bash $pty_inner) /dev/null" | complete)
-            assert ($pty_result.exit_code != 0) "PTY piped uninstall removal failure unexpectedly succeeded"
+            assert ($pty_result.exit_code != 0) "PTY piped uninstall config failure unexpectedly succeeded"
             let pty_output = $pty_result.stdout + $pty_result.stderr
-            assert ($pty_output | str contains "Nurl could not be removed") "PTY piped uninstall lost later stderr"
-            assert ($pty_output | str contains "verified backup remains at") "PTY piped uninstall omitted the backup location"
-            assert ($pty_nurl | path exists) "PTY removal failure deleted Nurl"
-            assert equal ((child-paths-starting $pty_home ".nurl-backup-") | length) 1 "PTY removal failure did not preserve the verified backup"
+            assert ($pty_output | str contains "Nushell config could not be updated") "PTY piped uninstall lost later stderr"
+            assert ($pty_output | str contains "backup remains at") "PTY piped uninstall omitted the backup location"
+            assert (not ($pty_nurl | path exists)) "PTY config failure left the detached install path"
+            assert equal ((child-paths-starting $pty_home ".nurl-backup-") | length) 1 "PTY config failure did not preserve the verified backup"
         }
 
         let link_home = ($fixture | path join "link-home")
@@ -1141,6 +1276,156 @@ def test-shell-config-ownership-and-resolution [] {
         assert equal $restored_config $original $"sentinel add/remove did not restore config bytes: expected=($original | encode hex) actual=($restored_config | encode hex)"
         assert equal (open ($legacy_config | path join "config.nu") --raw) "# unrelated source ~/.nurl/api.nu\r\nlegacy keep" "legacy cleanup was broad or lossy"
 
+        let migration_home = ($fixture | path join "migration-home")
+        let migration_config_dir = ($fixture | path join "migration-config")
+        let migration_config = ($migration_config_dir | path join "config.nu")
+        let migration_original = "a\r\nsource ~/.nurl/api.nu\r\nz"
+        let migration_expected = "a\r\n# >>> nurl >>>\r\nsource ~/.nurl/api.nu\r\n# <<< nurl <<<\r\nz"
+        let migration_uninstalled = "a\r\nz"
+        mkdir $migration_home
+        mkdir $migration_config_dir
+        $migration_original | save -f $migration_config
+        let migration_chmod = (^$bash -lc $"chmod 640 (quote-for-bash (path-for-bash $bash $migration_config))" | complete)
+        assert equal $migration_chmod.exit_code 0
+        let migration_mode_before = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $migration_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $migration_config))" | complete)
+        assert equal $migration_mode_before.exit_code 0
+        let expected_migration_mode = ($migration_mode_before.stdout | str trim)
+        let migration_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $migration_home))
+            + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $migration_config_dir))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "migration-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "migration-downloads.log")))
+        )
+        let migration_install = (^$bash -lc $"($migration_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert equal $migration_install.exit_code 0 $"legacy migration install failed: ($migration_install.stderr)"
+        assert equal (open $migration_config --raw) $migration_expected "non-final legacy CRLF migration changed EOLs or added a terminal newline"
+        let migration_mode_after_install = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $migration_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $migration_config))" | complete)
+        assert equal ($migration_mode_after_install.stdout | str trim) $expected_migration_mode $"shell installer changed config mode: expected=($expected_migration_mode) actual=($migration_mode_after_install.stdout | str trim)"
+        let migration_remove = (^$bash -lc $"($migration_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+        assert equal $migration_remove.exit_code 0 $"legacy migration uninstall failed: ($migration_remove.stderr)"
+        assert equal (open $migration_config --raw) $migration_uninstalled "legacy migration uninstall did not preserve surrounding CRLF bytes"
+        let migration_mode_after_remove = (^$bash -lc $"stat -c '%a' (quote-for-bash (path-for-bash $bash $migration_config)) 2>/dev/null || stat -f '%Lp' (quote-for-bash (path-for-bash $bash $migration_config))" | complete)
+        assert equal ($migration_mode_after_remove.stdout | str trim) $expected_migration_mode $"shell uninstaller changed config mode: expected=($expected_migration_mode) actual=($migration_mode_after_remove.stdout | str trim)"
+
+        let symlink_home = ($fixture | path join "symlink-home")
+        let symlink_config_dir = ($symlink_home | path join ".config" "nushell")
+        let symlink_dotfiles = ($symlink_home | path join "dotfiles")
+        let symlink_target = ($symlink_dotfiles | path join "config.nu")
+        let symlink_config = ($symlink_config_dir | path join "config.nu")
+        mkdir $symlink_home
+        mkdir $symlink_config_dir
+        mkdir $symlink_dotfiles
+        "dotfile content" | save -f $symlink_target
+        let config_link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $symlink_target)) (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
+        let actual_config_link = if $config_link_result.exit_code == 0 {
+            ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete
+        } else {
+            {exit_code: 1}
+        }
+        if $actual_config_link.exit_code == 0 {
+            let symlink_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $symlink_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $symlink_config_dir))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "symlink-curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "symlink-downloads.log")))
+            )
+            let symlink_install = (^$bash -lc $"($symlink_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert equal $symlink_install.exit_code 0 $"symlinked config install failed: ($symlink_install.stderr)"
+            assert ((open $symlink_target --raw) | str contains "# >>> nurl >>>") "symlinked config target was not configured"
+            let link_after_install = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
+            assert equal $link_after_install.exit_code 0 "installer replaced config symlink"
+            let symlink_remove = (^$bash -lc $"($symlink_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+            assert equal $symlink_remove.exit_code 0 $"symlinked config uninstall failed: ($symlink_remove.stderr)"
+            assert equal (open $symlink_target --raw) "dotfile content" "symlinked config target did not round-trip"
+            let link_after_remove = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $symlink_config))" | complete)
+            assert equal $link_after_remove.exit_code 0 "uninstaller replaced config symlink"
+        }
+
+        let contained_home = ($fixture | path join "contained-home")
+        let contained_nurl = ($contained_home | path join ".nurl")
+        let contained_config_dir = ($contained_home | path join ".config" "nushell")
+        let contained_config_link = ($contained_config_dir | path join "config.nu")
+        mkdir $contained_nurl
+        mkdir $contained_config_dir
+        "managed api bytes" | save -f ($contained_nurl | path join "api.nu")
+        let contained_link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash ($contained_nurl | path join 'api.nu'))) (quote-for-bash (path-for-bash $bash $contained_config_link))" | complete)
+        let actual_contained_link = if $contained_link_result.exit_code == 0 {
+            ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $contained_config_link))" | complete
+        } else {
+            {exit_code: 1}
+        }
+        if $actual_contained_link.exit_code == 0 {
+            let contained_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $contained_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $contained_config_dir))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "contained-curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "contained-downloads.log")))
+            )
+            let contained_install = (^$bash -lc $"($contained_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert ($contained_install.exit_code != 0) "installer accepted config symlink into Nurl"
+            assert (($contained_install.stdout + $contained_install.stderr) | str contains "must not resolve inside") "installer config-containment error was not actionable"
+            assert equal (open ($contained_nurl | path join "api.nu") --raw) "managed api bytes" "installer config symlink corrupted managed Nurl bytes"
+            assert ((child-paths-starting $contained_home ".nurl-stage.") | is-empty) "installer config-containment failure leaked staging"
+            let contained_remove = (^$bash -lc $"($contained_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
+            assert ($contained_remove.exit_code != 0) "uninstaller accepted config symlink into Nurl"
+            assert (($contained_remove.stdout + $contained_remove.stderr) | str contains "must not resolve inside") "uninstaller config-containment error was not actionable"
+            assert ($contained_nurl | path exists) "uninstaller config-containment failure removed Nurl"
+            assert ((child-paths-starting $contained_home ".nurl-backup-") | is-empty) "uninstaller config-containment failure created a backup"
+        }
+
+        let contained_dir_home = ($fixture | path join "contained-dir-home")
+        let contained_dir_nurl = ($contained_dir_home | path join ".nurl")
+        let contained_dir_link = ($contained_dir_home | path join "config-link")
+        mkdir $contained_dir_nurl
+        "managed config bytes" | save -f ($contained_dir_nurl | path join "config.nu")
+        let contained_dir_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $contained_dir_nurl)) (quote-for-bash (path-for-bash $bash $contained_dir_link))" | complete)
+        let actual_contained_dir = if $contained_dir_result.exit_code == 0 {
+            ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $contained_dir_link))" | complete
+        } else {
+            {exit_code: 1}
+        }
+        if $actual_contained_dir.exit_code == 0 {
+            let contained_dir_environment = (
+                "HOME=" + (quote-for-bash (path-for-bash $bash $contained_dir_home))
+                + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash (path-for-bash $bash $contained_dir_link))
+                + " NURL_INSTALLER_NU_VERSION=0.113.1"
+                + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+                + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "contained-dir-curl.log")))
+                + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "contained-dir-downloads.log")))
+            )
+            let contained_dir_install = (^$bash -lc $"($contained_dir_environment) /bin/bash (quote-for-bash $installer)" | complete)
+            assert ($contained_dir_install.exit_code != 0) "installer accepted config directory symlink into Nurl"
+            assert equal (open ($contained_dir_nurl | path join "config.nu") --raw) "managed config bytes" "installer config directory symlink corrupted Nurl"
+        }
+
+        let dot_home = ($fixture | path join "dot-home")
+        let dot_nurl = ($dot_home | path join ".nurl")
+        mkdir $dot_nurl
+        "dot-path managed bytes" | save -f ($dot_nurl | path join "config.nu")
+        let dot_environment = (
+            "HOME=" + (quote-for-bash (path-for-bash $bash $dot_home))
+            + " PATH=" + (quote-for-bash $"($bash_tools):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            + " NURL_INSTALLER_CONFIG_DIR=" + (quote-for-bash ((path-for-bash $bash $dot_home) + "/missing/../.nurl"))
+            + " NURL_INSTALLER_NU_VERSION=0.113.1"
+            + " NURL_INSTALLER_CURL_VERSION_LINE=" + (quote-for-bash "curl 8.13.0 libcurl/8.13.0")
+            + " NURL_INSTALLER_CURL_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "dot-curl.log")))
+            + " NURL_INSTALLER_DOWNLOAD_LOG=" + (quote-for-bash (path-for-bash $bash ($fixture | path join "dot-downloads.log")))
+        )
+        let dot_install = (^$bash -lc $"($dot_environment) /bin/bash (quote-for-bash $installer)" | complete)
+        assert ($dot_install.exit_code != 0) "installer accepted unresolved dot components in config path"
+        assert equal (open ($dot_nurl | path join "config.nu") --raw) "dot-path managed bytes" "dot-component config path corrupted Nurl"
+        assert (not (($fixture | path join "dot-downloads.log") | path exists)) "dot-component config rejection happened after downloads"
+
         let xdg_home = ($fixture | path join "xdg-home")
         let xdg_root = ($fixture | path join "xdg-root")
         mkdir $xdg_home
@@ -1171,7 +1456,12 @@ def test-shell-config-ownership-and-resolution [] {
         let mixed_original = "# alpha\r\n\r# beta\n# gamma\r"
         $mixed_original | save -f ($mixed_config_dir | path join "config.nu")
         let mixed_link_result = (^$bash -lc $"ln -s (quote-for-bash (path-for-bash $bash $mixed_target)) (quote-for-bash (path-for-bash $bash $mixed_link))" | complete)
-        let mixed_resolved = if $mixed_link_result.exit_code == 0 {
+        let actual_mixed_link = if $mixed_link_result.exit_code == 0 {
+            ^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $mixed_link))" | complete
+        } else {
+            {exit_code: 1}
+        }
+        let mixed_resolved = if $actual_mixed_link.exit_code == 0 {
             $mixed_link | path join "nushell"
         } else {
             $mixed_config_dir
@@ -1190,6 +1480,10 @@ def test-shell-config-ownership-and-resolution [] {
         let mixed_remove = (^$bash -lc $"($mixed_environment) /bin/bash (quote-for-bash $uninstaller) --yes" | complete)
         assert equal $mixed_remove.exit_code 0 $"mixed-EOL shell uninstall failed: ($mixed_remove.stderr)"
         assert equal (open ($mixed_config_dir | path join "config.nu") --raw) $mixed_original "mixed/CR-only config bytes did not round-trip"
+        if $actual_mixed_link.exit_code == 0 {
+            let parent_link_after = (^$bash -lc $"test -L (quote-for-bash (path-for-bash $bash $mixed_link))" | complete)
+            assert equal $parent_link_after.exit_code 0 "packaging replaced the symlinked config parent"
+        }
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -1289,6 +1583,42 @@ $env:Path = $ToolsPath
         assert equal $empty_result.exit_code 0 $"PowerShell sentinel-only uninstall failed: ($empty_result.stderr)"
         assert equal (ls $empty_config | first | get size) 0B "PowerShell sentinel-only config was not emptied safely"
 
+        let uninstall_temp_home = ($fixture | path join "uninstall-temp-home")
+        let uninstall_temp_appdata = ($fixture | path join "uninstall-temp-appdata")
+        let uninstall_temp_resolved = ($uninstall_temp_appdata | path join "nushell")
+        mkdir ($uninstall_temp_home | path join ".nurl")
+        mkdir $uninstall_temp_appdata
+        mkdir $uninstall_temp_resolved
+        "uninstall temp data" | save -f ($uninstall_temp_home | path join ".nurl" "data.nuon")
+        let uninstall_temp_config = ($uninstall_temp_resolved | path join "config.nu")
+        let write_uninstall_temp_config = '[System.IO.File]::WriteAllText($env:NURL_TEST_CONFIG_PATH, "# >>> nurl >>>`r`nsource ~/.nurl/api.nu`r`n# <<< nurl <<<`r`nkeep`r`n", [System.Text.UTF8Encoding]::new($false))'
+        let uninstall_temp_written = (with-env {NURL_TEST_CONFIG_PATH: $uninstall_temp_config} {
+            ^powershell.exe -NoProfile -NonInteractive -Command $write_uninstall_temp_config | complete
+        })
+        assert equal $uninstall_temp_written.exit_code 0
+        let uninstall_conflict_harness = ($fixture | path join "run-uninstaller-conflict.ps1")
+        'param($Uninstaller, $HomePath, $AppDataPath, $ToolsPath, $ConfigPath)
+$env:USERPROFILE = $HomePath
+$env:HOME = $HomePath
+$env:APPDATA = $AppDataPath
+$env:Path = $ToolsPath
+function Move-Item {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$LiteralPath, [Parameter(Mandatory)]$Destination, [switch]$Force)
+    if ([string]$LiteralPath -eq [System.IO.Path]::Combine($HomePath, ".nurl")) {
+        [System.IO.File]::WriteAllText($ConfigPath, "concurrent uninstall config")
+    }
+    Microsoft.PowerShell.Management\Move-Item @PSBoundParameters
+}
+& $Uninstaller -Yes
+' | save -f $uninstall_conflict_harness
+        let uninstall_temp_result = (^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstall_conflict_harness ($env.NURL_REPO_ROOT | path join "uninstall.ps1") $uninstall_temp_home $uninstall_temp_appdata $tools $uninstall_temp_config | complete)
+        assert ($uninstall_temp_result.exit_code != 0) $"PowerShell uninstall config promotion failure unexpectedly succeeded: output=(($uninstall_temp_result.stdout + $uninstall_temp_result.stderr) | to nuon) config=(open $uninstall_temp_config --raw | to nuon)"
+        assert (($uninstall_temp_result.stdout + $uninstall_temp_result.stderr) | str contains "config changed during uninstall") "PowerShell uninstall config conflict was not actionable"
+        assert equal (open $uninstall_temp_config --raw) "concurrent uninstall config" "PowerShell uninstall conflict overwrote the concurrent edit"
+        assert ((child-paths-starting $uninstall_temp_resolved ".config.nu.nurl.") | is-empty) "PowerShell uninstall config promotion failure leaked a temp"
+        assert equal ((child-paths-starting $uninstall_temp_home ".nurl-backup-") | length) 1 "PowerShell uninstall config promotion failure lost its verified backup"
+
         let reparse_home = ($fixture | path join "reparse-home")
         let reparse_appdata = ($fixture | path join "reparse-appdata")
         let reparse_external = ($fixture | path join "reparse-external")
@@ -1351,6 +1681,33 @@ $env:Path = $ToolsPath
         assert equal (open $invalid_config --raw) $invalid_bytes "PowerShell invalid-encoding uninstall changed config bytes"
         assert ((child-paths-starting $invalid_home ".nurl-backup-") | is-empty) "PowerShell invalid-encoding uninstall created a backup"
 
+        let contained_ps_home = ($fixture | path join "contained-ps-home")
+        let contained_ps_appdata = ($fixture | path join "contained-ps-appdata")
+        let contained_ps_nurl = ($contained_ps_home | path join ".nurl")
+        mkdir $contained_ps_nurl
+        mkdir $contained_ps_appdata
+        "PowerShell managed config bytes" | save -f ($contained_ps_nurl | path join "config.nu")
+        let contained_ps_install = (with-env {
+            NURL_INSTALLER_NU_VERSION: "0.113.1"
+            NURL_INSTALLER_CONFIG_DIR: $contained_ps_nurl
+            NURL_INSTALLER_CURL_VERSION_LINE: "curl 8.13.0 libcurl/8.13.0"
+            NURL_INSTALLER_CURL_EXIT: "0"
+            NURL_INSTALLER_CURL_STDERR: ""
+            NURL_INSTALLER_CURL_LOG: ($fixture | path join "contained-ps-curl.log")
+            NURL_INSTALLER_DOWNLOAD_LOG: ($fixture | path join "contained-ps-downloads.log")
+        } {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer_harness ($env.NURL_REPO_ROOT | path join "install.ps1") $contained_ps_home $contained_ps_appdata $tools | complete
+        })
+        assert ($contained_ps_install.exit_code != 0) "PowerShell installer accepted config inside Nurl"
+        assert (($contained_ps_install.stdout + $contained_ps_install.stderr) | str contains "must not resolve inside") "PowerShell installer containment error was not actionable"
+        assert equal (open ($contained_ps_nurl | path join "config.nu") --raw) "PowerShell managed config bytes" "PowerShell installer containment changed Nurl bytes"
+        let contained_ps_remove = (with-env {NURL_INSTALLER_CONFIG_DIR: $contained_ps_nurl} {
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $uninstall_harness ($env.NURL_REPO_ROOT | path join "uninstall.ps1") $contained_ps_home $contained_ps_appdata $tools | complete
+        })
+        assert ($contained_ps_remove.exit_code != 0) "PowerShell uninstaller accepted config inside Nurl"
+        assert (($contained_ps_remove.stdout + $contained_ps_remove.stderr) | str contains "must not resolve inside") "PowerShell uninstaller containment error was not actionable"
+        assert ($contained_ps_nurl | path exists) "PowerShell uninstaller containment removed Nurl"
+
         let installer_source = (open ($env.NURL_REPO_ROOT | path join "install.ps1") --raw)
         let uninstaller_source = (open ($env.NURL_REPO_ROOT | path join "uninstall.ps1") --raw)
         assert equal ($installer_source | parse --regex '(?m)^\s*exit(?:\s|$)' | length) 0 "PowerShell installer contains a host-killing exit"
@@ -1401,7 +1758,7 @@ $env:HOME = $HomePath
 $env:APPDATA = $AppDataPath
 $env:Path = $ToolsPath
 $env:NURL_ASSUME_YES = "1"
-function Copy-Item { throw "forced copy failure" }
+function Move-Item { throw "forced backup detach failure" }
 $script = [System.IO.File]::ReadAllText($Uninstaller)
 try { Invoke-Expression $script } catch { Write-Output "CAUGHT-UNINSTALL" }
 Write-Output "HOST-ALIVE-UNINSTALL"
@@ -1616,6 +1973,45 @@ def test-installer-script-syntax [] {
     assert ($uninstall_source | str contains "! -type d ! -type f") "shell uninstall does not reject special backup entries"
 }
 
+def test-reviewed-packaging-safety-contracts [] {
+    let repo = $env.NURL_REPO_ROOT
+    let install_sh = (open ($repo | path join "install.sh") --raw)
+    let uninstall_sh = (open ($repo | path join "uninstall.sh") --raw)
+    let install_ps = (open ($repo | path join "install.ps1") --raw)
+    let uninstall_ps = (open ($repo | path join "uninstall.ps1") --raw)
+
+    assert ($uninstall_sh | str contains "elif { exec 3<>/dev/tty; } 2>/dev/null; then") "shell TTY probe no longer scopes stderr suppression"
+    assert (not ($uninstall_sh | str contains "elif exec 3<>/dev/tty 2>/dev/null; then")) "unsafe shell TTY exec redirection returned"
+    for shell_source in [$install_sh $uninstall_sh] {
+        assert ($shell_source | str contains "canonicalize_directory_path") "shell config containment is not canonical"
+        assert ($shell_source | str contains "resolve_config_path") "shell config symlink support is missing"
+        assert ($shell_source | str contains "get_file_mode") "shell config mode preservation is missing"
+        assert ($shell_source | str contains "must not resolve inside") "shell config containment guard is missing"
+    }
+    assert ($uninstall_sh | str contains "Could not create an atomic temp beside Nushell config") "uninstall does not preflight adjacent config temp creation"
+    for ps_source in [$install_ps $uninstall_ps] {
+        assert ($ps_source | str contains "[AllowEmptyString()][string]$Line") "PowerShell legacy-source check rejects blank config lines"
+        assert ($ps_source | str contains '$PSStyle.OutputRendering = $previousOutputRendering') "PowerShell host rendering state is not restored"
+        assert ($ps_source | str contains "invalid or unsupported text encoding") "PowerShell encoding failure is not actionable"
+    }
+    assert ($install_ps | str contains "config temporary file remains") "PowerShell install temp cleanup diagnostic is missing"
+    assert ($uninstall_ps | str contains '$configTemps') "PowerShell uninstall does not track config temps"
+    assert ($install_ps | str contains "Get-NurlTreeManifest") "PowerShell fresh rollback has no staged manifest"
+    assert ($install_ps | str contains "preserved the visible fresh installation") "PowerShell fresh rollback does not preserve concurrent data"
+    assert ($install_ps | str contains "[System.IO.File]::Replace") "PowerShell installer config replacement is not atomic"
+    assert ($uninstall_ps | str contains "[System.IO.File]::Replace") "PowerShell uninstaller config replacement is not atomic"
+    for ps_source in [$install_ps $uninstall_ps] {
+        assert ($ps_source | str contains "Test-NurlPathContained") "PowerShell config containment guard is missing"
+        assert ($ps_source | str contains "must not resolve inside") "PowerShell config containment diagnostic is missing"
+    }
+    let ps_track_index = ($uninstall_ps | str index-of '$configTemps.Add($temp)')
+    let ps_write_index = ($uninstall_ps | str index-of '[System.IO.File]::WriteAllBytes($temp')
+    assert ($ps_track_index >= 0 and $ps_track_index < $ps_write_index) "PowerShell uninstall tracks config temp after writing it"
+    let shell_track_index = ($uninstall_sh | str index-of 'CONFIG_TEMPS+=("$config_temp")')
+    let shell_copy_index = ($uninstall_sh | str index-of 'cp "$candidate" "$config_temp"')
+    assert ($shell_track_index >= 0 and $shell_track_index < $shell_copy_index) "shell uninstall tracks config temp after populating it"
+}
+
 def test-command-discovery-source-duplicates [] {
     let repo = $env.NURL_REPO_ROOT
     let discover = ($repo | path join ".github" "skills" "validate-nurl-api" "scripts" "discover-commands.nu")
@@ -1821,6 +2217,7 @@ export def run-suite-packaging []: nothing -> list<record> {
         (run-test "shell uninstall requires explicit non-TTY consent and verifies complete backups" { test-shell-uninstall-backup-and-consent })
         (run-test "shell config ownership preserves unrelated bytes and honors resolved/XDG paths" { test-shell-config-ownership-and-resolution })
         (run-test "PowerShell config ownership and failures preserve the invoking host" { test-powershell-config-and-host-safety })
+        (run-test "reviewed packaging safety contracts remain explicit" { test-reviewed-packaging-safety-contracts })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })
         (run-test "command discovery exact-matches curated help entries" { test-command-discovery-exact-help })
         (run-test "SAML CRUD commands and examples stay synchronized across help and coverage" { test-saml-help-coverage-integration })

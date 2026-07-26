@@ -113,7 +113,12 @@ param()
                 Preamble = [byte[]]@()
             }
             $text = "# >>> nurl >>>`r`nsource ~/.nurl/api.nu`r`n# <<< nurl <<<`r`n"
-            return [pscustomobject]@{ Changed = $true; Bytes = (ConvertTo-NurlBytes $text $file) }
+            return [pscustomobject]@{
+                Changed = $true
+                Bytes = (ConvertTo-NurlBytes $text $file)
+                OriginalExists = $false
+                OriginalBytes = [byte[]]@()
+            }
         }
 
         $file = Get-NurlTextFile $Path
@@ -141,7 +146,12 @@ param()
             throw "Nushell config contains an unterminated Nurl sentinel block: $Path"
         }
         if ($ownedStart -ge 0 -and $ownedEnd -ge $ownedStart) {
-            return [pscustomobject]@{ Changed = $false; Bytes = $file.Bytes }
+            return [pscustomobject]@{
+                Changed = $false
+                Bytes = $file.Bytes
+                OriginalExists = $true
+                OriginalBytes = $file.Bytes
+            }
         }
 
         $newline = [Environment]::NewLine
@@ -187,6 +197,8 @@ param()
         [pscustomobject]@{
             Changed = $true
             Bytes = ConvertTo-NurlBytes $builder.ToString() $file
+            OriginalExists = $true
+            OriginalBytes = $file.Bytes
         }
     }
 
@@ -220,6 +232,17 @@ param()
         }
     }
 
+    function Test-NurlPathContained {
+        param(
+            [Parameter(Mandatory)][string]$Root,
+            [Parameter(Mandatory)][string]$Candidate
+        )
+        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@("\", "/"))
+        $candidatePath = [System.IO.Path]::GetFullPath($Candidate).TrimEnd([char[]]@("\", "/"))
+        $candidatePath.Equals($rootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidatePath.StartsWith($rootPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
     function Invoke-NurlCapture {
         param(
             [Parameter(Mandatory)][string]$FilePath,
@@ -234,6 +257,33 @@ param()
             $ErrorActionPreference = $previousPreference
         }
         [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+    }
+
+    function Get-NurlTreeManifest {
+        param([Parameter(Mandatory)][string]$Root)
+        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@("\", "/"))
+        @(
+            Get-ChildItem -LiteralPath $rootPath -Force -Recurse |
+                ForEach-Object {
+                    $relative = $_.FullName.Substring($rootPath.Length).TrimStart([char[]]@("\", "/")).Replace("\", "/")
+                    if ($_.PSIsContainer) {
+                        "D|$relative"
+                    } else {
+                        $stream = [System.IO.File]::OpenRead($_.FullName)
+                        try {
+                            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                            try {
+                                $hash = [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace("-", "")
+                            } finally {
+                                $sha256.Dispose()
+                            }
+                        } finally {
+                            $stream.Dispose()
+                        }
+                        "F|$relative|$($_.Length)|$hash"
+                    }
+                } | Sort-Object
+        )
     }
 
     function Invoke-NurlInstall {
@@ -307,6 +357,10 @@ param()
         if ($null -ne $existingConfig -and ($existingConfig.PSIsContainer -or (($existingConfig.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
             throw "Refusing to replace non-file Nushell config path: $ConfigPath"
         }
+        if ((Test-NurlPathContained $NurlHome $NushellConfigDir) -or
+            (Test-NurlPathContained $NurlHome $ConfigPath)) {
+            throw "Nushell config must not resolve inside $NurlHome."
+        }
         $IsUpdate = Test-Path -LiteralPath $NurlHome -PathType Container
         if ($IsUpdate) {
             Write-Host "Existing installation detected. Updating..." -ForegroundColor Yellow
@@ -318,9 +372,11 @@ param()
         $promotionStarted = $false
         $committed = $false
         $freshPromoted = $false
+        $freshManifest = @()
         $rollbackRecords = [System.Collections.Generic.List[object]]::new()
         $createdDirectories = [System.Collections.Generic.List[string]]::new()
         $rollbackState = [pscustomobject]@{ Failed = $false }
+        $configTemp = $null
 
         function Ensure-TrackedDirectory {
             param([Parameter(Mandatory)][string]$Path)
@@ -357,9 +413,9 @@ param()
                 $backup = Join-Path $RollbackRoot $BackupName
                 [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $backup))
                 Copy-Item -LiteralPath $Destination -Destination $backup -Force
-                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $backup; Created = $false })
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $backup; Created = $false; CandidateBytes = $null })
             } else {
-                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true })
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true; CandidateBytes = $null })
             }
             Move-Item -LiteralPath $Source -Destination $Destination -Force
         }
@@ -375,6 +431,49 @@ param()
             }
         }
 
+        function Promote-NurlConfig {
+            param(
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Destination,
+                [Parameter(Mandatory)][bool]$OriginalExists,
+                [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$OriginalBytes,
+                [Parameter(Mandatory)][byte[]]$CandidateBytes
+            )
+            Ensure-TrackedDirectory (Split-Path -Parent $Destination)
+            $existing = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                if ($existing.PSIsContainer -or (($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    throw "Refusing to replace non-file Nushell config path: $Destination"
+                }
+                $backup = Join-Path (Split-Path -Parent $Destination) (".config.nu.nurl.rollback." + [guid]::NewGuid().ToString("N"))
+                [System.IO.File]::Replace($Source, $Destination, $backup)
+                $displacedBytes = [System.IO.File]::ReadAllBytes($backup)
+                if (-not $OriginalExists -or
+                    [Convert]::ToBase64String($displacedBytes) -cne [Convert]::ToBase64String($OriginalBytes)) {
+                    $candidateRecovery = $backup + ".candidate"
+                    try {
+                        [System.IO.File]::Replace($backup, $Destination, $candidateRecovery)
+                    } catch {
+                        throw "Nushell config changed during installation and automatic restoration failed. Recovery file: $backup"
+                    }
+                    $replacedBytes = [System.IO.File]::ReadAllBytes($candidateRecovery)
+                    if ([Convert]::ToBase64String($replacedBytes) -ceq [Convert]::ToBase64String($CandidateBytes)) {
+                        Remove-Item -LiteralPath $candidateRecovery -Force -ErrorAction SilentlyContinue
+                    } else {
+                        throw "Nushell config changed again during restoration. The latest edit remains at $candidateRecovery"
+                    }
+                    throw "Nushell config changed during installation; the concurrent edit was restored."
+                }
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $backup; Created = $false; CandidateBytes = $CandidateBytes })
+            } else {
+                if ($OriginalExists) {
+                    throw "Nushell config disappeared during installation; no config changes were applied."
+                }
+                [System.IO.File]::Move($Source, $Destination)
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true; CandidateBytes = $CandidateBytes })
+            }
+        }
+
         function Undo-NurlPromotion {
             $oldPreference = $ErrorActionPreference
             try {
@@ -382,6 +481,11 @@ param()
                 for ($index = $rollbackRecords.Count - 1; $index -ge 0; $index--) {
                     $record = $rollbackRecords[$index]
                     try {
+                        if ($null -ne $record.CandidateBytes) {
+                            $rollbackState.Failed = $true
+                            [Console]::Error.WriteLine("Warning: rollback preserved the live config; recovery remains at '$($record.Backup)'.")
+                            continue
+                        }
                         if ($null -ne (Get-Item -LiteralPath $record.Destination -Force -ErrorAction SilentlyContinue)) {
                             Remove-Item -LiteralPath $record.Destination -Recurse -Force -ErrorAction Stop
                         }
@@ -394,12 +498,8 @@ param()
                     }
                 }
                 if ($freshPromoted) {
-                    try {
-                        Remove-Item -LiteralPath $NurlHome -Recurse -Force -ErrorAction Stop
-                    } catch {
-                        $rollbackState.Failed = $true
-                        [Console]::Error.WriteLine("Warning: rollback could not remove '$NurlHome': $($_.Exception.Message)")
-                    }
+                    $rollbackState.Failed = $true
+                    [Console]::Error.WriteLine("Warning: rollback preserved the visible fresh installation to avoid deleting concurrent data.")
                 }
                 for ($index = $createdDirectories.Count - 1; $index -ge 0; $index--) {
                     $directory = $createdDirectories[$index]
@@ -490,6 +590,7 @@ param()
             Write-Host "[3/4] Promoting validated payloads..."
             $promotionStarted = $true
             if (-not $IsUpdate) {
+                $freshManifest = @(Get-NurlTreeManifest $PayloadRoot)
                 [System.IO.Directory]::Move($PayloadRoot, $NurlHome)
                 $freshPromoted = $true
             } else {
@@ -509,7 +610,7 @@ param()
                 $installedCollection = Join-Path $NurlHome "collections\jsonplaceholder"
                 if ((Test-Path -LiteralPath $stagedCollection) -and $null -eq (Get-Item -LiteralPath $installedCollection -Force -ErrorAction SilentlyContinue)) {
                     [System.IO.Directory]::Move($stagedCollection, $installedCollection)
-                    $rollbackRecords.Add([pscustomobject]@{ Destination = $installedCollection; Backup = $null; Created = $true })
+                    $rollbackRecords.Add([pscustomobject]@{ Destination = $installedCollection; Backup = $null; Created = $true; CandidateBytes = $null })
                 }
                 $stagedChain = Join-Path $PayloadRoot "chains\example-workflow.nuon"
                 if (Test-Path -LiteralPath $stagedChain) {
@@ -522,15 +623,38 @@ param()
                 Ensure-TrackedDirectory $NushellConfigDir
                 $configTemp = Join-Path $NushellConfigDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
                 [System.IO.File]::WriteAllBytes($configTemp, $configEdit.Bytes)
-                Promote-NurlFile $configTemp $ConfigPath "nushell-config.nu"
+                if ($configEdit.OriginalExists) {
+                    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+                        throw "Nushell config changed during installation; no config changes were applied."
+                    }
+                    $currentConfigBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+                    if ([Convert]::ToBase64String($currentConfigBytes) -cne [Convert]::ToBase64String([byte[]]$configEdit.OriginalBytes)) {
+                        throw "Nushell config changed during installation; no config changes were applied."
+                    }
+                } elseif (Test-Path -LiteralPath $ConfigPath) {
+                    throw "Nushell config appeared during installation; no config changes were applied."
+                }
+                Promote-NurlConfig $configTemp $ConfigPath $configEdit.OriginalExists ([byte[]]$configEdit.OriginalBytes) ([byte[]]$configEdit.Bytes)
                 Write-Host "  Added the owned Nurl block to $ConfigPath"
             } else {
                 Write-Host "  Nushell config already contains the owned Nurl block"
             }
 
             $committed = $true
+            foreach ($record in $rollbackRecords) {
+                if ($null -ne $record.Backup -and (Test-Path -LiteralPath $record.Backup)) {
+                    Remove-Item -LiteralPath $record.Backup -Force -ErrorAction SilentlyContinue
+                }
+            }
             Remove-Item -LiteralPath $RollbackRoot -Recurse -Force
         } finally {
+            if ($null -ne $configTemp -and (Test-Path -LiteralPath $configTemp)) {
+                try {
+                    Remove-Item -LiteralPath $configTemp -Force -ErrorAction Stop
+                } catch {
+                    [Console]::Error.WriteLine("Warning: config temporary file remains at '$configTemp': $($_.Exception.Message)")
+                }
+            }
             if ($promotionStarted -and -not $committed) {
                 try {
                     Undo-NurlPromotion

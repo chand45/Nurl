@@ -31,11 +31,16 @@ ROLLBACK_DIR=''
 PROMOTION_STARTED=false
 COMMITTED=false
 FRESH_PROMOTED=false
+FRESH_SIGNATURE=''
 BACKUP_DESTS=()
 BACKUP_PATHS=()
+BACKUP_CANDIDATES=()
 CREATED_PATHS=()
+CREATED_CANDIDATES=()
 CREATED_DIRS=()
 CONFIG_TEMP=''
+CONFIG_DISPLACED=''
+CONFIG_DISPLACED_DEST=''
 ROLLBACK_FAILED=false
 
 version_at_least() {
@@ -65,6 +70,120 @@ trim_ascii_space() {
     value="${value#"${value%%[!$' \t']*}"}"
     value="${value%"${value##*[!$' \t']}"}"
     printf '%s' "$value"
+}
+
+resolve_config_path() {
+    local path="$1"
+    local target parent
+    local depth=0
+    while [[ -L "$path" ]]; do
+        if (( depth >= 16 )); then
+            return 1
+        fi
+        target="$(readlink "$path")" || return 1
+        if [[ "$target" == /* ]]; then
+            path="$target"
+        else
+            path="$(dirname "$path")/$target"
+        fi
+        parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+        path="$parent/$(basename "$path")"
+        depth=$((depth + 1))
+    done
+    parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+    printf '%s/%s' "$parent" "$(basename "$path")"
+}
+
+get_file_mode() {
+    local path="$1"
+    stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null
+}
+
+restore_displaced_config() {
+    local displaced="$1"
+    local destination="$2"
+    if [[ ! -e "$displaced" ]]; then
+        return 0
+    fi
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        return 1
+    fi
+    if ln "$displaced" "$destination"; then
+        rm -f "$displaced"
+        return 0
+    fi
+    return 1
+}
+
+replace_config_safely() {
+    local source="$1"
+    local destination="$2"
+    local snapshot="$3"
+    local original_exists="$4"
+    local parent displaced
+    LAST_CONFIG_BACKUP=''
+
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        displaced="$(mktemp "$(dirname "$destination")/.config.nu.nurl.rollback.XXXXXX")"
+        rm -f "$displaced"
+        CONFIG_DISPLACED="$displaced"
+        CONFIG_DISPLACED_DEST="$destination"
+        mv "$destination" "$displaced"
+        if [[ "$original_exists" != true ]] || ! cmp -s "$snapshot" "$displaced"; then
+            if ! restore_displaced_config "$displaced" "$destination"; then
+                echo "Error: Nushell config changed and recovery remains at $displaced." >&2
+                ROLLBACK_FAILED=true
+            fi
+            CONFIG_DISPLACED=''
+            CONFIG_DISPLACED_DEST=''
+            echo "Error: Nushell config changed during installation; the concurrent edit was preserved." >&2
+            return 1
+        fi
+        if ! ln "$source" "$destination"; then
+            restore_displaced_config "$displaced" "$destination" || {
+                echo "Error: Nushell config recovery remains at $displaced." >&2
+                ROLLBACK_FAILED=true
+            }
+            CONFIG_DISPLACED=''
+            CONFIG_DISPLACED_DEST=''
+            return 1
+        fi
+        rm -f "$source"
+        LAST_CONFIG_BACKUP="$displaced"
+        CONFIG_DISPLACED=''
+        CONFIG_DISPLACED_DEST=''
+    else
+        if [[ "$original_exists" == true ]]; then
+            echo "Error: Nushell config disappeared during installation; no config changes were applied." >&2
+            return 1
+        fi
+        ln "$source" "$destination"
+        rm -f "$source"
+    fi
+}
+
+canonicalize_directory_path() {
+    local path="$1"
+    local suffix=''
+    local parent component
+    while [[ ! -e "$path" ]]; do
+        if [[ -L "$path" ]]; then
+            return 1
+        fi
+        component="$(basename "$path")"
+        if [[ "$component" == '.' || "$component" == '..' ]]; then
+            return 1
+        fi
+        suffix="/$component$suffix"
+        parent="$(dirname "$path")"
+        if [[ "$parent" == "$path" ]]; then
+            return 1
+        fi
+        path="$parent"
+    done
+    [[ -d "$path" ]] || return 1
+    path="$(cd -P "$path" 2>/dev/null && pwd)" || return 1
+    printf '%s%s' "$path" "$suffix"
 }
 
 read_config_records() {
@@ -303,8 +422,10 @@ promote_file() {
         cp -pP "$destination" "$backup"
         BACKUP_DESTS+=("$destination")
         BACKUP_PATHS+=("$backup")
+        BACKUP_CANDIDATES+=('')
     else
         CREATED_PATHS+=("$destination")
+        CREATED_CANDIDATES+=('')
     fi
     mv -f "$source" "$destination"
 }
@@ -323,12 +444,22 @@ rollback_install() {
     ROLLBACK_FAILED=false
     local index
     for ((index = ${#CREATED_PATHS[@]} - 1; index >= 0; index--)); do
+        if [[ -n "${CREATED_CANDIDATES[$index]}" ]]; then
+            echo "Warning: rollback preserved the live created config to avoid deleting concurrent data." >&2
+            ROLLBACK_FAILED=true
+            continue
+        fi
         if ! rm -rf "${CREATED_PATHS[$index]}"; then
             echo "Warning: rollback could not remove '${CREATED_PATHS[$index]}'." >&2
             ROLLBACK_FAILED=true
         fi
     done
     for ((index = ${#BACKUP_DESTS[@]} - 1; index >= 0; index--)); do
+        if [[ -n "${BACKUP_CANDIDATES[$index]}" ]]; then
+            echo "Warning: rollback preserved the live config; recovery remains at '${BACKUP_PATHS[$index]}'." >&2
+            ROLLBACK_FAILED=true
+            continue
+        fi
         if ! rm -rf "${BACKUP_DESTS[$index]}" ||
            ! mv -f "${BACKUP_PATHS[$index]}" "${BACKUP_DESTS[$index]}"; then
             echo "Warning: rollback could not restore '${BACKUP_DESTS[$index]}'." >&2
@@ -336,10 +467,8 @@ rollback_install() {
         fi
     done
     if [[ "$FRESH_PROMOTED" == true ]]; then
-        if ! rm -rf "$NURL_HOME"; then
-            echo "Warning: rollback could not remove '$NURL_HOME'." >&2
-            ROLLBACK_FAILED=true
-        fi
+        echo "Warning: rollback preserved the visible fresh installation to avoid deleting concurrent data." >&2
+        ROLLBACK_FAILED=true
     fi
     for ((index = ${#CREATED_DIRS[@]} - 1; index >= 0; index--)); do
         rmdir "${CREATED_DIRS[$index]}" 2>/dev/null || true
@@ -348,11 +477,17 @@ rollback_install() {
 
 finish() {
     local status=$?
-    if [[ "$status" -ne 0 && "$PROMOTION_STARTED" == true && "$COMMITTED" != true ]]; then
-        rollback_install
-    fi
     if [[ -n "$CONFIG_TEMP" && -e "$CONFIG_TEMP" ]]; then
         rm -f "$CONFIG_TEMP" || true
+    fi
+    if [[ -n "$CONFIG_DISPLACED" && -e "$CONFIG_DISPLACED" ]]; then
+        if ! restore_displaced_config "$CONFIG_DISPLACED" "$CONFIG_DISPLACED_DEST"; then
+            echo "Error: interrupted config recovery remains at $CONFIG_DISPLACED." >&2
+            ROLLBACK_FAILED=true
+        fi
+    fi
+    if [[ "$status" -ne 0 && "$PROMOTION_STARTED" == true && "$COMMITTED" != true ]]; then
+        rollback_install
     fi
     if [[ "$ROLLBACK_FAILED" == true ]]; then
         echo "Error: rollback was incomplete; recovery files remain at $ROLLBACK_DIR." >&2
@@ -427,23 +562,66 @@ if [[ -z "$NUSHELL_CONFIG_DIR" ]]; then
         NUSHELL_CONFIG_DIR="$HOME/.config/nushell"
     fi
 fi
-NUSHELL_CONFIG="$NUSHELL_CONFIG_DIR/config.nu"
+if [[ -L "$NURL_HOME" ]]; then
+    echo -e "${RED}Error: Refusing to install through a symlinked Nurl root: $NURL_HOME${NC}" >&2
+    exit 1
+fi
+NURL_HOME="$(canonicalize_directory_path "$NURL_HOME")" || {
+    echo -e "${RED}Error: Could not resolve Nurl installation path: $NURL_HOME${NC}" >&2
+    exit 1
+}
+HOME_BOUNDARY="$(canonicalize_directory_path "$HOME")" || {
+    echo -e "${RED}Error: Could not resolve the home directory: $HOME${NC}" >&2
+    exit 1
+}
 for install_directory in \
     "$NURL_HOME" \
     "$NURL_HOME/nu_modules" \
     "$NURL_HOME/collections" \
     "$NURL_HOME/chains" \
     "$NURL_HOME/history"; do
-    assert_safe_directory_chain "$install_directory" "$HOME"
+    assert_safe_directory_chain "$install_directory" "$HOME_BOUNDARY"
 done
-if [[ -L "$NUSHELL_CONFIG_DIR" || ( -e "$NUSHELL_CONFIG_DIR" && ! -d "$NUSHELL_CONFIG_DIR" ) ]]; then
+NUSHELL_CONFIG_DIR="$(canonicalize_directory_path "$NUSHELL_CONFIG_DIR")" || {
     echo -e "${RED}Error: Refusing to use a non-directory Nushell config path: $NUSHELL_CONFIG_DIR${NC}" >&2
     exit 1
-fi
-if [[ -L "$NUSHELL_CONFIG" || ( -e "$NUSHELL_CONFIG" && ! -f "$NUSHELL_CONFIG" ) ]]; then
+}
+NUSHELL_CONFIG="$NUSHELL_CONFIG_DIR/config.nu"
+if [[ -L "$NUSHELL_CONFIG" ]]; then
+    RESOLVED_CONFIG_FILE="$(resolve_config_path "$NUSHELL_CONFIG")" || {
+        echo -e "${RED}Error: Nushell config link could not be resolved safely: $NUSHELL_CONFIG${NC}" >&2
+        exit 1
+    }
+    if [[ ! -f "$RESOLVED_CONFIG_FILE" || ! -w "$RESOLVED_CONFIG_FILE" ]]; then
+        echo -e "${RED}Error: Nushell config link does not resolve to a writable file: $NUSHELL_CONFIG${NC}" >&2
+        exit 1
+    fi
+    NUSHELL_CONFIG="$RESOLVED_CONFIG_FILE"
+elif [[ -e "$NUSHELL_CONFIG" && ! -f "$NUSHELL_CONFIG" ]]; then
     echo -e "${RED}Error: Refusing to replace non-file Nushell config path: $NUSHELL_CONFIG${NC}" >&2
     exit 1
 fi
+CONFIG_TARGET_DIR="$(dirname "$NUSHELL_CONFIG")"
+CONFIG_WRITABLE_PARENT="$CONFIG_TARGET_DIR"
+while [[ ! -e "$CONFIG_WRITABLE_PARENT" ]]; do
+    CONFIG_WRITABLE_PARENT="$(dirname "$CONFIG_WRITABLE_PARENT")"
+done
+if [[ ! -d "$CONFIG_WRITABLE_PARENT" || ! -w "$CONFIG_WRITABLE_PARENT" ]]; then
+    echo -e "${RED}Error: Nushell config target directory is not writable: $CONFIG_TARGET_DIR${NC}" >&2
+    exit 1
+fi
+case "$NUSHELL_CONFIG_DIR/" in
+    "$NURL_HOME/"*)
+        echo -e "${RED}Error: Nushell config directory must not resolve inside $NURL_HOME.${NC}" >&2
+        exit 1
+        ;;
+esac
+case "$NUSHELL_CONFIG" in
+    "$NURL_HOME"|"$NURL_HOME"/*)
+        echo -e "${RED}Error: Nushell config file must not resolve inside $NURL_HOME.${NC}" >&2
+        exit 1
+        ;;
+esac
 
 IS_UPDATE=false
 if [[ -d "$NURL_HOME" ]]; then
@@ -515,11 +693,23 @@ if ! nu --no-config-file "$PAYLOAD_ROOT/api.nu" >/dev/null 2>&1; then
 fi
 
 CONFIG_CANDIDATE="$STAGE_ROOT/config.nu"
-prepare_config_candidate "$NUSHELL_CONFIG" "$CONFIG_CANDIDATE"
+CONFIG_ORIGINAL="$STAGE_ROOT/config.original"
+CONFIG_ORIGINAL_EXISTS=false
+CONFIG_MODE=''
+if [[ -f "$NUSHELL_CONFIG" ]]; then
+    cp -p "$NUSHELL_CONFIG" "$CONFIG_ORIGINAL"
+    CONFIG_ORIGINAL_EXISTS=true
+    CONFIG_MODE="$(get_file_mode "$NUSHELL_CONFIG")" || {
+        echo -e "${RED}Error: Could not determine Nushell config permissions: $NUSHELL_CONFIG${NC}" >&2
+        exit 1
+    }
+fi
+prepare_config_candidate "$CONFIG_ORIGINAL" "$CONFIG_CANDIDATE"
 
 echo "[3/4] Promoting validated payloads..."
 PROMOTION_STARTED=true
 if [[ "$IS_UPDATE" != true ]]; then
+    FRESH_SIGNATURE="$(cd "$PAYLOAD_ROOT" && tar -cf - . | cksum)"
     mv "$PAYLOAD_ROOT" "$NURL_HOME"
     FRESH_PROMOTED=true
 else
@@ -546,17 +736,31 @@ fi
 
 echo "[4/4] Configuring Nushell..."
 if [[ "$CONFIG_CHANGED" == true ]]; then
-    remember_created_dir "$NUSHELL_CONFIG_DIR"
-    CONFIG_TEMP="$(mktemp "$NUSHELL_CONFIG_DIR/.config.nu.nurl.XXXXXX")"
+    remember_created_dir "$CONFIG_TARGET_DIR"
+    CONFIG_TEMP="$(mktemp "$CONFIG_TARGET_DIR/.config.nu.nurl.XXXXXX")"
     cp "$CONFIG_CANDIDATE" "$CONFIG_TEMP"
-    promote_file "$CONFIG_TEMP" "$NUSHELL_CONFIG" "nushell-config.nu"
+    if [[ "$CONFIG_ORIGINAL_EXISTS" == true ]]; then
+        chmod "$CONFIG_MODE" "$CONFIG_TEMP"
+    fi
+    replace_config_safely "$CONFIG_TEMP" "$NUSHELL_CONFIG" "$CONFIG_ORIGINAL" "$CONFIG_ORIGINAL_EXISTS"
     CONFIG_TEMP=''
+    if [[ -n "$LAST_CONFIG_BACKUP" ]]; then
+        BACKUP_DESTS+=("$NUSHELL_CONFIG")
+        BACKUP_PATHS+=("$LAST_CONFIG_BACKUP")
+        BACKUP_CANDIDATES+=("$CONFIG_CANDIDATE")
+    else
+        CREATED_PATHS+=("$NUSHELL_CONFIG")
+        CREATED_CANDIDATES+=("$CONFIG_CANDIDATE")
+    fi
     echo "  Added the owned Nurl block to $NUSHELL_CONFIG"
 else
     echo "  Nushell config already contains the owned Nurl block"
 fi
 
 COMMITTED=true
+for backup_path in "${BACKUP_PATHS[@]}"; do
+    rm -f "$backup_path"
+done
 rm -rf "$ROLLBACK_DIR"
 
 echo

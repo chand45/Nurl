@@ -54,8 +54,10 @@ This installs Nurl to `~/.nurl` and adds an owned Nurl block to the `config.nu` 
 temporary staging directory before replacing live files. Failed downloads, HTTP errors, an
 unsupported Nushell version, or parse failures leave an existing installation and Nushell
 configuration unchanged. Collections, chains, history, and user `.nuon` files are never replaced
-during an update. Unsupported config encodings and install/config paths that cannot be updated
-without following a link are rejected before live files change.
+during an update. Unsupported config encodings and unsafe install paths are rejected before live
+files change. On Linux/macOS, writable `config.nu` and config-directory symlinks are resolved to
+their targets and preserved for dotfile-manager compatibility; PowerShell conservatively rejects
+reparse-point config paths.
 
 ### Manual Install (Alternative)
 
@@ -85,9 +87,10 @@ configuration.
 curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash -s -- --yes
 ```
 
-`-y` and `NURL_ASSUME_YES=1` are equivalent forms of explicit consent. For an interactive prompt,
-download the script first and run `bash uninstall.sh` from a terminal; a piped script without
-explicit consent aborts without mutation.
+`-y` and `NURL_ASSUME_YES=1` are equivalent forms of explicit consent. A piped script can prompt
+through `/dev/tty` when the process has a controlling terminal; without a usable terminal or
+explicit consent it aborts without mutation. You can also download the script first and run
+`bash uninstall.sh` interactively.
 
 **Windows (PowerShell, non-interactive):**
 ```powershell
@@ -98,9 +101,10 @@ For an interactive prompt, download `uninstall.ps1` and run it without `-Yes`; `
 provides explicit consent for a local script. PowerShell install/uninstall failures are catchable
 and do not terminate the invoking host session.
 
-Uninstall copies the complete `~/.nurl` tree to a timestamped backup and verifies every directory,
-file length, and file hash before removing the installation. If copying or verification fails,
-`~/.nurl` is left intact. The uninstaller removes only the owned Nurl config block, plus the exact
+Uninstall atomically moves the complete `~/.nurl` tree to a timestamped same-home backup and
+verifies its contents before considering the installation removed. If detaching or verification
+fails, Nurl data remains at its original path or in the reported backup. The uninstaller removes
+only the owned Nurl config block, plus the exact
 legacy source line used by older releases, from both the resolved and legacy config locations.
 Comments, aliases, encoding, mixed line endings, and trailing-newline state are preserved. Links
 and special files inside `~/.nurl` are rejected because they cannot be copied and verified as a

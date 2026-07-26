@@ -141,7 +141,11 @@ param(
             throw "Nushell config contains an unterminated Nurl sentinel block: $Path"
         }
         if (-not $removed) {
-            return [pscustomobject]@{ Changed = $false; Bytes = $file.Bytes }
+            return [pscustomobject]@{
+                Changed = $false
+                Bytes = $file.Bytes
+                OriginalBytes = $file.Bytes
+            }
         }
 
         if ($output.Count -gt 0) {
@@ -161,6 +165,7 @@ param(
         [pscustomobject]@{
             Changed = $true
             Bytes = ConvertTo-NurlBytes $builder.ToString() $file
+            OriginalBytes = $file.Bytes
         }
     }
 
@@ -209,6 +214,17 @@ param(
                 }
             }
         }
+    }
+
+    function Test-NurlPathContained {
+        param(
+            [Parameter(Mandatory)][string]$Root,
+            [Parameter(Mandatory)][string]$Candidate
+        )
+        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@("\", "/"))
+        $candidatePath = [System.IO.Path]::GetFullPath($Candidate).TrimEnd([char[]]@("\", "/"))
+        $candidatePath.Equals($rootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidatePath.StartsWith($rootPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
     }
 
     function Invoke-NurlCapture {
@@ -286,7 +302,12 @@ param(
             $configPaths.Add($legacyConfigPath)
         }
         $configEdits = [System.Collections.Generic.List[object]]::new()
+        $configTemps = [System.Collections.Generic.List[string]]::new()
+        $configReplacements = [System.Collections.Generic.List[object]]::new()
         foreach ($configPath in $configPaths) {
+            if (Test-NurlPathContained $NurlHome $configPath) {
+                throw "Nushell config must not resolve inside $NurlHome."
+            }
             $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
             if ($null -ne $configItem -and ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
                 throw "Refusing to replace a non-file Nushell config: $configPath"
@@ -294,7 +315,11 @@ param(
             if (Test-Path -LiteralPath $configPath -PathType Leaf) {
                 $edit = New-NurlUninstallConfig $configPath
                 if ($edit.Changed) {
-                    $configEdits.Add([pscustomobject]@{ Path = $configPath; Bytes = $edit.Bytes })
+                    $configEdits.Add([pscustomobject]@{
+                        Path = $configPath
+                        Bytes = $edit.Bytes
+                        OriginalBytes = $edit.OriginalBytes
+                    })
                 }
             }
         }
@@ -302,35 +327,117 @@ param(
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $BackupDir = Join-Path $env:USERPROFILE (".nurl-backup-$stamp-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
         $backupComplete = $false
+        $nurlDetached = $false
         try {
-            Write-Host "[1/3] Creating a complete backup..."
-            [void][System.IO.Directory]::CreateDirectory($BackupDir)
-            Get-ChildItem -LiteralPath $NurlHome -Force | Copy-Item -Destination $BackupDir -Recurse -Force
-            $sourceManifest = @(Get-NurlManifest $NurlHome)
-            $backupManifest = @(Get-NurlManifest $BackupDir)
-            if ([string]::Join("`n", $sourceManifest) -cne [string]::Join("`n", $backupManifest)) {
-                throw "Backup verification failed; Nurl was not removed."
-            }
-            $backupComplete = $true
-
-            Write-Host "[2/3] Removing $NurlHome..."
-            Remove-Item -LiteralPath $NurlHome -Recurse -Force
-            if (Test-Path -LiteralPath $NurlHome) {
-                throw "Nurl could not be completely removed. The verified backup remains at $BackupDir."
-            }
-
-            Write-Host "[3/3] Cleaning owned Nushell config entries..."
             foreach ($edit in $configEdits) {
                 $configDir = Split-Path -Parent $edit.Path
                 $temp = Join-Path $configDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                $configTemps.Add($temp)
                 [System.IO.File]::WriteAllBytes($temp, $edit.Bytes)
-                Move-Item -LiteralPath $temp -Destination $edit.Path -Force
+                $edit | Add-Member -NotePropertyName Temp -NotePropertyValue $temp
             }
+            $sourceManifest = @(Get-NurlManifest $NurlHome)
+            Write-Host "[1/3] Atomically creating a complete backup..."
+            Move-Item -LiteralPath $NurlHome -Destination $BackupDir
+            $nurlDetached = $true
+            $backupManifest = @(Get-NurlManifest $BackupDir)
+            if ([string]::Join("`n", $sourceManifest) -cne [string]::Join("`n", $backupManifest)) {
+                if (-not (Test-Path -LiteralPath $NurlHome)) {
+                    Move-Item -LiteralPath $BackupDir -Destination $NurlHome
+                    $nurlDetached = $false
+                }
+                throw "Backup verification failed; Nurl data was not deleted."
+            }
+            $backupComplete = $true
+
+            if (Test-Path -LiteralPath $NurlHome) {
+                throw "New Nurl data appeared during uninstall. It was left intact; the verified backup remains at $BackupDir."
+            }
+            Write-Host "[2/3] Nurl installation moved to the verified backup."
+
+            Write-Host "[3/3] Cleaning owned Nushell config entries..."
+            foreach ($edit in $configEdits) {
+                if (-not (Test-Path -LiteralPath $edit.Path -PathType Leaf)) {
+                    throw "Nushell config changed during uninstall. The Nurl backup remains at $BackupDir and config was not overwritten."
+                }
+                $currentConfigBytes = [System.IO.File]::ReadAllBytes($edit.Path)
+                if ([Convert]::ToBase64String($currentConfigBytes) -cne [Convert]::ToBase64String([byte[]]$edit.OriginalBytes)) {
+                    throw "Nushell config changed during uninstall. The Nurl backup remains at $BackupDir and config was not overwritten."
+                }
+                $replaceBackup = $edit.Temp + ".backup"
+                $configReplacements.Add([pscustomobject]@{
+                    Path = $edit.Path
+                    Backup = $replaceBackup
+                    CandidateBytes = $edit.Bytes
+                })
+                [System.IO.File]::Replace($edit.Temp, $edit.Path, $replaceBackup)
+                $displacedBytes = [System.IO.File]::ReadAllBytes($replaceBackup)
+                if ([Convert]::ToBase64String($displacedBytes) -cne [Convert]::ToBase64String([byte[]]$edit.OriginalBytes)) {
+                    $candidateRecovery = $replaceBackup + ".candidate"
+                    try {
+                        [System.IO.File]::Replace($replaceBackup, $edit.Path, $candidateRecovery)
+                    } catch {
+                        throw "Nushell config changed during uninstall and automatic restoration failed. Recovery file: $replaceBackup"
+                    }
+                    $replacedBytes = [System.IO.File]::ReadAllBytes($candidateRecovery)
+                    if ([Convert]::ToBase64String($replacedBytes) -ceq [Convert]::ToBase64String([byte[]]$edit.Bytes)) {
+                        Remove-Item -LiteralPath $candidateRecovery -Force -ErrorAction SilentlyContinue
+                    } else {
+                        throw "Nushell config changed again during restoration. The latest edit remains at $candidateRecovery"
+                    }
+                    throw "Nushell config changed during uninstall; the concurrent edit was restored. The Nurl backup remains at $BackupDir."
+                }
+            }
+            foreach ($replacement in $configReplacements) {
+                Remove-Item -LiteralPath $replacement.Backup -Force -ErrorAction SilentlyContinue
+            }
+            $configReplacements.Clear()
         } catch {
-            if (-not $backupComplete -and (Test-Path -LiteralPath $BackupDir)) {
-                Remove-Item -LiteralPath $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
+            for ($index = $configReplacements.Count - 1; $index -ge 0; $index--) {
+                $replacement = $configReplacements[$index]
+                if (Test-Path -LiteralPath $replacement.Backup) {
+                    $canRestore = $false
+                    if (Test-Path -LiteralPath $replacement.Path -PathType Leaf) {
+                        $currentBytes = [System.IO.File]::ReadAllBytes($replacement.Path)
+                        $canRestore = [Convert]::ToBase64String($currentBytes) -ceq
+                            [Convert]::ToBase64String([byte[]]$replacement.CandidateBytes)
+                    }
+                    if ($canRestore) {
+                        $candidateRecovery = $replacement.Backup + ".candidate"
+                        try {
+                            [System.IO.File]::Replace($replacement.Backup, $replacement.Path, $candidateRecovery)
+                            $replacedBytes = [System.IO.File]::ReadAllBytes($candidateRecovery)
+                            if ([Convert]::ToBase64String($replacedBytes) -ceq
+                                [Convert]::ToBase64String([byte[]]$replacement.CandidateBytes)) {
+                                Remove-Item -LiteralPath $candidateRecovery -Force -ErrorAction SilentlyContinue
+                            } else {
+                                [Console]::Error.WriteLine("Warning: a newer config edit remains at '$candidateRecovery'.")
+                            }
+                        } catch {
+                            [Console]::Error.WriteLine("Warning: config recovery remains at '$($replacement.Backup)': $($_.Exception.Message)")
+                        }
+                    } else {
+                        [Console]::Error.WriteLine("Warning: config changed again; recovery remains at '$($replacement.Backup)'.")
+                    }
+                }
+            }
+            if (-not $backupComplete -and $nurlDetached -and
+                (Test-Path -LiteralPath $BackupDir) -and
+                -not (Test-Path -LiteralPath $NurlHome)) {
+                try {
+                    Move-Item -LiteralPath $BackupDir -Destination $NurlHome -ErrorAction Stop
+                    $nurlDetached = $false
+                } catch {
+                    [Console]::Error.WriteLine("Warning: Nurl data remains at '$BackupDir': $($_.Exception.Message)")
+                }
             }
             throw
+        } finally {
+            foreach ($temp in $configTemps) {
+                if (Test-Path -LiteralPath $temp) {
+                    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
 
         Write-Host ""

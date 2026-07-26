@@ -23,8 +23,14 @@ LEGACY_CONFIG_DIR="$HOME/.config/nushell"
 ASSUME_YES=false
 BACKUP_DIR=''
 BACKUP_COMPLETE=false
+BACKUP_DETACHED=false
 WORK_ROOT=''
-CONFIG_TEMP=''
+CONFIG_TEMPS=()
+CONFIG_DISPLACED=''
+CONFIG_DISPLACED_DEST=''
+CONFIG_REPLACEMENT_PATHS=()
+CONFIG_REPLACEMENT_BACKUPS=()
+CONFIG_REPLACEMENT_CANDIDATES=()
 
 for argument in "$@"; do
     case "$argument" in
@@ -47,6 +53,104 @@ trim_ascii_space() {
     value="${value#"${value%%[!$' \t']*}"}"
     value="${value%"${value##*[!$' \t']}"}"
     printf '%s' "$value"
+}
+
+resolve_config_path() {
+    local path="$1"
+    local target parent
+    local depth=0
+    while [[ -L "$path" ]]; do
+        if (( depth >= 16 )); then
+            return 1
+        fi
+        target="$(readlink "$path")" || return 1
+        if [[ "$target" == /* ]]; then
+            path="$target"
+        else
+            path="$(dirname "$path")/$target"
+        fi
+        parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+        path="$parent/$(basename "$path")"
+        depth=$((depth + 1))
+    done
+    parent="$(cd -P "$(dirname "$path")" 2>/dev/null && pwd)" || return 1
+    printf '%s/%s' "$parent" "$(basename "$path")"
+}
+
+get_file_mode() {
+    local path="$1"
+    stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null
+}
+
+restore_displaced_config() {
+    local displaced="$1"
+    local destination="$2"
+    if [[ ! -e "$displaced" ]]; then
+        return 0
+    fi
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        return 1
+    fi
+    if ln "$displaced" "$destination"; then
+        rm -f "$displaced"
+        return 0
+    fi
+    return 1
+}
+
+replace_config_safely() {
+    local source="$1"
+    local destination="$2"
+    local snapshot="$3"
+    local displaced
+    LAST_CONFIG_BACKUP=''
+    displaced="$(mktemp "$(dirname "$destination")/.config.nu.nurl.rollback.XXXXXX")"
+    rm -f "$displaced"
+    CONFIG_DISPLACED="$displaced"
+    CONFIG_DISPLACED_DEST="$destination"
+    mv "$destination" "$displaced"
+    if ! cmp -s "$snapshot" "$displaced"; then
+        restore_displaced_config "$displaced" "$destination" || true
+        CONFIG_DISPLACED=''
+        CONFIG_DISPLACED_DEST=''
+        echo "Error: Nushell config changed during uninstall; the concurrent edit was preserved. The Nurl backup remains at $BACKUP_DIR." >&2
+        return 1
+    fi
+    if ! ln "$source" "$destination"; then
+        restore_displaced_config "$displaced" "$destination" || true
+        CONFIG_DISPLACED=''
+        CONFIG_DISPLACED_DEST=''
+        echo "Error: Nushell config could not be updated. The Nurl backup remains at $BACKUP_DIR." >&2
+        return 1
+    fi
+    rm -f "$source"
+    LAST_CONFIG_BACKUP="$displaced"
+    CONFIG_DISPLACED=''
+    CONFIG_DISPLACED_DEST=''
+}
+
+canonicalize_directory_path() {
+    local path="$1"
+    local suffix=''
+    local parent component
+    while [[ ! -e "$path" ]]; do
+        if [[ -L "$path" ]]; then
+            return 1
+        fi
+        component="$(basename "$path")"
+        if [[ "$component" == '.' || "$component" == '..' ]]; then
+            return 1
+        fi
+        suffix="/$component$suffix"
+        parent="$(dirname "$path")"
+        if [[ "$parent" == "$path" ]]; then
+            return 1
+        fi
+        path="$parent"
+    done
+    [[ -d "$path" ]] || return 1
+    path="$(cd -P "$path" 2>/dev/null && pwd)" || return 1
+    printf '%s%s' "$path" "$suffix"
 }
 
 read_config_records() {
@@ -193,15 +297,27 @@ prepare_clean_config() {
 
 cleanup_on_failure() {
     local status=$?
-    if [[ "$status" -ne 0 && "$BACKUP_COMPLETE" != true && -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
-        rm -rf "$BACKUP_DIR"
+    local index
+    if [[ -n "$CONFIG_DISPLACED" && -e "$CONFIG_DISPLACED" ]]; then
+        restore_displaced_config "$CONFIG_DISPLACED" "$CONFIG_DISPLACED_DEST" || true
     fi
+    for ((index = ${#CONFIG_REPLACEMENT_PATHS[@]} - 1; index >= 0; index--)); do
+        if [[ -e "${CONFIG_REPLACEMENT_BACKUPS[$index]}" ]] &&
+           [[ -f "${CONFIG_REPLACEMENT_PATHS[$index]}" ]] &&
+           cmp -s "${CONFIG_REPLACEMENT_CANDIDATES[$index]}" "${CONFIG_REPLACEMENT_PATHS[$index]}"; then
+            rm -f "${CONFIG_REPLACEMENT_PATHS[$index]}"
+            restore_displaced_config "${CONFIG_REPLACEMENT_BACKUPS[$index]}" "${CONFIG_REPLACEMENT_PATHS[$index]}" || true
+        fi
+    done
     if [[ -n "$WORK_ROOT" && -d "$WORK_ROOT" ]]; then
         rm -rf "$WORK_ROOT"
     fi
-    if [[ -n "$CONFIG_TEMP" && -e "$CONFIG_TEMP" ]]; then
-        rm -f "$CONFIG_TEMP"
-    fi
+    local config_temp
+    for config_temp in "${CONFIG_TEMPS[@]}"; do
+        if [[ -n "$config_temp" && -e "$config_temp" ]]; then
+            rm -f "$config_temp"
+        fi
+    done
     exit "$status"
 }
 trap cleanup_on_failure EXIT
@@ -213,6 +329,10 @@ if [[ -L "$NURL_HOME" ]]; then
     echo -e "${RED}Error: Refusing to uninstall through a symlinked Nurl root: $NURL_HOME${NC}" >&2
     exit 1
 fi
+NURL_HOME="$(canonicalize_directory_path "$NURL_HOME")" || {
+    echo -e "${RED}Error: Could not resolve Nurl installation path: $NURL_HOME${NC}" >&2
+    exit 1
+}
 if [[ ! -d "$NURL_HOME" ]]; then
     echo -e "${YELLOW}Nurl is not installed at $NURL_HOME${NC}"
     exit 0
@@ -262,57 +382,114 @@ if [[ -z "$RESOLVED_CONFIG_DIR" ]]; then
     fi
 fi
 
-CONFIG_PATHS=("$RESOLVED_CONFIG_DIR/config.nu")
-if [[ "$LEGACY_CONFIG_DIR/config.nu" != "${CONFIG_PATHS[0]}" ]]; then
-    CONFIG_PATHS+=("$LEGACY_CONFIG_DIR/config.nu")
+RAW_CONFIG_PATHS=("$RESOLVED_CONFIG_DIR/config.nu")
+if [[ "$LEGACY_CONFIG_DIR/config.nu" != "${RAW_CONFIG_PATHS[0]}" ]]; then
+    RAW_CONFIG_PATHS+=("$LEGACY_CONFIG_DIR/config.nu")
 fi
 
 WORK_ROOT="$(mktemp -d "$HOME/.nurl-uninstall.XXXXXX")"
+CONFIG_PATHS=()
 CONFIG_SOURCES=()
 CONFIG_CANDIDATES=()
-for config_path in "${CONFIG_PATHS[@]}"; do
-    if [[ -L "$config_path" || ( -e "$config_path" && ! -f "$config_path" ) ]]; then
+CONFIG_MODES=()
+CONFIG_ORIGINALS=()
+for raw_config_path in "${RAW_CONFIG_PATHS[@]}"; do
+    if [[ ! -e "$raw_config_path" && ! -L "$raw_config_path" ]]; then
+        continue
+    fi
+    config_path="$(resolve_config_path "$raw_config_path")" || {
+        echo -e "${RED}Error: Nushell config link could not be resolved safely: $raw_config_path${NC}" >&2
+        exit 1
+    }
+    if [[ -L "$config_path" || ! -f "$config_path" || ! -w "$config_path" ]]; then
         echo -e "${RED}Error: Refusing to replace a non-file Nushell config: $config_path${NC}" >&2
         exit 1
     fi
-    if [[ -f "$config_path" ]]; then
-        candidate="$WORK_ROOT/config-${#CONFIG_CANDIDATES[@]}.nu"
-        prepare_clean_config "$config_path" "$candidate"
-        if [[ "$CLEAN_CONFIG_CHANGED" == true ]]; then
-            CONFIG_SOURCES+=("$config_path")
-            CONFIG_CANDIDATES+=("$candidate")
+    case "$config_path" in
+        "$NURL_HOME"|"$NURL_HOME"/*)
+            echo -e "${RED}Error: Nushell config file must not resolve inside $NURL_HOME.${NC}" >&2
+            exit 1
+            ;;
+    esac
+    config_seen=false
+    for existing_config_path in "${CONFIG_PATHS[@]}"; do
+        if [[ "$existing_config_path" == "$config_path" ]]; then
+            config_seen=true
+            break
         fi
+    done
+    if [[ "$config_seen" == true ]]; then
+        continue
+    fi
+    CONFIG_PATHS+=("$config_path")
+    original="$WORK_ROOT/config-original-${#CONFIG_ORIGINALS[@]}.nu"
+    cp -p "$config_path" "$original"
+    candidate="$WORK_ROOT/config-${#CONFIG_CANDIDATES[@]}.nu"
+    prepare_clean_config "$original" "$candidate"
+    if [[ "$CLEAN_CONFIG_CHANGED" == true ]]; then
+        CONFIG_SOURCES+=("$config_path")
+        CONFIG_ORIGINALS+=("$original")
+        CONFIG_CANDIDATES+=("$candidate")
+        config_mode="$(get_file_mode "$config_path")" || {
+            echo -e "${RED}Error: Could not determine Nushell config permissions: $config_path${NC}" >&2
+            exit 1
+        }
+        CONFIG_MODES+=("$config_mode")
+        config_temp="$(mktemp "$(dirname "$config_path")/.config.nu.nurl.XXXXXX")" || {
+            echo -e "${RED}Error: Could not create an atomic temp beside Nushell config: $config_path${NC}" >&2
+            exit 1
+        }
+        CONFIG_TEMPS+=("$config_temp")
+        cp "$candidate" "$config_temp"
+        chmod "$config_mode" "$config_temp"
     fi
 done
 
 BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$(mktemp -d "$HOME/.nurl-backup-$BACKUP_STAMP.XXXXXX")"
-echo "[1/3] Creating a complete backup..."
-cp -pR "$NURL_HOME"/. "$BACKUP_DIR"/
-if ! diff -qr "$NURL_HOME" "$BACKUP_DIR" >/dev/null; then
-    echo -e "${RED}Error: Backup verification failed; Nurl was not removed.${NC}" >&2
+rmdir "$BACKUP_DIR"
+echo "[1/3] Atomically creating a complete backup..."
+SOURCE_SIGNATURE="$(cd "$NURL_HOME" && tar -cf - . | cksum)" || {
+    echo -e "${RED}Error: Could not verify Nurl before backup; Nurl was not removed.${NC}" >&2
+    exit 1
+}
+if ! mv "$NURL_HOME" "$BACKUP_DIR"; then
+    echo -e "${RED}Error: Could not create the backup; Nurl was not removed.${NC}" >&2
+    exit 1
+fi
+BACKUP_DETACHED=true
+BACKUP_SIGNATURE="$(cd "$BACKUP_DIR" && tar -cf - . | cksum)" || true
+if [[ "$SOURCE_SIGNATURE" != "$BACKUP_SIGNATURE" ]]; then
+    if [[ ! -e "$NURL_HOME" ]]; then
+        if mv "$BACKUP_DIR" "$NURL_HOME"; then
+            BACKUP_DETACHED=false
+        fi
+    fi
+    echo -e "${RED}Error: Backup verification failed; Nurl data was not deleted.${NC}" >&2
     exit 1
 fi
 BACKUP_COMPLETE=true
-
-echo "[2/3] Removing $NURL_HOME..."
-if ! rm -rf "$NURL_HOME"; then
-    echo -e "${RED}Error: Nurl could not be removed. The verified backup remains at $BACKUP_DIR.${NC}" >&2
-    exit 1
-fi
 if [[ -e "$NURL_HOME" || -L "$NURL_HOME" ]]; then
-    echo -e "${RED}Error: Nurl could not be completely removed. The verified backup remains at $BACKUP_DIR.${NC}" >&2
+    echo -e "${RED}Error: New Nurl data appeared during uninstall. It was left intact; the verified backup remains at $BACKUP_DIR.${NC}" >&2
     exit 1
 fi
 
+echo "[2/3] Nurl installation moved to the verified backup."
 echo "[3/3] Cleaning owned Nushell config entries..."
 for ((index = 0; index < ${#CONFIG_SOURCES[@]}; index++)); do
     config_path="${CONFIG_SOURCES[$index]}"
-    config_dir="$(dirname "$config_path")"
-    CONFIG_TEMP="$(mktemp "$config_dir/.config.nu.nurl.XXXXXX")"
-    cp "${CONFIG_CANDIDATES[$index]}" "$CONFIG_TEMP"
-    mv -f "$CONFIG_TEMP" "$config_path"
-    CONFIG_TEMP=''
+    replace_config_safely "${CONFIG_TEMPS[$index]}" "$config_path" "${CONFIG_ORIGINALS[$index]}"
+    CONFIG_TEMPS[$index]=''
+    CONFIG_REPLACEMENT_PATHS+=("$config_path")
+    CONFIG_REPLACEMENT_BACKUPS+=("$LAST_CONFIG_BACKUP")
+    CONFIG_REPLACEMENT_CANDIDATES+=("${CONFIG_CANDIDATES[$index]}")
+done
+completed_replacement_backups=("${CONFIG_REPLACEMENT_BACKUPS[@]}")
+CONFIG_REPLACEMENT_PATHS=()
+CONFIG_REPLACEMENT_BACKUPS=()
+CONFIG_REPLACEMENT_CANDIDATES=()
+for replacement_backup in "${completed_replacement_backups[@]}"; do
+    rm -f "$replacement_backup"
 done
 
 echo
