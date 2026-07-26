@@ -226,3 +226,20 @@ request, interpolates variables, or touches `.nuon` files.
   explicit combined failure, and byte-exact restoration when `--all` removes the index before
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
+
+## 22. Packaging failures could corrupt installs or delete unbacked data  (FIXED)
+- **Symptom:** installers wrote downloads directly into `~/.nurl`, accepted HTTP error bodies, and
+  could leave a partial update. Shell uninstall skipped data trees when `$HOME` contained spaces,
+  then deleted the installation while reporting a successful backup. Piped shell confirmation
+  consumed script bytes, and PowerShell `exit` statements could terminate an `iex` host.
+- **Fix:** both installers require Nushell 0.89.0 and curl 7.75.0, resolve
+  `$nu.default-config-dir`, download every code/example payload into a temporary stage, parse the
+  staged entry point, and promote with rollback only after complete success. Updates never replace
+  user data. Config integration uses an owned `# >>> nurl >>>` block with exact legacy migration.
+  Uninstall requires terminal or explicit consent, copies and verifies the complete data tree
+  before deletion, cleans resolved and legacy config paths precisely, and preserves host control
+  in PowerShell. Shell files are repository-enforced LF.
+- **Re-check:** run the packaging suite in `tests/test_packaging.nu`; it covers spaced/Unicode/
+  apostrophe paths, forced copy and late-download failures, piped consent, byte-stable rollback,
+  sentinel and legacy config ownership, encoding/EOL preservation, resolved/XDG config paths,
+  minimum-version rejection, raw line endings, script parsers, and PowerShell host survival.

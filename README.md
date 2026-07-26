@@ -30,7 +30,7 @@
 
 ## Requirements
 
-- [Nushell](https://www.nushell.sh/) >= 0.89
+- [Nushell](https://www.nushell.sh/) >= 0.89.0
 - curl >= 7.75.0 (required for fileless framed response metadata)
 
 ---
@@ -41,7 +41,7 @@
 
 **Linux / macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
@@ -49,7 +49,12 @@ curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 irm https://raw.githubusercontent.com/chand45/Nurl/main/install.ps1 | iex
 ```
 
-This installs Nurl to `~/.nurl` and automatically configures your Nushell. Restart your terminal and you're ready to go!
+This installs Nurl to `~/.nurl` and adds an owned Nurl block to the `config.nu` in
+`$nu.default-config-dir`. The installer downloads and parses the complete code payload in a
+temporary staging directory before replacing live files. Failed downloads, HTTP errors, an
+unsupported Nushell version, or parse failures leave an existing installation and Nushell
+configuration unchanged. Collections, chains, history, and user `.nuon` files are never replaced
+during an update.
 
 ### Manual Install (Alternative)
 
@@ -68,21 +73,35 @@ source api.nu
 
 ### Updating
 
-Run the same install command again - it will update the code while preserving your collections, history, and configuration.
+Run the same install command again. It updates only Nurl's code after the complete staged payload
+passes validation, while preserving collections, chains, history, secrets, variables, and
+configuration.
 
 ### Uninstalling
 
-**Linux / macOS:**
+**Linux / macOS (non-interactive):**
 ```bash
-curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash -s -- --yes
 ```
 
-**Windows (PowerShell):**
+`-y` and `NURL_ASSUME_YES=1` are equivalent forms of explicit consent. For an interactive prompt,
+download the script first and run `bash uninstall.sh` from a terminal; a piped script without
+explicit consent aborts without mutation.
+
+**Windows (PowerShell, non-interactive):**
 ```powershell
-irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
+$env:NURL_ASSUME_YES = "1"; irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
 ```
 
-Your data will be backed up before removal.
+For an interactive prompt, download `uninstall.ps1` and run it without `-Yes`; `-Yes` (alias `-y`)
+provides explicit consent for a local script. PowerShell install/uninstall failures are catchable
+and do not terminate the invoking host session.
+
+Uninstall copies the complete `~/.nurl` tree to a timestamped backup and verifies every directory,
+file length, and file hash before removing the installation. If copying or verification fails,
+`~/.nurl` is left intact. The uninstaller removes only the owned Nurl config block, plus the exact
+legacy source line used by older releases, from both the resolved and legacy config locations.
+Comments, aliases, encoding, line endings, and trailing-newline state are preserved.
 
 ---
 
