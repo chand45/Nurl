@@ -482,7 +482,7 @@ done
 echo
 echo -e "${GREEN}Nurl uninstalled${NC}"
 echo
-echo "A complete, byte-verified backup was copied to:"
+echo "A complete, byte-verified backup was moved to:"
 echo -e "  ${BLUE}$BACKUP_DIR${NC}"
 echo "The backup includes all files that were present under $NURL_HOME,"
 echo "including collections, chains, history, and NUON configuration."

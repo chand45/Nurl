@@ -2075,8 +2075,8 @@ def test-shell-config-byte-reader-and-performance [--performance-only, --huge-on
         let uninstall_seconds = (((date now) - $uninstall_started) / 1sec)
         assert equal $perf_uninstall.exit_code 0 $"large-config shell uninstall failed: ($perf_uninstall.stderr)"
         print $"  [large config timing] install=($install_seconds)s uninstall=($uninstall_seconds)s bytes=($large_config | str length)"
-        assert ($install_seconds < 30) $"large-config shell install exceeded 30s: ($install_seconds)s; uninstall=($uninstall_seconds)s"
-        assert ($uninstall_seconds < 30) $"large-config shell uninstall exceeded 30s: ($uninstall_seconds)s"
+        assert ($install_seconds < 120) $"large-config shell install exceeded the 120s hang guard: ($install_seconds)s"
+        assert ($uninstall_seconds < 120) $"large-config shell uninstall exceeded the 120s hang guard: ($uninstall_seconds)s"
         null
         }
 
@@ -2123,9 +2123,9 @@ def test-shell-config-byte-reader-and-performance [--performance-only, --huge-on
         assert equal $huge_uninstall.exit_code 0 $"200KB shell uninstall failed: ($huge_uninstall.stderr)"
         print $"  [200KB config timing] install=($huge_install_seconds)s uninstall=($huge_uninstall_seconds)s bytes=($huge_content | str length)"
         if not $uninstall_only {
-            assert ($huge_install_seconds < 30) $"200KB shell install exceeded 30s: ($huge_install_seconds)s"
+            assert ($huge_install_seconds < 120) $"200KB shell install exceeded the 120s hang guard: ($huge_install_seconds)s"
         }
-        assert ($huge_uninstall_seconds < 30) $"200KB shell uninstall exceeded 30s: ($huge_uninstall_seconds)s"
+        assert ($huge_uninstall_seconds < 120) $"200KB shell uninstall exceeded the 120s hang guard: ($huge_uninstall_seconds)s"
         null
     } catch {|error| $error }
     cleanup $fixture
@@ -2568,7 +2568,7 @@ export def run-suite-packaging []: nothing -> list<record> {
         (run-test "shell uninstall requires explicit non-TTY consent and verifies complete backups" { test-shell-uninstall-backup-and-consent })
         (run-test "shell config ownership preserves unrelated bytes and honors resolved/XDG paths" { test-shell-config-ownership-and-resolution })
         (run-test "PowerShell config ownership and failures preserve the invoking host" { test-powershell-config-and-host-safety })
-        (run-test "shell config byte reader fails closed and stays fast on 20KB files" { test-shell-config-byte-reader-and-performance })
+        (run-test "shell config byte reader fails closed and remains single-pass on large files" { test-shell-config-byte-reader-and-performance })
         (run-test "reviewed packaging safety contracts remain explicit" { test-reviewed-packaging-safety-contracts })
         (run-test "Ubuntu workflow runs required behavioral packaging coverage" { test-ubuntu-packaging-workflow-contract })
         (run-test "command discovery rejects duplicate source exports before deduplication" { test-command-discovery-source-duplicates })

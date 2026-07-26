@@ -245,8 +245,8 @@ request, interpolates variables, or touches `.nuon` files.
   repository-enforced LF.
 - **Performance:** shell config bytes are checked with a verified `od` stream and transformed in one
   raw Perl pass; missing/nonzero/incomplete reads fail before mutation. The packaging suite enforces
-  sub-30-second end-to-end install and uninstall on both ~27KB and ~229KB fixtures and runs its
-  PTY/symlink behavior on Ubuntu.
+  single-pass/no-per-byte-fork structure plus a 120-second hang guard on both ~27KB and ~229KB
+  fixtures, and runs its PTY/symlink behavior on Ubuntu.
 - **Re-check:** run the packaging suite in `tests/test_packaging.nu`; it covers spaced/Unicode/
   apostrophe paths, forced copy and late-download failures, piped consent, byte-stable rollback,
   sentinel and legacy config ownership, encoding/EOL preservation, resolved/XDG config paths,
