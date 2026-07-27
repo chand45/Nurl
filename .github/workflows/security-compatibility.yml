@@ -160,3 +160,37 @@ jobs:
         run: |
           & $env:NU_EXE --no-config-file tests/run-history-alias.nu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  packaging-ubuntu:
+    name: Packaging behavior / ubuntu-latest / Nushell 0.114.1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install verified Nushell 0.114.1
+        shell: pwsh
+        env:
+          NU_ASSET: nu-0.114.1-x86_64-unknown-linux-gnu.tar.gz
+          NU_SHA256: 8802b26edcdf1a64477567b5ce909fbae3d72d731c8f0847892ea16c6fa73c53
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP $env:NU_ASSET
+          $install = Join-Path $env:RUNNER_TEMP "nushell"
+          Invoke-WebRequest "https://github.com/nushell/nushell/releases/download/0.114.1/$env:NU_ASSET" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:NU_SHA256) {
+            throw "Nushell checksum mismatch"
+          }
+          New-Item -ItemType Directory -Force $install | Out-Null
+          tar -xzf $archive -C $install
+          $nu = Get-ChildItem $install -Recurse -File -Filter "nu" | Select-Object -First 1
+          chmod +x $nu.FullName
+          "NU_EXE=$($nu.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run behavioral packaging suite
+        shell: pwsh
+        env:
+          NURL_REQUIRE_POSIX_PACKAGING: "1"
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-packaging.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
