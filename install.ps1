@@ -1,121 +1,551 @@
 # Nurl Installation Script for Windows
 # Usage: irm https://raw.githubusercontent.com/chand45/Nurl/main/install.ps1 | iex
 
-$ErrorActionPreference = "Stop"
+[CmdletBinding()]
+param()
 
-# Configuration
-$NurlHome = "$env:USERPROFILE\.nurl"
-$RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
-$NushellConfigDir = "$env:APPDATA\nushell"
-$MinimumCurlVersion = [version]"7.75.0"
-
-Write-Host "Installing Nurl - Terminal API Client" -ForegroundColor Blue
-Write-Host ""
-
-# Check if nushell is installed
-$nuPath = Get-Command nu -ErrorAction SilentlyContinue
-if (-not $nuPath) {
-    Write-Host "Error: Nushell is not installed." -ForegroundColor Red
-    Write-Host "Please install Nushell first: https://www.nushell.sh/book/installation.html"
-    exit 1
-}
-
-$curlPath = Get-Command curl.exe -ErrorAction SilentlyContinue
-if (-not $curlPath) {
-    Write-Host "Error: curl $MinimumCurlVersion or newer is required." -ForegroundColor Red
-    exit 1
-}
-$curlVersionStart = New-Object System.Diagnostics.ProcessStartInfo
-$curlVersionStart.FileName = $curlPath.Source
-$curlVersionStart.Arguments = "--version"
-$curlVersionStart.UseShellExecute = $false
-$curlVersionStart.CreateNoWindow = $true
-$curlVersionStart.RedirectStandardOutput = $true
-$curlVersionStart.RedirectStandardError = $true
-$curlVersionProcess = [System.Diagnostics.Process]::Start($curlVersionStart)
-$curlVersionStdout = $curlVersionProcess.StandardOutput.ReadToEndAsync()
-$curlVersionStderr = $curlVersionProcess.StandardError.ReadToEndAsync()
-$curlVersionProcess.WaitForExit()
-$curlVersionExit = $curlVersionProcess.ExitCode
-$curlVersionOutput = $curlVersionStdout.Result
-$null = $curlVersionStderr.Result
-if ($curlVersionExit -ne 0) {
-    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
-    exit 1
-}
-$curlVersionText = [string](($curlVersionOutput -split "\r?\n") | Select-Object -First 1)
-if ($curlVersionText -cnotmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
-    Write-Host "Error: Could not determine the installed curl version." -ForegroundColor Red
-    exit 1
-}
-$curlVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
-if ($curlVersion -lt $MinimumCurlVersion) {
-    Write-Host "Error: curl $MinimumCurlVersion or newer is required (found $curlVersion)." -ForegroundColor Red
-    exit 1
-}
-
-# Check if this is an update
-$IsUpdate = Test-Path $NurlHome
-
-if ($IsUpdate) {
-    Write-Host "Existing installation detected. Updating..." -ForegroundColor Yellow
-}
-
-# Create directory structure
-Write-Host "[1/4] Creating ~/.nurl directory structure..."
-New-Item -ItemType Directory -Force -Path $NurlHome | Out-Null
-New-Item -ItemType Directory -Force -Path "$NurlHome\nu_modules" | Out-Null
-New-Item -ItemType Directory -Force -Path "$NurlHome\collections" | Out-Null
-New-Item -ItemType Directory -Force -Path "$NurlHome\chains" | Out-Null
-New-Item -ItemType Directory -Force -Path "$NurlHome\history" | Out-Null
-
-# Download core files
-Write-Host "[2/4] Downloading nurl files..."
-
-# Download api.nu
-Invoke-WebRequest -Uri "$RepoUrl/api.nu" -OutFile "$NurlHome\api.nu" -UseBasicParsing
-
-# Download nu_modules
-$Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu", "curl-capability.nu", "string-compat.nu")
-foreach ($module in $Modules) {
-    Invoke-WebRequest -Uri "$RepoUrl/nu_modules/$module" -OutFile "$NurlHome\nu_modules\$module" -UseBasicParsing
-}
-
-# Download example collection (jsonplaceholder) - only on fresh install
-if (-not (Test-Path "$NurlHome\collections\jsonplaceholder")) {
-    Write-Host "  Downloading example collection: jsonplaceholder"
-    New-Item -ItemType Directory -Force -Path "$NurlHome\collections\jsonplaceholder\environments" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$NurlHome\collections\jsonplaceholder\requests" | Out-Null
-
-    # Collection metadata
-    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/collection.nuon" -OutFile "$NurlHome\collections\jsonplaceholder\collection.nuon" -UseBasicParsing
-    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/meta.nuon" -OutFile "$NurlHome\collections\jsonplaceholder\meta.nuon" -UseBasicParsing
-
-    # Environments
-    $Envs = @("default.nuon", "dev.nuon", "staging.nuon")
-    foreach ($env in $Envs) {
-        Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/environments/$env" -OutFile "$NurlHome\collections\jsonplaceholder\environments\$env" -UseBasicParsing
+& {
+    $ErrorActionPreference = "Stop"
+    $hasOutputRendering = $null -ne $PSStyle
+    $previousOutputRendering = if ($hasOutputRendering) { $PSStyle.OutputRendering } else { $null }
+    if ($hasOutputRendering) {
+        $PSStyle.OutputRendering = "PlainText"
     }
 
-    # Requests
-    $Requests = @("create-post.nuon", "delete-post.nuon", "get-comments.nuon", "get-post.nuon", "get-posts.nuon", "get-users.nuon", "update-post.nuon")
-    foreach ($req in $Requests) {
-        Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/requests/$req" -OutFile "$NurlHome\collections\jsonplaceholder\requests\$req" -UseBasicParsing
+    try {
+    function Get-NurlTextFile {
+        param([Parameter(Mandatory)][string]$Path)
+
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $offset = 0
+        $encoding = $null
+        $preamble = [byte[]]@()
+
+        if ($bytes.Length -ge 4 -and $bytes[0] -eq 0x00 -and $bytes[1] -eq 0x00 -and $bytes[2] -eq 0xFE -and $bytes[3] -eq 0xFF) {
+            $encoding = [System.Text.UTF32Encoding]::new($true, $true, $true)
+            $offset = 4
+            $preamble = [byte[]]$bytes[0..3]
+        } elseif ($bytes.Length -ge 4 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE -and $bytes[2] -eq 0x00 -and $bytes[3] -eq 0x00) {
+            $encoding = [System.Text.UTF32Encoding]::new($false, $true, $true)
+            $offset = 4
+            $preamble = [byte[]]$bytes[0..3]
+        } elseif ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $encoding = [System.Text.UTF8Encoding]::new($true, $true)
+            $offset = 3
+            $preamble = [byte[]]$bytes[0..2]
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+            $encoding = [System.Text.UnicodeEncoding]::new($true, $true, $true)
+            $offset = 2
+            $preamble = [byte[]]$bytes[0..1]
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $encoding = [System.Text.UnicodeEncoding]::new($false, $true, $true)
+            $offset = 2
+            $preamble = [byte[]]$bytes[0..1]
+        } else {
+            $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+        }
+
+        try {
+            $text = if ($bytes.Length -eq $offset) {
+                ""
+            } else {
+                $encoding.GetString($bytes, $offset, $bytes.Length - $offset)
+            }
+        } catch {
+            throw "Nushell config contains invalid or unsupported text encoding: $Path"
+        }
+        [pscustomobject]@{
+            Text = $text
+            Encoding = $encoding
+            Preamble = $preamble
+            Bytes = $bytes
+        }
     }
-}
 
-# Download example chain - only on fresh install
-if (-not (Test-Path "$NurlHome\chains\example-workflow.nuon")) {
-    Write-Host "  Downloading example chain: example-workflow"
-    Invoke-WebRequest -Uri "$RepoUrl/chains/example-workflow.nuon" -OutFile "$NurlHome\chains\example-workflow.nuon" -UseBasicParsing
-}
+    function ConvertTo-NurlBytes {
+        param(
+            [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+            [Parameter(Mandatory)]$File
+        )
 
-# Create default configuration (only if not exists)
-Write-Host "[3/4] Creating default configuration..."
+        $content = $File.Encoding.GetBytes($Text)
+        $result = [byte[]]::new($File.Preamble.Length + $content.Length)
+        if ($File.Preamble.Length -gt 0) {
+            [System.Array]::Copy($File.Preamble, 0, $result, 0, $File.Preamble.Length)
+        }
+        if ($content.Length -gt 0) {
+            [System.Array]::Copy($content, 0, $result, $File.Preamble.Length, $content.Length)
+        }
+        return ,$result
+    }
 
-if (-not (Test-Path "$NurlHome\config.nuon")) {
-    # Use WriteAllText to avoid BOM - Nushell's nuon parser doesn't handle BOM
-    $configContent = @'
+    function Get-NurlLineRecords {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+        $records = [System.Collections.Generic.List[object]]::new()
+        foreach ($match in [regex]::Matches($Text, '([^\r\n]*)(\r\n|\n|\r|$)')) {
+            if ($match.Length -eq 0) {
+                continue
+            }
+            $records.Add([pscustomobject]@{
+                Body = $match.Groups[1].Value
+                Eol = $match.Groups[2].Value
+            })
+        }
+        $records
+    }
+
+    function Test-NurlLegacySource {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
+        $trimmed = $Line.Trim()
+        $trimmed -ceq 'source ~/.nurl/api.nu' -or
+            $trimmed -ceq 'source "~/.nurl/api.nu"' -or
+            $trimmed -ceq 'source $"($env.HOME)/.nurl/api.nu"'
+    }
+
+    function New-NurlInstallConfig {
+        param([Parameter(Mandatory)][string]$Path)
+
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+            $file = [pscustomobject]@{
+                Encoding = $encoding
+                Preamble = [byte[]]@()
+            }
+            $text = "# >>> nurl >>>`r`nsource ~/.nurl/api.nu`r`n# <<< nurl <<<`r`n"
+            return [pscustomobject]@{
+                Changed = $true
+                Bytes = (ConvertTo-NurlBytes $text $file)
+                OriginalExists = $false
+                OriginalBytes = [byte[]]@()
+            }
+        }
+
+        $file = Get-NurlTextFile $Path
+        $records = @(Get-NurlLineRecords $file.Text)
+        $ownedStart = -1
+        $ownedEnd = -1
+        $inside = $false
+        for ($index = 0; $index -lt $records.Count; $index++) {
+            $line = $records[$index].Body.Trim()
+            if ($line -ceq "# >>> nurl >>>") {
+                if ($inside -or $ownedStart -ge 0) {
+                    throw "Nushell config contains an invalid Nurl sentinel block: $Path"
+                }
+                $inside = $true
+                $ownedStart = $index
+            } elseif ($line -ceq "# <<< nurl <<<") {
+                if (-not $inside) {
+                    throw "Nushell config contains an unmatched Nurl sentinel: $Path"
+                }
+                $inside = $false
+                $ownedEnd = $index
+            }
+        }
+        if ($inside) {
+            throw "Nushell config contains an unterminated Nurl sentinel block: $Path"
+        }
+        if ($ownedStart -ge 0 -and $ownedEnd -ge $ownedStart) {
+            return [pscustomobject]@{
+                Changed = $false
+                Bytes = $file.Bytes
+                OriginalExists = $true
+                OriginalBytes = $file.Bytes
+            }
+        }
+
+        $newline = [Environment]::NewLine
+        foreach ($record in $records) {
+            if ($record.Eol.Length -gt 0) {
+                $newline = $record.Eol
+                break
+            }
+        }
+        $endedWithNewline = $file.Text.EndsWith("`n") -or $file.Text.EndsWith("`r")
+        $output = [System.Collections.Generic.List[object]]::new()
+        $inserted = $false
+        foreach ($record in $records) {
+            if (Test-NurlLegacySource $record.Body) {
+                if (-not $inserted) {
+                    if ($output.Count -gt 0 -and $output[$output.Count - 1].Body.Trim() -ceq "# Nurl - Terminal API Client") {
+                        $output.RemoveAt($output.Count - 1)
+                    }
+                    $output.Add([pscustomobject]@{ Body = "# >>> nurl >>>"; Eol = $newline })
+                    $output.Add([pscustomobject]@{ Body = "source ~/.nurl/api.nu"; Eol = $newline })
+                    $output.Add([pscustomobject]@{ Body = "# <<< nurl <<<"; Eol = $record.Eol })
+                    $inserted = $true
+                }
+                continue
+            }
+            $output.Add([pscustomobject]@{ Body = $record.Body; Eol = $record.Eol })
+        }
+
+        if (-not $inserted) {
+            if ($output.Count -gt 0 -and $output[$output.Count - 1].Eol.Length -eq 0) {
+                $output[$output.Count - 1].Eol = $newline
+            }
+            $output.Add([pscustomobject]@{ Body = "# >>> nurl >>>"; Eol = $newline })
+            $output.Add([pscustomobject]@{ Body = "source ~/.nurl/api.nu"; Eol = $newline })
+            $output.Add([pscustomobject]@{ Body = "# <<< nurl <<<"; Eol = $(if ($endedWithNewline -or $records.Count -eq 0) { $newline } else { "" }) })
+        }
+
+        $builder = [System.Text.StringBuilder]::new()
+        foreach ($record in $output) {
+            [void]$builder.Append($record.Body)
+            [void]$builder.Append($record.Eol)
+        }
+        [pscustomobject]@{
+            Changed = $true
+            Bytes = ConvertTo-NurlBytes $builder.ToString() $file
+            OriginalExists = $true
+            OriginalBytes = $file.Bytes
+        }
+    }
+
+    function Write-NurlUtf8 {
+        param(
+            [Parameter(Mandatory)][string]$Path,
+            [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+        )
+        [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    function Assert-NurlSafeDirectoryChain {
+        param([Parameter(Mandatory)][string]$Path)
+
+        $current = [System.IO.Path]::GetFullPath($Path)
+        while (-not [string]::IsNullOrEmpty($current)) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Refusing to install through a reparse-point directory: $current"
+                }
+                if (-not $item.PSIsContainer) {
+                    throw "Expected an install directory but found another item: $current"
+                }
+            }
+            $parent = Split-Path -Parent $current
+            if ([string]::IsNullOrEmpty($parent) -or $parent -eq $current) {
+                break
+            }
+            $current = $parent
+        }
+    }
+
+    function Test-NurlPathContained {
+        param(
+            [Parameter(Mandatory)][string]$Root,
+            [Parameter(Mandatory)][string]$Candidate
+        )
+        $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@("\", "/"))
+        $candidatePath = [System.IO.Path]::GetFullPath($Candidate).TrimEnd([char[]]@("\", "/"))
+        $candidatePath.Equals($rootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $candidatePath.StartsWith($rootPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    function Invoke-NurlCapture {
+        param(
+            [Parameter(Mandatory)][string]$FilePath,
+            [Parameter()][string[]]$Arguments = @()
+        )
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $output = @(& $FilePath @Arguments 2>$null)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+    }
+
+    function Invoke-NurlInstall {
+        $NurlHome = Join-Path $env:USERPROFILE ".nurl"
+        $RepoUrl = "https://raw.githubusercontent.com/chand45/Nurl/main"
+        $MinimumCurlVersion = [version]"7.75.0"
+        $MinimumNushellVersion = [version]"0.89.0"
+        $Modules = @("mod.nu", "http.nu", "auth.nu", "vars.nu", "history.nu", "chain.nu", "tui.nu", "log.nu", "resource-path.nu", "command-error.nu", "curl-capability.nu", "string-compat.nu")
+        $Environments = @("default.nuon", "dev.nuon", "staging.nuon")
+        $Requests = @("create-post.nuon", "delete-post.nuon", "get-comments.nuon", "get-post.nuon", "get-posts.nuon", "get-users.nuon", "update-post.nuon")
+
+        Write-Host "Installing Nurl - Terminal API Client" -ForegroundColor Blue
+        Write-Host ""
+
+        $nuPath = Get-Command nu -ErrorAction SilentlyContinue
+        if (-not $nuPath) {
+            throw "Nushell is not installed. Install Nushell $MinimumNushellVersion or newer: https://www.nushell.sh/book/installation.html"
+        }
+        $nuVersionProbe = Invoke-NurlCapture -FilePath $nuPath.Source -Arguments @("--version")
+        if ($nuVersionProbe.ExitCode -ne 0 -or $nuVersionProbe.Output.Count -eq 0) {
+            throw "Could not determine the installed Nushell version."
+        }
+        $nuVersionText = ([string]$nuVersionProbe.Output[0]).Trim()
+        if ($nuVersionText -cnotmatch '^(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
+            throw "Could not determine the installed Nushell version."
+        }
+        $nuVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
+        if ($nuVersion -lt $MinimumNushellVersion) {
+            throw "Nushell $MinimumNushellVersion or newer is required (found $nuVersion)."
+        }
+
+        $curlPath = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if (-not $curlPath) {
+            throw "curl $MinimumCurlVersion or newer is required."
+        }
+        $curlVersionProbe = Invoke-NurlCapture -FilePath $curlPath.Source -Arguments @("--version")
+        if ($curlVersionProbe.ExitCode -ne 0 -or $curlVersionProbe.Output.Count -eq 0) {
+            throw "Could not determine the installed curl version."
+        }
+        $curlVersionText = [string]$curlVersionProbe.Output[0]
+        if ($curlVersionText -cnotmatch '^curl(?:\.exe)?\s+(\d+)\.(\d+)\.(\d+)(?:[^0-9.].*)?$') {
+            throw "Could not determine the installed curl version."
+        }
+        $curlVersion = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])")
+        if ($curlVersion -lt $MinimumCurlVersion) {
+            throw "curl $MinimumCurlVersion or newer is required (found $curlVersion)."
+        }
+
+        $configProbe = Invoke-NurlCapture -FilePath $nuPath.Source -Arguments @("--no-config-file", "-c", '$nu.default-config-dir')
+        $NushellConfigDir = if ($configProbe.ExitCode -eq 0 -and $configProbe.Output.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$configProbe.Output[0])) {
+            ([string]$configProbe.Output[0]).Trim()
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:XDG_CONFIG_HOME)) {
+            Join-Path $env:XDG_CONFIG_HOME "nushell"
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+            Join-Path $env:APPDATA "nushell"
+        } else {
+            Join-Path $env:USERPROFILE "AppData\Roaming\nushell"
+        }
+        $ConfigPath = Join-Path $NushellConfigDir "config.nu"
+        foreach ($installDirectory in @(
+            $NurlHome,
+            (Join-Path $NurlHome "nu_modules"),
+            (Join-Path $NurlHome "collections"),
+            (Join-Path $NurlHome "chains"),
+            (Join-Path $NurlHome "history"),
+            $NushellConfigDir
+        )) {
+            Assert-NurlSafeDirectoryChain $installDirectory
+        }
+        $existingConfig = Get-Item -LiteralPath $ConfigPath -Force -ErrorAction SilentlyContinue
+        if ($null -ne $existingConfig -and ($existingConfig.PSIsContainer -or (($existingConfig.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) {
+            throw "Refusing to replace non-file Nushell config path: $ConfigPath"
+        }
+        if ((Test-NurlPathContained $NurlHome $NushellConfigDir) -or
+            (Test-NurlPathContained $NurlHome $ConfigPath)) {
+            throw "Nushell config must not resolve inside $NurlHome."
+        }
+        $IsUpdate = Test-Path -LiteralPath $NurlHome -PathType Container
+        if ($IsUpdate) {
+            Write-Host "Existing installation detected. Updating..." -ForegroundColor Yellow
+        }
+
+        $StageRoot = Join-Path $env:USERPROFILE (".nurl-stage-" + [guid]::NewGuid().ToString("N"))
+        $PayloadRoot = Join-Path $StageRoot "install"
+        $RollbackRoot = Join-Path $StageRoot "rollback"
+        $promotionStarted = $false
+        $committed = $false
+        $freshPromoted = $false
+        $rollbackRecords = [System.Collections.Generic.List[object]]::new()
+        $createdDirectories = [System.Collections.Generic.List[string]]::new()
+        $rollbackState = [pscustomobject]@{ Failed = $false }
+        $configTemp = $null
+        $configTempDir = $null
+
+        function Ensure-TrackedDirectory {
+            param([Parameter(Mandatory)][string]$Path)
+            if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+                $missing = [System.Collections.Generic.List[string]]::new()
+                $current = $Path
+                while (-not (Test-Path -LiteralPath $current -PathType Container)) {
+                    $missing.Add($current)
+                    $parent = Split-Path -Parent $current
+                    if ([string]::IsNullOrEmpty($parent) -or $parent -eq $current) {
+                        break
+                    }
+                    $current = $parent
+                }
+                [void][System.IO.Directory]::CreateDirectory($Path)
+                for ($index = $missing.Count - 1; $index -ge 0; $index--) {
+                    $createdDirectories.Add($missing[$index])
+                }
+            }
+        }
+
+        function Promote-NurlFile {
+            param(
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Destination,
+                [Parameter(Mandatory)][string]$BackupName
+            )
+            Ensure-TrackedDirectory (Split-Path -Parent $Destination)
+            $existing = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                if ($existing.PSIsContainer -or (($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    throw "Refusing to replace non-file install path: $Destination"
+                }
+                $backup = Join-Path $RollbackRoot $BackupName
+                [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $backup))
+                Copy-Item -LiteralPath $Destination -Destination $backup -Force
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $backup; Created = $false; CandidateBytes = $null })
+            } else {
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true; CandidateBytes = $null })
+            }
+            Move-Item -LiteralPath $Source -Destination $Destination -Force
+        }
+
+        function Promote-NurlFileIfAbsent {
+            param(
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Destination,
+                [Parameter(Mandatory)][string]$BackupName
+            )
+            if ($null -eq (Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue)) {
+                Promote-NurlFile $Source $Destination $BackupName
+            }
+        }
+
+        function Promote-NurlConfig {
+            param(
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Destination,
+                [Parameter(Mandatory)][bool]$OriginalExists,
+                [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$OriginalBytes,
+                [Parameter(Mandatory)][byte[]]$CandidateBytes,
+                [Parameter(Mandatory)][ref]$SourceOwner,
+                [Parameter(Mandatory)][ref]$SourceDirectoryOwner
+            )
+            Ensure-TrackedDirectory (Split-Path -Parent $Destination)
+            $existing = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                if ($existing.PSIsContainer -or (($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    throw "Refusing to replace non-file Nushell config path: $Destination"
+                }
+                $backup = Join-Path (Split-Path -Parent $Destination) (".config.nu.nurl.rollback." + [guid]::NewGuid().ToString("N"))
+                [System.IO.File]::Replace($Source, $Destination, $backup)
+                $SourceOwner.Value = $null
+                $consumedDirectory = [string]$SourceDirectoryOwner.Value
+                if (-not [string]::IsNullOrEmpty($consumedDirectory)) {
+                    try {
+                        [System.IO.Directory]::Delete($consumedDirectory, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: consumed temp directory was preserved: $consumedDirectory")
+                    }
+                    $SourceDirectoryOwner.Value = $null
+                }
+                $displacedBytes = [System.IO.File]::ReadAllBytes($backup)
+                if (-not $OriginalExists -or
+                    [Convert]::ToBase64String($displacedBytes) -cne [Convert]::ToBase64String($OriginalBytes)) {
+                    $candidateRecovery = $backup + ".candidate"
+                    try {
+                        [System.IO.File]::Replace($backup, $Destination, $candidateRecovery)
+                    } catch {
+                        throw "Nushell config changed during installation and automatic restoration failed. Recovery file: $backup"
+                    }
+                    $replacedBytes = [System.IO.File]::ReadAllBytes($candidateRecovery)
+                    if ([Convert]::ToBase64String($replacedBytes) -ceq [Convert]::ToBase64String($CandidateBytes)) {
+                        Remove-Item -LiteralPath $candidateRecovery -Force -ErrorAction SilentlyContinue
+                    } else {
+                        throw "Nushell config changed again during restoration. The latest edit remains at $candidateRecovery"
+                    }
+                    throw "Nushell config changed during installation; the concurrent edit was restored."
+                }
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $backup; Created = $false; CandidateBytes = $CandidateBytes })
+            } else {
+                if ($OriginalExists) {
+                    throw "Nushell config disappeared during installation; no config changes were applied."
+                }
+                [System.IO.File]::Move($Source, $Destination)
+                $SourceOwner.Value = $null
+                $consumedDirectory = [string]$SourceDirectoryOwner.Value
+                if (-not [string]::IsNullOrEmpty($consumedDirectory)) {
+                    try {
+                        [System.IO.Directory]::Delete($consumedDirectory, $false)
+                    } catch {
+                        [Console]::Error.WriteLine("Warning: consumed temp directory was preserved: $consumedDirectory")
+                    }
+                    $SourceDirectoryOwner.Value = $null
+                }
+                $rollbackRecords.Add([pscustomobject]@{ Destination = $Destination; Backup = $null; Created = $true; CandidateBytes = $CandidateBytes })
+            }
+        }
+
+        function Undo-NurlPromotion {
+            $oldPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Stop"
+                for ($index = $rollbackRecords.Count - 1; $index -ge 0; $index--) {
+                    $record = $rollbackRecords[$index]
+                    try {
+                        if ($null -ne $record.CandidateBytes) {
+                            $rollbackState.Failed = $true
+                            [Console]::Error.WriteLine("Warning: rollback preserved the live config; recovery remains at '$($record.Backup)'.")
+                            continue
+                        }
+                        if ($null -ne (Get-Item -LiteralPath $record.Destination -Force -ErrorAction SilentlyContinue)) {
+                            Remove-Item -LiteralPath $record.Destination -Recurse -Force -ErrorAction Stop
+                        }
+                        if (-not $record.Created) {
+                            Move-Item -LiteralPath $record.Backup -Destination $record.Destination -Force -ErrorAction Stop
+                        }
+                    } catch {
+                        $rollbackState.Failed = $true
+                        [Console]::Error.WriteLine("Warning: rollback could not restore '$($record.Destination)': $($_.Exception.Message)")
+                    }
+                }
+                if ($freshPromoted) {
+                    $rollbackState.Failed = $true
+                    [Console]::Error.WriteLine("Warning: rollback preserved the visible fresh installation to avoid deleting concurrent data.")
+                }
+                for ($index = $createdDirectories.Count - 1; $index -ge 0; $index--) {
+                    $directory = $createdDirectories[$index]
+                    if ([System.IO.Directory]::Exists($directory)) {
+                        try {
+                            [System.IO.Directory]::Delete($directory, $false)
+                        } catch [System.IO.IOException] {
+                            # Concurrent or user-created content is preserved.
+                        } catch {
+                            $rollbackState.Failed = $true
+                            [Console]::Error.WriteLine("Warning: rollback could not remove directory '$directory': $($_.Exception.Message)")
+                        }
+                    }
+                }
+            } finally {
+                $ErrorActionPreference = $oldPreference
+            }
+        }
+
+        try {
+            [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "nu_modules"))
+            [void][System.IO.Directory]::CreateDirectory($RollbackRoot)
+
+            Write-Host "[1/4] Staging Nurl payloads..."
+            Invoke-WebRequest -Uri "$RepoUrl/api.nu" -OutFile (Join-Path $PayloadRoot "api.nu") -UseBasicParsing
+            foreach ($module in $Modules) {
+                Invoke-WebRequest -Uri "$RepoUrl/nu_modules/$module" -OutFile (Join-Path $PayloadRoot "nu_modules\$module") -UseBasicParsing
+            }
+
+            [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "collections"))
+            [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "chains"))
+            [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "history"))
+            if (-not (Test-Path -LiteralPath (Join-Path $NurlHome "collections\jsonplaceholder"))) {
+                Write-Host "  Staging example collection: jsonplaceholder"
+                [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "collections\jsonplaceholder\environments"))
+                [void][System.IO.Directory]::CreateDirectory((Join-Path $PayloadRoot "collections\jsonplaceholder\requests"))
+                Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/collection.nuon" -OutFile (Join-Path $PayloadRoot "collections\jsonplaceholder\collection.nuon") -UseBasicParsing
+                Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/meta.nuon" -OutFile (Join-Path $PayloadRoot "collections\jsonplaceholder\meta.nuon") -UseBasicParsing
+                foreach ($environment in $Environments) {
+                    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/environments/$environment" -OutFile (Join-Path $PayloadRoot "collections\jsonplaceholder\environments\$environment") -UseBasicParsing
+                }
+                foreach ($request in $Requests) {
+                    Invoke-WebRequest -Uri "$RepoUrl/collections/jsonplaceholder/requests/$request" -OutFile (Join-Path $PayloadRoot "collections\jsonplaceholder\requests\$request") -UseBasicParsing
+                }
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $NurlHome "chains\example-workflow.nuon"))) {
+                Write-Host "  Staging example chain: example-workflow"
+                Invoke-WebRequest -Uri "$RepoUrl/chains/example-workflow.nuon" -OutFile (Join-Path $PayloadRoot "chains\example-workflow.nuon") -UseBasicParsing
+            }
+
+            $configContent = @'
 {
     default_headers: {
         "Content-Type": "application/json"
@@ -132,15 +562,7 @@ if (-not (Test-Path "$NurlHome\config.nuon")) {
     }
 }
 '@
-    [System.IO.File]::WriteAllText("$NurlHome\config.nuon", $configContent)
-}
-
-if (-not (Test-Path "$NurlHome\variables.nuon")) {
-    [System.IO.File]::WriteAllText("$NurlHome\variables.nuon", "{}")
-}
-
-if (-not (Test-Path "$NurlHome\secrets.nuon")) {
-    $secretsContent = @'
+            $secretsContent = @'
 {
     tokens: {}
     saml_tokens: {}
@@ -149,57 +571,133 @@ if (-not (Test-Path "$NurlHome\secrets.nuon")) {
     basic_auth: {}
 }
 '@
-    [System.IO.File]::WriteAllText("$NurlHome\secrets.nuon", $secretsContent)
+            Write-NurlUtf8 (Join-Path $PayloadRoot "config.nuon") $configContent
+            Write-NurlUtf8 (Join-Path $PayloadRoot "variables.nuon") "{}"
+            Write-NurlUtf8 (Join-Path $PayloadRoot "secrets.nuon") $secretsContent
+
+            Write-Host "[2/4] Validating staged payloads..."
+            $parseProbe = Invoke-NurlCapture -FilePath $nuPath.Source -Arguments @("--no-config-file", (Join-Path $PayloadRoot "api.nu"))
+            if ($parseProbe.ExitCode -ne 0) {
+                throw "Staged Nurl payloads failed Nushell validation; the existing installation was not changed."
+            }
+            $configEdit = New-NurlInstallConfig $ConfigPath
+
+            Write-Host "[3/4] Promoting validated payloads..."
+            $promotionStarted = $true
+            if (-not $IsUpdate) {
+                [System.IO.Directory]::Move($PayloadRoot, $NurlHome)
+                $freshPromoted = $true
+            } else {
+                Ensure-TrackedDirectory $NurlHome
+                Ensure-TrackedDirectory (Join-Path $NurlHome "nu_modules")
+                Promote-NurlFile (Join-Path $PayloadRoot "api.nu") (Join-Path $NurlHome "api.nu") "api.nu"
+                foreach ($module in $Modules) {
+                    Promote-NurlFile (Join-Path $PayloadRoot "nu_modules\$module") (Join-Path $NurlHome "nu_modules\$module") "nu_modules\$module"
+                }
+                Ensure-TrackedDirectory (Join-Path $NurlHome "collections")
+                Ensure-TrackedDirectory (Join-Path $NurlHome "chains")
+                Ensure-TrackedDirectory (Join-Path $NurlHome "history")
+                Promote-NurlFileIfAbsent (Join-Path $PayloadRoot "config.nuon") (Join-Path $NurlHome "config.nuon") "config.nuon"
+                Promote-NurlFileIfAbsent (Join-Path $PayloadRoot "variables.nuon") (Join-Path $NurlHome "variables.nuon") "variables.nuon"
+                Promote-NurlFileIfAbsent (Join-Path $PayloadRoot "secrets.nuon") (Join-Path $NurlHome "secrets.nuon") "secrets.nuon"
+                $stagedCollection = Join-Path $PayloadRoot "collections\jsonplaceholder"
+                $installedCollection = Join-Path $NurlHome "collections\jsonplaceholder"
+                if ((Test-Path -LiteralPath $stagedCollection) -and $null -eq (Get-Item -LiteralPath $installedCollection -Force -ErrorAction SilentlyContinue)) {
+                    [System.IO.Directory]::Move($stagedCollection, $installedCollection)
+                    $rollbackRecords.Add([pscustomobject]@{ Destination = $installedCollection; Backup = $null; Created = $true; CandidateBytes = $null })
+                }
+                $stagedChain = Join-Path $PayloadRoot "chains\example-workflow.nuon"
+                if (Test-Path -LiteralPath $stagedChain) {
+                    Promote-NurlFileIfAbsent $stagedChain (Join-Path $NurlHome "chains\example-workflow.nuon") "chains\example-workflow.nuon"
+                }
+            }
+
+            Write-Host "[4/4] Configuring Nushell..."
+            if ($configEdit.Changed) {
+                Ensure-TrackedDirectory $NushellConfigDir
+                $configTempDir = Join-Path $NushellConfigDir (".config.nu.nurl." + [guid]::NewGuid().ToString("N"))
+                [void][System.IO.Directory]::CreateDirectory($configTempDir)
+                $configTemp = Join-Path $configTempDir "candidate"
+                [System.IO.File]::WriteAllBytes($configTemp, $configEdit.Bytes)
+                if ($configEdit.OriginalExists) {
+                    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+                        throw "Nushell config changed during installation; no config changes were applied."
+                    }
+                    $currentConfigBytes = [System.IO.File]::ReadAllBytes($ConfigPath)
+                    if ([Convert]::ToBase64String($currentConfigBytes) -cne [Convert]::ToBase64String([byte[]]$configEdit.OriginalBytes)) {
+                        throw "Nushell config changed during installation; no config changes were applied."
+                    }
+                } elseif (Test-Path -LiteralPath $ConfigPath) {
+                    throw "Nushell config appeared during installation; no config changes were applied."
+                }
+                Promote-NurlConfig $configTemp $ConfigPath $configEdit.OriginalExists ([byte[]]$configEdit.OriginalBytes) ([byte[]]$configEdit.Bytes) ([ref]$configTemp) ([ref]$configTempDir)
+                Write-Host "  Added the owned Nurl block to $ConfigPath"
+            } else {
+                Write-Host "  Nushell config already contains the owned Nurl block"
+            }
+
+            $committed = $true
+            foreach ($record in $rollbackRecords) {
+                if ($null -ne $record.Backup -and (Test-Path -LiteralPath $record.Backup)) {
+                    Remove-Item -LiteralPath $record.Backup -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Remove-Item -LiteralPath $RollbackRoot -Recurse -Force
+        } finally {
+            if ($null -ne $configTempDir -and (Test-Path -LiteralPath $configTempDir -PathType Container)) {
+                try {
+                    $ownedCandidate = Join-Path $configTempDir "candidate"
+                    if (Test-Path -LiteralPath $ownedCandidate -PathType Leaf) {
+                        $ownedBytes = [System.IO.File]::ReadAllBytes($ownedCandidate)
+                        if ([Convert]::ToBase64String($ownedBytes) -ceq [Convert]::ToBase64String([byte[]]$configEdit.Bytes)) {
+                            Remove-Item -LiteralPath $ownedCandidate -Force -ErrorAction Stop
+                        } else {
+                            throw "candidate bytes changed"
+                        }
+                    }
+                    [System.IO.Directory]::Delete($configTempDir, $false)
+                } catch {
+                    [Console]::Error.WriteLine("Warning: config temporary directory remains at '$configTempDir': $($_.Exception.Message)")
+                }
+            }
+            if ($promotionStarted -and -not $committed) {
+                try {
+                    Undo-NurlPromotion
+                } catch {
+                    $rollbackState.Failed = $true
+                    [Console]::Error.WriteLine("Warning: rollback encountered an unexpected failure: $($_.Exception.Message)")
+                }
+            }
+            if ($rollbackState.Failed) {
+                [Console]::Error.WriteLine("Error: rollback was incomplete; recovery files remain at '$RollbackRoot'.")
+            } elseif (Test-Path -LiteralPath $StageRoot) {
+                try {
+                    Remove-Item -LiteralPath $StageRoot -Recurse -Force -ErrorAction Stop
+                } catch {
+                    [Console]::Error.WriteLine("Warning: temporary staging remains at '$StageRoot': $($_.Exception.Message)")
+                }
+            }
+        }
+
+        Write-Host ""
+        if ($IsUpdate) {
+            Write-Host "Nurl updated successfully!" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Your collections, chains, history, secrets, variables, and NUON config were preserved."
+        } else {
+            Write-Host "Nurl installed successfully!" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Included the jsonplaceholder collection and example-workflow chain."
+        }
+        Write-Host ""
+        Write-Host "Restart your terminal or run:"
+        Write-Host "  source ~/.nurl/api.nu" -ForegroundColor Blue
+    }
+
+    Invoke-NurlInstall
+    } finally {
+        if ($hasOutputRendering) {
+            $PSStyle.OutputRendering = $previousOutputRendering
+        }
+    }
 }
-
-# Add to Nushell config
-Write-Host "[4/4] Configuring Nushell..."
-
-# Ensure nushell config directory exists
-New-Item -ItemType Directory -Force -Path $NushellConfigDir | Out-Null
-
-# Check if config.nu exists, create if not
-$ConfigPath = "$NushellConfigDir\config.nu"
-if (-not (Test-Path $ConfigPath)) {
-    New-Item -ItemType File -Path $ConfigPath | Out-Null
-}
-
-# Check if already configured
-$ConfigContent = Get-Content $ConfigPath -Raw -ErrorAction SilentlyContinue
-if ($ConfigContent -match "\.nurl[/\\]api\.nu") {
-    Write-Host "  Nushell config already includes nurl"
-} else {
-    Add-Content -Path $ConfigPath -Value ""
-    Add-Content -Path $ConfigPath -Value "# Nurl - Terminal API Client"
-    # Use ~ which Nushell expands at parse-time (source requires parse-time constants)
-    Add-Content -Path $ConfigPath -Value 'source ~/.nurl/api.nu'
-    Write-Host "  Added nurl to Nushell config"
-}
-
-Write-Host ""
-if ($IsUpdate) {
-    Write-Host "Nurl updated successfully!" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Your data is preserved:"
-    Write-Host "  - collections/    OK"
-    Write-Host "  - secrets.nuon    OK"
-    Write-Host "  - history/        OK"
-    Write-Host "  - config.nuon     OK"
-    Write-Host "  - variables.nuon  OK"
-} else {
-    Write-Host "Nurl installed successfully!" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Included examples to get you started:"
-    Write-Host "  - jsonplaceholder collection (7 sample requests)"
-    Write-Host "  - example-workflow chain (request chaining demo)"
-}
-
-Write-Host ""
-Write-Host "Restart your terminal or run:"
-Write-Host '  source ~/.nurl/api.nu' -ForegroundColor Blue
-Write-Host ""
-Write-Host "Then try:"
-Write-Host "  api help" -ForegroundColor Blue
-Write-Host "  api collection list" -ForegroundColor Blue
-Write-Host "  api send get-posts -c jsonplaceholder" -ForegroundColor Blue
-Write-Host "  api chain run example-workflow -c jsonplaceholder" -ForegroundColor Blue

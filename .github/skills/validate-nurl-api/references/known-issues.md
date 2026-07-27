@@ -226,3 +226,28 @@ request, interpolates variables, or touches `.nuon` files.
   explicit combined failure, and byte-exact restoration when `--all` removes the index before
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
+
+## 22. Packaging failures could corrupt installs or delete unbacked data  (FIXED)
+- **Symptom:** installers wrote downloads directly into `~/.nurl`, accepted HTTP error bodies, and
+  could leave a partial update. Shell uninstall skipped data trees when `$HOME` contained spaces,
+  then deleted the installation while reporting a successful backup. Piped shell confirmation
+  consumed script bytes, and PowerShell `exit` statements could terminate an `iex` host.
+- **Fix:** both installers require Nushell 0.89.0 and curl 7.75.0, resolve
+  `$nu.default-config-dir`, download every code/example payload into a temporary stage, parse the
+  staged entry point, and promote with rollback only after complete success. Updates never replace
+  user data. Config integration uses an owned `# >>> nurl >>>` block with exact legacy migration.
+  Uninstall requires terminal or explicit consent, atomically detaches and verifies the complete
+  data tree into its backup before config cleanup, cleans resolved and legacy config paths precisely, and preserves host control
+  in PowerShell. Config editing preserves blank lines, mixed/CR-only EOLs, supported encodings,
+  trailing-newline state, POSIX mode, shell-managed writable config symlinks, and host rendering settings.
+  Unverifiable links/special files inside the Nurl data tree and invalid encodings fail before
+  deletion. Incomplete rollback retains recovery backups instead of deleting them. Shell files are
+  repository-enforced LF.
+- **Performance:** shell config bytes are checked with a verified `od` stream and transformed in one
+  raw Perl pass; missing/nonzero/incomplete reads fail before mutation. The packaging suite enforces
+  single-pass/no-per-byte-fork structure plus a 120-second hang guard on both ~27KB and ~229KB
+  fixtures, and runs its PTY/symlink behavior on Ubuntu.
+- **Re-check:** run the packaging suite in `tests/test_packaging.nu`; it covers spaced/Unicode/
+  apostrophe paths, forced copy and late-download failures, piped consent, byte-stable rollback,
+  sentinel and legacy config ownership, encoding/EOL preservation, resolved/XDG config paths,
+  minimum-version rejection, raw line endings, script parsers, and PowerShell host survival.
