@@ -30,11 +30,8 @@
 
 ## Requirements
 
-- [Nushell](https://www.nushell.sh/) >= 0.89.0
+- [Nushell](https://www.nushell.sh/) >= 0.89
 - curl >= 7.75.0 (required for fileless framed response metadata)
-- Perl and standard POSIX tools used by shell packaging (`awk`, `od`, `wc`, `cmp`, `tar`,
-  `cksum`, `sed`, `tr`, `find`, `stat`, `mktemp`, `cp`, `mv`, `rm`, `chmod`, `readlink`,
-  `dirname`, `basename`, `rmdir`, `date`, `uname`)
 
 ---
 
@@ -44,7 +41,7 @@
 
 **Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
@@ -52,15 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/install.sh | bash
 irm https://raw.githubusercontent.com/chand45/Nurl/main/install.ps1 | iex
 ```
 
-This installs Nurl to `~/.nurl` and adds an owned Nurl block to the `config.nu` in
-`$nu.default-config-dir`. The installer downloads and parses the complete code payload in a
-temporary staging directory before replacing live files. Failed downloads, HTTP errors, an
-unsupported Nushell version, or parse failures leave an existing installation and Nushell
-configuration unchanged. Collections, chains, history, and user `.nuon` files are never replaced
-during an update. Unsupported config encodings and unsafe install paths are rejected before live
-files change. On Linux/macOS, writable `config.nu` and config-directory symlinks are resolved to
-their targets and preserved for dotfile-manager compatibility; PowerShell conservatively rejects
-reparse-point config paths.
+This installs Nurl to `~/.nurl` and automatically configures your Nushell. Restart your terminal and you're ready to go!
 
 ### Manual Install (Alternative)
 
@@ -79,39 +68,21 @@ source api.nu
 
 ### Updating
 
-Run the same install command again. It updates only Nurl's code after the complete staged payload
-passes validation, while preserving collections, chains, history, secrets, variables, and
-configuration.
+Run the same install command again - it will update the code while preserving your collections, history, and configuration.
 
 ### Uninstalling
 
-**Linux / macOS (non-interactive):**
+**Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash -s -- --yes
+curl -sSL https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.sh | bash
 ```
 
-`-y` and `NURL_ASSUME_YES=1` are equivalent forms of explicit consent. A piped script can prompt
-through `/dev/tty` when the process has a controlling terminal; without a usable terminal or
-explicit consent it aborts without mutation. You can also download the script first and run
-`bash uninstall.sh` interactively.
-
-**Windows (PowerShell, non-interactive):**
+**Windows (PowerShell):**
 ```powershell
-$env:NURL_ASSUME_YES = "1"; irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/chand45/Nurl/main/uninstall.ps1 | iex
 ```
 
-For an interactive prompt, download `uninstall.ps1` and run it without `-Yes`; `-Yes` (alias `-y`)
-provides explicit consent for a local script. PowerShell install/uninstall failures are catchable
-and do not terminate the invoking host session.
-
-Uninstall atomically moves the complete `~/.nurl` tree to a timestamped same-home backup and
-verifies its contents before considering the installation removed. If detaching or verification
-fails, Nurl data remains at its original path or in the reported backup. The uninstaller removes
-only the owned Nurl config block, plus the exact
-legacy source line used by older releases, from both the resolved and legacy config locations.
-Comments, aliases, encoding, mixed line endings, and trailing-newline state are preserved. Links
-and special files inside `~/.nurl` are rejected because they cannot be copied and verified as a
-self-contained backup.
+Your data will be backed up before removal.
 
 ---
 
