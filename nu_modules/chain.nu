@@ -34,6 +34,11 @@ def resolve-chain-file [chains_dir: string, name: string] {
     resolve-under-base $chains_dir $name "chain" --suffix ".nuon" --always-suffix --scope "API workspace chains" --base-is-canonical
 }
 
+def chain-sequence [value: any] {
+    let value_type = ($value | describe)
+    ($value_type | str starts-with "list") or ($value_type | str starts-with "table")
+}
+
 def validate-chain-steps [steps: list] {
     for step in $steps {
         if "request" in ($step | columns) {
@@ -301,10 +306,10 @@ export def "api chain exec" [
 
     let chain_def = (open-state-value $file_path)
     let chain_type = ($chain_def | describe)
-    if not (($chain_type | str starts-with "record") or ($chain_type | str starts-with "list")) {
+    if not (($chain_type | str starts-with "record") or (chain-sequence $chain_def)) {
         fail-command $"Chain file '($file_path)' must contain a record or list. Restore or recreate the file, then retry."
     }
-    let list_form = ($chain_type | str starts-with "list")
+    let list_form = (chain-sequence $chain_def)
     let steps = if $list_form { $chain_def } else { $chain_def.steps? | default $chain_def }
     validate-chain-steps $steps
 
@@ -420,7 +425,7 @@ export def "api chain list" [] {
         let chain = try {
             let value = (open-state-value $resolved_file)
             let value_type = ($value | describe)
-            if (($value_type | str starts-with "record") or ($value_type | str starts-with "list")) {
+            if (($value_type | str starts-with "record") or (chain-sequence $value)) {
                 $value
             } else {
                 {name: $logical_name, description: "", steps: []}
@@ -428,7 +433,7 @@ export def "api chain list" [] {
         } catch {
             {name: $logical_name, description: "", steps: []}
         }
-        let list_form = (($chain | describe) | str starts-with "list")
+        let list_form = (chain-sequence $chain)
 
         {
             name: (if $list_form { $logical_name } else { $chain.name? | default $logical_name })
@@ -440,17 +445,38 @@ export def "api chain list" [] {
 
 # Show chain details
 export def "api chain show" [name: string] {
-    validate-resource-name "chain" $name | ignore
+    let root = (get-api-root)
+    let normalized = ($name | str replace --all "\\" "/")
+    let explicit_syntax = (
+        ($normalized | str starts-with "/")
+        or ($normalized =~ '^[A-Za-z]:')
+    )
     let chains_dir = (get-chains-dir)
-    let file_path = (resolve-chain-file $chains_dir $name)
-
-    if not ($file_path | path exists) {
-        fail-command $"Chain '($name)' not found"
+    let file_path = if $explicit_syntax {
+        let direct_type = (path-type-safe $name)
+        let root_relative = ($root | path join $name)
+        let chains_relative = ($root | path join "chains" $name)
+        if (not ($direct_type | is-empty)) and $direct_type != "dir" {
+            $name
+        } else if (path-type-safe $root_relative) == "file" {
+            $root_relative
+        } else if (path-type-safe $chains_relative) == "file" {
+            $chains_relative
+        } else {
+            fail-command $"Chain file not found: ($name)"
+        }
+    } else {
+        validate-resource-name "chain" $name | ignore
+        let resolved = (resolve-chain-file $chains_dir $name)
+        if not ($resolved | path exists) {
+            fail-command $"Chain '($name)' not found"
+        }
+        $resolved
     }
 
     let chain = (open-state-value $file_path)
     let chain_type = ($chain | describe)
-    if not (($chain_type | str starts-with "record") or ($chain_type | str starts-with "list")) {
+    if not (($chain_type | str starts-with "record") or (chain-sequence $chain)) {
         fail-command $"Chain file '($file_path)' must contain a record or list. Restore or recreate the file, then retry."
     }
     $chain

@@ -15,17 +15,25 @@ def test-chain-list-valued-files [] {
         mkdir $chains_dir
         let workspace_path = ($chains_dir | path join "list-workflow.nuon")
         let explicit_path = ($tmp | path join "explicit-list.nuon")
-        [] | to nuon | save $workspace_path
-        [] | to nuon | save $explicit_path
+        let populated = [{request: "missing-request", use: {}}]
+        $populated | to nuon | save $workspace_path
+        $populated | to nuon | save $explicit_path
 
-        assert equal (api chain show list-workflow) [] "workspace list-valued chain show changed"
+        let workspace_show = (api chain show list-workflow)
+        assert equal ($workspace_show | length) 1 "workspace populated list-valued chain show changed"
+        assert equal ($workspace_show | first | get request) "missing-request"
+        let explicit_show = (api chain show $explicit_path)
+        assert equal ($explicit_show | length) 1 "explicit-path populated list-valued chain show changed"
+        assert equal ($explicit_show | first | get request) "missing-request"
+        assert equal (api chain list | where name == list-workflow | first | get steps) 1 "chain list did not count a populated table-form chain"
+
         let workspace_result = (api chain exec list-workflow --quiet)
-        assert equal $workspace_result.success true "workspace list-valued chain exec failed"
-        assert equal $workspace_result.results [] "workspace empty list chain executed unexpected steps"
+        assert equal $workspace_result.success false "workspace populated list-valued chain did not execute"
+        assert ($workspace_result.error | str contains "Request not found") "workspace populated list chain returned the wrong execution result"
 
         let explicit_result = (api chain exec $explicit_path --quiet)
-        assert equal $explicit_result.success true "explicit-path list-valued chain exec failed"
-        assert equal $explicit_result.results [] "explicit-path empty list chain executed unexpected steps"
+        assert equal $explicit_result.success false "explicit-path populated list-valued chain did not execute"
+        assert ($explicit_result.error | str contains "Request not found") "explicit-path populated list chain returned the wrong execution result"
         null
     } catch {|error| $error}
     cleanup $tmp

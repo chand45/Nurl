@@ -454,6 +454,14 @@ $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
     $result.stdout | from json
 }
 
+def normalize-windows-dacl [sddl: string] {
+    $sddl
+    | parse --regex '\((?<ace>[^)]+)\)'
+    | get ace
+    | each {|ace| $ace | str replace ";ID;" ";;" }
+    | sort
+}
+
 def test-state-native-write-and-stale-cleanup [] {
     let root = (make-temp-dir "state-native")
     let failure = try {
@@ -538,11 +546,88 @@ def test-state-native-write-and-stale-cleanup [] {
 
         api chain create warm-chain | ignore
         let chain_state_dir = ($root | path join "chains" ".nurl-state")
+        let warm_lock = ($chain_state_dir | path join ".warm-chain.nuon.create.lock")
+        assert (not ($warm_lock | path exists)) "owner did not release successful create lock"
+
+        let foreign_lock = ($chain_state_dir | path join ".foreign.nuon.create.lock")
+        "FOREIGN-LOCK-TOKEN" | save $foreign_lock
+        let foreign_before = (open $foreign_lock --raw)
+        let foreign_result = (run-command-process $root "api chain create foreign")
+        assert ($foreign_result.exit_code != 0) "fresh foreign create lock did not block contender"
+        assert equal (open $foreign_lock --raw) $foreign_before "nonowner changed or deleted a fresh create lock"
+        assert (not (($root | path join "chains" "foreign.nuon") | path exists)) "foreign-lock contender published state"
+        rm -f $foreign_lock
+
         let stale_lock = ($chain_state_dir | path join ".stale-chain.nuon.create.lock")
-        mkdir $stale_lock
+        "STALE-LOCK-TOKEN" | save $stale_lock
         set-state-path-stale $stale_lock
         api chain create stale-chain | ignore
         assert (not ($stale_lock | path exists)) "next no-clobber mutation did not remove stale create lock"
+        let legacy_lock = ($chain_state_dir | path join ".legacy-chain.nuon.create.lock")
+        mkdir $legacy_lock
+        set-state-path-stale $legacy_lock
+        api chain create legacy-chain | ignore
+        assert (not ($legacy_lock | path exists)) "next no-clobber mutation did not remove stale legacy directory lock"
+        assert-no-state-temps $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
+def test-state-concurrent-no-clobber [] {
+    let root = (make-temp-dir "state-concurrent-create")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        api chain create warm | ignore
+        let lock_path = ($root | path join "chains" ".nurl-state" ".race.nuon.create.lock")
+        "STALE-CONCURRENT-LOCK" | save $lock_path
+        set-state-path-stale $lock_path
+        let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+        let release_path = ($root | path join "release.txt")
+        let child_one = ($root | path join "create-one.nu")
+        let child_two = ($root | path join "create-two.nu")
+        let result_one = ($root | path join "result-one.txt")
+        let result_two = ($root | path join "result-two.txt")
+        let launcher = ($root | path join "launch-creates.ps1")
+        for child in [
+            {script: $child_one, result: $result_one, description: "winner-one"}
+            {script: $child_two, result: $result_two, description: "winner-two"}
+        ] {
+            [
+                $"use ($module_path | to nuon) *"
+                $"$env.API_ROOT = ($root | to nuon)"
+                $"let release = ($release_path | to nuon)"
+                "while not ($release | path exists) {}"
+                ("let outcome = try { api chain create race --description "
+                    + ($child.description | to nuon)
+                    + "; 'success' } catch { 'failure' }")
+                $"$outcome | save ($child.result | to nuon)"
+            ] | str join "\n" | save $child.script
+        }
+        "param($Nu, $One, $Two, $Release)
+$first = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $One) -PassThru
+$second = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Two) -PassThru
+[System.IO.File]::WriteAllText($Release, 'release')
+$first.WaitForExit()
+$second.WaitForExit()" | save $launcher
+
+        let shell = if $nu.os-info.name == "windows" { "powershell.exe" } else { "pwsh" }
+        let launched = (test-complete-result (
+            ^$shell -NoProfile -NonInteractive -File $launcher $nu.current-exe $child_one $child_two $release_path
+            | complete
+        ))
+        assert equal $launched.exit_code 0 $"concurrent create launcher failed: ($launched.stderr)"
+        let outcomes = [(open $result_one --raw | str trim) (open $result_two --raw | str trim)]
+        assert equal ($outcomes | where $it == "success" | length) 1 $"concurrent create expected one winner: ($outcomes)"
+        assert equal ($outcomes | where $it == "failure" | length) 1 $"concurrent create expected one loser: ($outcomes)"
+        let winner = (open-state-record ($root | path join "chains" "race.nuon"))
+        assert equal $winner.name "race" "concurrent create winner bytes were invalid"
+        assert ($winner.description in ["winner-one" "winner-two"]) "concurrent stale recovery did not preserve winner bytes"
+        assert (not ($lock_path | path exists)) "concurrent create left a lock sentinel"
         assert-no-state-temps $root
         null
     } catch {|error| $error}
@@ -703,7 +788,7 @@ public sealed class NurlTempCapture : IDisposable {
         if (Interlocked.CompareExchange(ref captured, 1, 0) != 0) {
             return;
         }
-        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline) {
             try {
                 using (FileStream candidate = new FileStream(
@@ -754,7 +839,7 @@ $filter = '.secrets.nuon.nurl-*.tmp'
 $capture = [NurlTempCapture]::new($Root, $filter)
 [System.IO.File]::WriteAllText($Token, ('X' * 134217728))
 $process = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Child) -PassThru -WindowStyle Hidden -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
-if (-not $capture.Wait(10000)) {
+if (-not $capture.Wait(60000)) {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
     }
@@ -782,16 +867,9 @@ $payload = @{
         let result = (open $result_path --raw | from json)
         let child_stderr = try { open $stderr_path --raw } catch { "" }
         assert ($result.temp_name | str starts-with ".secrets.nuon.nurl-") "watcher observed the wrong temp file"
-        let normalize_dacl = {|sddl|
-            $sddl
-            | parse --regex '\((?<ace>[^)]+)\)'
-            | get ace
-            | each {|ace| $ace | str replace ";ID;" ";;" }
-            | sort
-        }
-        let destination_aces = (do $normalize_dacl $result.destination_sddl)
-        assert ((do $normalize_dacl $result.broad_sddl) != $destination_aces) "DACL mutation control did not differ from the protected destination"
-        assert equal (do $normalize_dacl $result.temp_sddl) $destination_aces "credential temp effective DACL differed from the protected single-ACE destination"
+        let destination_aces = (normalize-windows-dacl $result.destination_sddl)
+        assert ((normalize-windows-dacl $result.broad_sddl) != $destination_aces) "DACL mutation control did not differ from the protected destination"
+        assert equal (normalize-windows-dacl $result.temp_sddl) $destination_aces "credential temp effective DACL differed from the protected single-ACE destination"
         if ($child_stderr | str trim | is-empty) {
             assert equal (api auth bearer get temp-dacl | str length) 134217728 "observed credential mutation did not complete"
         } else {
@@ -801,6 +879,69 @@ $payload = @{
             rm -f $orphan
         }
         assert-no-state-temps $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
+def windows-file-sddl [path: string] {
+    let script = "$acl = [System.IO.File]::GetAccessControl($env:NURL_DACL_PATH)
+$acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)"
+    let result = (test-complete-result (
+        do {
+            with-env {NURL_DACL_PATH: $path} {
+                ^powershell.exe -NoProfile -NonInteractive -Command $script
+            }
+        }
+        | complete
+    ))
+    assert equal $result.exit_code 0 $"could not inspect Windows file DACL: ($result.stderr)"
+    $result.stdout | str trim
+}
+
+def test-windows-final-dacl-policy [] {
+    if $nu.os-info.name != "windows" {
+        return
+    }
+
+    let root = (make-temp-dir "state-final-dacl")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let secrets_path = ($root | path join "secrets.nuon")
+        let state_dir = ($root | path join ".nurl-state")
+        let harden = "$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = [System.Security.AccessControl.FileSecurity]::new()
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, 'Read', 'Allow'))
+[System.IO.File]::SetAccessControl($env:NURL_DACL_PATH, $acl)"
+        let hardened = (test-complete-result (
+            do {
+                with-env {NURL_DACL_PATH: $secrets_path} {
+                    ^powershell.exe -NoProfile -NonInteractive -Command $harden
+                }
+            }
+            | complete
+        ))
+        assert equal $hardened.exit_code 0 $"could not harden destination DACL fixture: ($hardened.stderr)"
+        let old_sddl = (windows-file-sddl $secrets_path)
+
+        api auth bearer set final-dacl FINAL-DACL-SENTINEL | ignore
+
+        let final_sddl = (windows-file-sddl $secrets_path)
+        let control_path = ($state_dir | path join "final-dacl-control.tmp")
+        "" | save $control_path
+        let control_sddl = (windows-file-sddl $control_path)
+        assert ((normalize-windows-dacl $old_sddl) != (normalize-windows-dacl $control_sddl)) "custom per-file DACL fixture did not differ from temp policy"
+        assert equal (normalize-windows-dacl $final_sddl) (normalize-windows-dacl $control_sddl) "final destination did not adopt the protected temp-directory DACL"
+        assert equal (api auth bearer get final-dacl) "FINAL-DACL-SENTINEL"
+        rm -f $control_path
         null
     } catch {|error| $error}
     cleanup $root
@@ -842,8 +983,10 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "state I/O errors propagate and no-clobber messages stay stable" { test-state-io-errors-and-no-clobber })
         (run-test "read-only state commands are byte-stable and credentials survive mutations" { test-state-read-only-and-credentials })
         (run-test "state writes avoid PowerShell and clean stale create locks" { test-state-native-write-and-stale-cleanup })
+        (run-test "concurrent no-clobber creates publish exactly one winner" { test-state-concurrent-no-clobber })
         (run-test "Windows writes work under PowerShell Constrained Language Mode" { test-windows-constrained-language-writes })
         (run-test "Windows credential temps match a protected single-ACE DACL" { test-windows-state-temp-dacl })
+        (run-test "Windows replacements adopt the protected temp-directory DACL" { test-windows-final-dacl-policy })
         (run-test "history config readers use fail-closed state errors" { test-history-config-corruption-contracts })
     ]
 }

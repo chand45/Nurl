@@ -164,8 +164,21 @@ export def initialize-state-store [root: string] {
     secure-state-temp-dir ($root | path join "config.nuon") | ignore
 }
 
-def release-state-create-lock [lock_path: string, path: string, published: bool] {
-    let cleanup_error = (remove-state-path $lock_path)
+def release-state-create-lock [lock_path: string, owner: string, path: string, published: bool] {
+    let observed = try {
+        open $lock_path --raw
+    } catch {|error|
+        let outcome = if $published { "was created" } else { "was not created" }
+        error make {msg: $"State file '($path)' ($outcome), but its create lock could not be read: ($error.msg)"}
+    }
+    if $observed != $owner {
+        let outcome = if $published { "was created" } else { "was not created" }
+        error make {msg: $"State file '($path)' ($outcome), but create-lock ownership changed"}
+    }
+    let cleanup_error = try {
+        rm -f $lock_path
+        null
+    } catch {|error| $error}
     if $cleanup_error != null {
         let outcome = if $published { "was created" } else { "was not created" }
         error make {
@@ -182,23 +195,86 @@ def cleanup-stale-create-lock [lock_path: string] {
         ls -a ($lock_path | path dirname)
         | where {|entry| ($entry.name | path basename) == ($lock_path | path basename)}
     )
-    if not ($entries | is-empty) and (($entries | first | get modified) < ((date now) - $STATE_LOCK_MAX_AGE)) {
-        let cleanup_error = (remove-state-path $lock_path)
-        if $cleanup_error != null {
-            error make {msg: $"Could not clean stale state create lock '($lock_path)': ($cleanup_error.msg)"}
-        }
+    if ($entries | is-empty) {
+        return
     }
+    let stale = (($entries | first | get modified) < ((date now) - $STATE_LOCK_MAX_AGE))
+    if not $stale {
+        return
+    }
+
+    let reclaim_path = $"($lock_path).reclaim"
+    let reclaim_owner = (random uuid)
+    let reclaim_error = try {
+        $reclaim_owner | save $reclaim_path
+        null
+    } catch {|error| $error}
+    if $reclaim_error != null {
+        return
+    }
+
+    let cleanup_error = try {
+        let current_entries = (
+            ls -a ($lock_path | path dirname)
+            | where {|entry| ($entry.name | path basename) == ($lock_path | path basename)}
+        )
+        if not ($current_entries | is-empty) {
+            let still_stale = (($current_entries | first | get modified) < ((date now) - $STATE_LOCK_MAX_AGE))
+            if $still_stale {
+                let removal_error = (remove-state-path $lock_path)
+                if $removal_error != null {
+                    error make {msg: $removal_error.msg}
+                }
+            }
+        }
+        null
+    } catch {|error| $error}
+
+    let observed_owner = try { open $reclaim_path --raw } catch { "" }
+    let release_error = if $observed_owner == $reclaim_owner {
+        remove-state-path $reclaim_path
+    } else {
+        {msg: $"Stale-lock reclaim ownership changed for '($lock_path)'"}
+    }
+    if $cleanup_error != null {
+        error make {msg: $"Could not clean stale state create lock '($lock_path)': ($cleanup_error.msg)"}
+    }
+    if $release_error != null {
+        error make {msg: $release_error.msg}
+    }
+}
+
+def require-state-create-lock-owner [lock_path: string, owner: string, path: string] {
+    let observed = try { open $lock_path --raw } catch {
+        error make {msg: $"State create lock for '($path)' disappeared before publication"}
+    }
+    if $observed != $owner {
+        error make {msg: $"State create-lock ownership changed before publishing '($path)'"}
+    }
+}
+
+def legacy-lock-move-required [] {
+    let parts = ((version | get version) | split row ".")
+    (($parts | first | into int) == 0) and (($parts | get 1 | into int) < 97)
 }
 
 def commit-state-no-clobber [temp_path: string, path: string, exists_message: string] {
     let lock_path = (state-create-lock-path $path)
     cleanup-stale-create-lock $lock_path
+    let owner = (random uuid)
+    let pending_path = $"($lock_path).($owner).pending"
     let lock_error = try {
-        mkdir $lock_path
+        if (legacy-lock-move-required) {
+            $owner | save $pending_path
+            mv $pending_path $lock_path
+        } else {
+            $owner | save $lock_path
+        }
         null
     } catch {|error|
         $error
     }
+    remove-state-path $pending_path | ignore
     if $lock_error != null {
         if ($path | path exists) {
             fail-command $exists_message
@@ -207,9 +283,10 @@ def commit-state-no-clobber [temp_path: string, path: string, exists_message: st
     }
 
     if ($path | path exists) {
-        release-state-create-lock $lock_path $path false
+        release-state-create-lock $lock_path $owner $path false
         fail-command $exists_message
     }
+    require-state-create-lock-owner $lock_path $owner $path
 
     let publish_error = try {
         mv -f $temp_path $path
@@ -218,7 +295,10 @@ def commit-state-no-clobber [temp_path: string, path: string, exists_message: st
         $error
     }
     if $publish_error != null {
-        let lock_cleanup_error = (remove-state-path $lock_path)
+        let lock_cleanup_error = try {
+            release-state-create-lock $lock_path $owner $path false
+            null
+        } catch {|error| $error}
         if $lock_cleanup_error != null {
             error make {
                 msg: $"($publish_error.msg); create-lock cleanup also failed: ($lock_cleanup_error.msg)"
@@ -227,7 +307,7 @@ def commit-state-no-clobber [temp_path: string, path: string, exists_message: st
         error make {msg: $publish_error.msg}
     }
 
-    release-state-create-lock $lock_path $path true
+    release-state-create-lock $lock_path $owner $path true
 }
 
 def commit-state-replace [temp_path: string, path: string] {
