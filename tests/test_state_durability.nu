@@ -525,8 +525,11 @@ def test-state-native-write-and-stale-cleanup [] {
         let linked_result = (run-command-process $link_root "api init")
         assert ($linked_result.exit_code != 0) "linked state temp directory unexpectedly initialized"
         assert (
-            ($linked_result.stderr | str contains "must not be a link")
-                or ($linked_result.stderr | str contains "must be a directory")
+            ($linked_result.stderr | str contains "State temp")
+                and (
+                    ($linked_result.stderr | str contains "link")
+                        or ($linked_result.stderr | str contains "directory")
+                )
         ) $"linked state temp error was not actionable: ($linked_result.stderr)"
         cleanup $link_root
         cleanup $link_target
