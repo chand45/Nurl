@@ -806,7 +806,7 @@ public sealed class NurlTempCapture : IDisposable {
         if (Interlocked.CompareExchange(ref captured, 1, 0) != 0) {
             return;
         }
-        DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline) {
             try {
                 using (FileStream candidate = new FileStream(
@@ -820,7 +820,7 @@ public sealed class NurlTempCapture : IDisposable {
                 ready.Set();
                 return;
             } catch (IOException) {
-                Thread.SpinWait(1000);
+                Thread.Sleep(2);
             }
         }
         Interlocked.Exchange(ref captured, 0);
@@ -858,6 +858,7 @@ $capture = [NurlTempCapture]::new($Root, $filter)
 [System.IO.File]::WriteAllText($Token, ('X' * 134217728))
 $process = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Child) -PassThru -WindowStyle Hidden -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
 if (-not $capture.Wait(60000)) {
+    $capture.Dispose()
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
     }
