@@ -288,6 +288,12 @@ def commit-state-no-clobber [temp_path: string, path: string, exists_message: st
 
     let lock_path = (state-create-lock-path $path)
     cleanup-stale-create-lock $lock_path
+    if ($lock_path | path exists) {
+        if ($path | path exists) {
+            fail-command $exists_message
+        }
+        fail-command $"Could not acquire state create lock for '($path)': another writer owns the lock"
+    }
     let owner = (random uuid)
     let pending_path = $"($lock_path).($owner).pending"
     let lock_error = try {
