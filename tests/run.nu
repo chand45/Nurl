@@ -35,6 +35,7 @@ source test_credential_blackbox.nu
 source test_surface_contracts.nu
 source test_secure_header_capture.nu
 source test_transport_failures.nu
+source test_state_durability.nu
 source test_packaging.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ let all_results = (
         ...(run-suite-surface-contracts)
         ...(run-suite-secure-header-capture)
         ...(run-suite-transport-failures)
+        ...(run-suite-state-durability)
         ...(run-suite-packaging)
     ]
 )

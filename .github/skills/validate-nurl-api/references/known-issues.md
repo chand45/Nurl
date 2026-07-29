@@ -226,3 +226,17 @@ request, interpolates variables, or touches `.nuon` files.
   explicit combined failure, and byte-exact restoration when `--all` removes the index before
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
+
+## 22. Interrupted state writes could corrupt most commands  (FIXED)
+- **Symptom:** an interrupted credential, config, variable, collection, environment, saved-request,
+  or chain update could leave an empty/partial `.nuon` file. Later commands emitted raw Nushell
+  parser errors and could make authenticated or all requests unusable.
+- **Root cause:** non-history workspace state used truncate-then-stream `save`/`save -f` and bare
+  `open`, with no atomic commit boundary or shared syntax/record-shape validation.
+- **Fix:** serialized state now commits through a unique same-directory temporary file and rename.
+  Failed commits preserve the prior destination and remove temporary files. Readers load raw bytes
+  before parsing and report a clean path-specific recovery error for invalid/non-record NUON while
+  preserving genuine I/O failures. History persistence remains a separate snapshot/restore system.
+- **Re-check:** run the state durability suite through `tests/run.nu`; it covers every workspace
+  state category, exact bytes, deterministic failed commits, credential preservation, I/O
+  propagation, no-clobber creates, read-only byte stability, and temporary-file cleanup.

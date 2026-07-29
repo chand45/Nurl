@@ -510,6 +510,7 @@ def test-installer-module-payloads [] {
         assert equal ($ps_modules | uniq | length) ($ps_modules | length) "PowerShell installer payload must not contain duplicates"
         assert equal ($sh_modules | uniq | length) ($sh_modules | length) "shell installer payload must not contain duplicates"
         assert ("resource-path.nu" in $required)
+        assert ("state-store.nu" in $required)
         assert ("command-error.nu" in $required)
         assert ("curl-capability.nu" in $required)
         assert ("windows-private-capture.nu" not-in $required) "obsolete filesystem capture helper remains in the module closure"
@@ -568,7 +569,7 @@ def test-installer-module-payloads [] {
             assert equal $sourced.exit_code 0 $"isolated ($payload.name) installer payload did not source successfully"
             assert equal ($sourced.stderr | str trim) "" $"isolated ($payload.name) source wrote stderr"
 
-            for required_module in ["resource-path.nu" "command-error.nu" "curl-capability.nu"] {
+            for required_module in ["resource-path.nu" "state-store.nu" "command-error.nu" "curl-capability.nu"] {
                 let module_path = ($install_root | path join "nu_modules" $required_module)
                 let backup_path = ($tmp | path join $"($payload.name)-($required_module)")
                 mv $module_path $backup_path

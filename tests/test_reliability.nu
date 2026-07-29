@@ -340,7 +340,7 @@ def test-v1-status-invalid-context [] {
     assert equal ($child_version.stdout | str trim) (version | get version) "status tests used a different child runtime"
 
     [] | to nuon | save -f $config_path
-    assert-v1-status-failure $tmp "config.nuon must contain a record"
+    assert-v1-status-failure $tmp "Restore or recreate"
 
     {default_collection: 42} | to nuon | save -f $config_path
     assert-v1-status-failure $tmp "default_collection must be a non-empty string or null"
@@ -360,7 +360,7 @@ def test-v1-status-invalid-context [] {
 
     let environment_path = ($tmp | path join "collections" "configured" "environments" "missing.nuon")
     [] | to nuon | save $environment_path
-    assert-v1-status-failure $tmp "must contain a record"
+    assert-v1-status-failure $tmp "Restore or recreate"
     cleanup $tmp
 }
 

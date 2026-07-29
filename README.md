@@ -26,6 +26,8 @@
 
 **Never lose a completed request again:** Every completed HTTP response is automatically saved to history with full request/response details. Search through past requests, inspect responses, and resend any request with a single command — no need to remember or retype complex curl commands.
 
+Workspace configuration, credentials, variables, collections, environments, saved requests, and chains are committed atomically. If a state file is corrupt or has the wrong shape, Nurl stops with a path-specific recovery error instead of exposing parser internals or continuing with partial state.
+
 ---
 
 ## Requirements
