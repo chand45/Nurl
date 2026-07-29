@@ -1,22 +1,20 @@
-# Atomic workspace state persistence and fail-closed read regressions.
+# Atomic replacement and fail-closed workspace state regressions.
 
 use ../nu_modules/state-store.nu [open-state-record save-state-bytes]
 
-def state-durability-entries [root: string] {
-    if not ($root | path exists) {
-        return []
-    }
+def state-entries [root: string] {
+    if not ($root | path exists) { return [] }
     ls -a $root | each {|entry|
         if $entry.type == "dir" {
-            state-durability-entries $entry.name
+            [$entry.name] | append (state-entries $entry.name)
         } else {
             [$entry.name]
         }
     } | flatten
 }
 
-def state-durability-snapshot [root: string] {
-    state-durability-entries $root
+def state-snapshot [root: string] {
+    state-entries $root
     | where {|path| $path | str ends-with ".nuon" }
     | each {|path|
         {
@@ -28,18 +26,37 @@ def state-durability-snapshot [root: string] {
 }
 
 def state-temp-files [root: string] {
-    state-durability-entries $root
-    | where {|path|
+    state-entries $root | where {|path|
         let name = ($path | path basename)
-        ($name | str starts-with ".") and ($name | str contains ".nurl-") and ($name | str ends-with ".tmp")
+        $name =~ '^\..+\.nurl-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.tmp$'
     }
 }
 
-def assert-no-state-temps [root: string] {
-    assert equal (state-temp-files $root) [] "workspace retained a state-store temporary file"
+def assert-no-state-artifacts [root: string] {
+    assert equal (state-temp-files $root) [] "workspace retained a state sibling temp"
+    let forbidden = (
+        state-entries $root
+        | where {|path|
+            let name = ($path | path basename)
+            let entry_type = ($path | path type)
+            (
+                (($entry_type == "dir") and (
+                    ($name == ".nurl-state")
+                    or ($name =~ '^\.nurl-state-setup-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+                ))
+                or (($entry_type == "file") and (
+                    ($name =~ '^\.secured-v[0-9]+$')
+                    or ($name =~ '^\..+\.create\.lock$')
+                    or ($name =~ '^\..+\.nurl-create\.lock$')
+                ))
+            )
+        }
+    )
+    assert equal $forbidden [] "workspace retained removed state architecture artifacts"
 }
 
 def setup-state-workspace [root: string] {
+    $env.API_ROOT = $root
     api init | ignore
     api vars set base_url "https://example.invalid" | ignore
     api auth bearer set durable "CREDENTIAL-SENTINEL" | ignore
@@ -52,54 +69,24 @@ def setup-state-workspace [root: string] {
 
 def state-category-cases [root: string] {
     [
-        {
-            category: "config"
-            path: ($root | path join "config.nuon")
-            command: "api config get | ignore"
-        }
-        {
-            category: "variables"
-            path: ($root | path join "variables.nuon")
-            command: "api vars list | ignore"
-        }
-        {
-            category: "credentials"
-            path: ($root | path join "secrets.nuon")
-            command: "api auth list | ignore"
-        }
-        {
-            category: "collection"
-            path: ($root | path join "collections" "durable" "collection.nuon")
-            command: "api collection show durable | ignore"
-        }
-        {
-            category: "collection metadata"
-            path: ($root | path join "collections" "durable" "meta.nuon")
-            command: "api collection env list durable | ignore"
-        }
-        {
-            category: "environment"
-            path: ($root | path join "collections" "durable" "environments" "dev.nuon")
-            command: "api collection env show durable dev | ignore"
-        }
-        {
-            category: "request"
-            path: ($root | path join "collections" "durable" "requests" "ping.nuon")
-            command: "api request show ping --collection durable | ignore"
-        }
-        {
-            category: "chain"
-            path: ($root | path join "chains" "durable.nuon")
-            command: "api chain show durable | ignore"
-        }
+        {category: config, path: ($root | path join "config.nuon"), command: "api config get | ignore"}
+        {category: variables, path: ($root | path join "variables.nuon"), command: "api vars list | ignore"}
+        {category: credentials, path: ($root | path join "secrets.nuon"), command: "api auth list | ignore"}
+        {category: collection, path: ($root | path join "collections" "durable" "collection.nuon"), command: "api collection show durable | ignore"}
+        {category: metadata, path: ($root | path join "collections" "durable" "meta.nuon"), command: "api collection env list durable | ignore"}
+        {category: environment, path: ($root | path join "collections" "durable" "environments" "dev.nuon"), command: "api collection env show durable dev | ignore"}
+        {category: request, path: ($root | path join "collections" "durable" "requests" "ping.nuon"), command: "api request show ping --collection durable | ignore"}
+        {category: chain, path: ($root | path join "chains" "durable.nuon"), command: "api chain show durable | ignore"}
     ]
 }
 
-def write-state-corruption [path: string, kind: string] {
+def write-state-corruption [path: string, kind: string, category: string] {
     match $kind {
-        "syntax" => { "{token: CREDENTIAL-SENTINEL" | save -f $path }
-        "shape" => { "[CREDENTIAL-SENTINEL]" | save -f $path }
-        "binary" => { 0x[ff fe 00 43 52 45 44] | save -f $path }
+        syntax => { "{token: CREDENTIAL-SENTINEL" | save -f $path }
+        shape => {
+            if $category == "chain" { "42" | save -f $path } else { "[CREDENTIAL-SENTINEL]" | save -f $path }
+        }
+        binary => { 0x[ff fe 00 43 52 45 44] | save -f $path }
     }
 }
 
@@ -108,86 +95,188 @@ def assert-state-read-failure [result: record, path: string, label: string] {
     assert equal ($result.stdout | str trim) "" $"($label) wrote stdout"
     assert equal $result.stderr ($result.stderr | ansi strip) $"($label) emitted ANSI stderr"
     assert ($result.stderr | str contains ($path | path basename)) $"($label) did not name the state path"
-    assert ($result.stderr | str contains "recreate") $"($label) omitted the recovery step"
-    for leaked in [
-        "CREDENTIAL-SENTINEL"
-        "Unexpected end of code"
-        "error when parsing nuon text"
-        "nu::shell::outsidespan"
-    ] {
-        assert (not ($result.stderr | str contains $leaked)) $"($label) leaked forbidden parser/content text: ($leaked)"
+    assert ($result.stderr | str contains "recreate") $"($label) omitted recovery guidance"
+    for leaked in ["CREDENTIAL-SENTINEL" "Unexpected end of code" "nu::parser" "nu::shell::outsidespan"] {
+        assert (not ($result.stderr | str contains $leaked)) $"($label) leaked parser/content text: ($leaked)"
     }
 }
 
-def test-state-atomic-bytes [] {
+def age-state-entry [path: string] {
+    if $nu.os-info.name == "windows" {
+        let script = if ($path | path type) == "dir" {
+            "[System.IO.Directory]::SetLastWriteTimeUtc($env:NURL_AGE_PATH, [DateTime]::UtcNow.AddHours(-2))"
+        } else {
+            "[System.IO.File]::SetLastWriteTimeUtc($env:NURL_AGE_PATH, [DateTime]::UtcNow.AddHours(-2))"
+        }
+        let result = (test-complete-result (
+            do { with-env {NURL_AGE_PATH: $path} { ^powershell.exe -NoProfile -NonInteractive -Command $script } }
+            | complete
+        ))
+        assert equal $result.exit_code 0 $"could not age state fixture: ($result.stderr)"
+    } else {
+        let result = (test-complete-result (^touch -m -d "2 hours ago" $path | complete))
+        assert equal $result.exit_code 0 $"could not age state fixture: ($result.stderr)"
+    }
+}
+
+def test-state-atomic-bytes-and-symlink [] {
     let root = (make-temp-dir "state-bytes")
     let failure = try {
-        let cases = [
-            {
-                name: "compact"
-                serialized: ({alpha: 1 beta: "two"} | to nuon)
-            }
-            {
-                name: "indented"
-                serialized: ({alpha: 1 nested: {beta: "two"}} | to nuon --indent 4)
-            }
-            {
-                name: "binary"
-                serialized: 0x[00 ff 10 20 0a]
-            }
-        ]
-        for case in $cases {
-            let legacy_path = ($root | path join $"legacy-($case.name)")
-            let atomic_path = ($root | path join $"atomic-($case.name)")
-            $case.serialized | save $legacy_path
-            save-state-bytes $atomic_path $case.serialized
-            assert equal (open $atomic_path --raw) (open $legacy_path --raw) $"($case.name) bytes changed through the state helper"
+        for case in [
+            {name: compact, serialized: ({alpha: 1 beta: two} | to nuon)}
+            {name: indented, serialized: ({alpha: 1 nested: {beta: two}} | to nuon --indent 4)}
+            {name: binary, serialized: 0x[00 ff 10 20 0a]}
+        ] {
+            let expected = ($root | path join $"expected-($case.name)")
+            let actual = ($root | path join $"actual-($case.name)")
+            $case.serialized | save $expected
+            save-state-bytes $actual $case.serialized
+            assert equal (open $actual --raw) (open $expected --raw) $"($case.name) serialized bytes changed"
         }
 
-        let init_root = ($root | path join "workspace")
-        mkdir $init_root
-        $env.API_ROOT = $init_root
-        api init | ignore
-        let expected_config = ({
-            default_headers: {
-                "Content-Type": "application/json"
-                "Accept": "application/json"
-            }
-            timeout_seconds: 30
-            history_retention_days: 30
-            editor: "code"
-            colors: {
-                success: "green"
-                error: "red"
-                warning: "yellow"
-                info: "blue"
-            }
-        } | to nuon)
-        let expected_path = ($root | path join "expected-config.nuon")
-        $expected_config | save $expected_path
-        assert equal (open ($init_root | path join "config.nuon") --raw) (open $expected_path --raw) "api init changed config serialization"
-
         if $nu.os-info.name != "windows" {
-            let target = ($root | path join "symlink-target.nuon")
-            let link = ($root | path join "symlink-state.nuon")
+            let target = ($root | path join "target.nuon")
+            let link = ($root | path join "link.nuon")
             {before: true} | to nuon | save $target
             ^ln -s $target $link
             save-state-bytes $link ({after: true} | to nuon)
-            assert equal (open $target) {after: true} "symlink-backed state did not update its target"
-            let link_check = (do { ^test -L $link } | complete)
-            assert equal $link_check.exit_code 0 "state replacement destroyed the destination symlink"
+            assert equal (open $target) {after: true} "symlink destination target was not replaced"
+            assert equal (^test -L $link | complete | get exit_code) 0 "destination symlink was destroyed"
         }
-        assert-no-state-temps $root
+        assert-no-state-artifacts $root
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def test-state-failed-commit-preserves-original [] {
-    let root = (make-temp-dir "state-commit")
+def test-state-stale-temp-cleanup [] {
+    let root = (make-temp-dir "state-stale-temp")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let aged = ($root | path join ".config.nuon.nurl-11111111-1111-1111-1111-111111111111.tmp")
+        let fresh = ($root | path join ".config.nuon.nurl-22222222-2222-2222-2222-222222222222.tmp")
+        let unrelated = ($root | path join ".variables.nuon.nurl-33333333-3333-3333-3333-333333333333.tmp")
+        let near_temp = ($root | path join ".config.nuon.nurl-backup.tmp")
+        "AGED-TEMP-SENTINEL" | save $aged
+        "FRESH-TEMP-SENTINEL" | save $fresh
+        "UNRELATED-TEMP-SENTINEL" | save $unrelated
+        "NEAR-TEMP-SENTINEL" | save $near_temp
+        age-state-entry $aged
+        age-state-entry $unrelated
+        age-state-entry $near_temp
+
+        let removable_result = (run-command-process $root "api config set stale_cleanup one | ignore")
+        assert equal $removable_result.exit_code 0 $"removable stale temp blocked config write: ($removable_result.stderr)"
+        assert equal ($removable_result.stderr | str trim) "" "fresh/removable stale temps emitted a warning"
+        assert ($removable_result.stdout | str contains "Config updated: stale_cleanup = one") "normal config success stdout changed"
+        assert (not ($aged | path exists)) "aged exact-prefix sibling temp was not removed"
+        assert equal (open $fresh --raw) "FRESH-TEMP-SENTINEL" "fresh exact-prefix sibling temp was removed"
+        assert equal (open $unrelated --raw) "UNRELATED-TEMP-SENTINEL" "other-destination sibling temp was removed"
+        assert equal (open $near_temp --raw) "NEAR-TEMP-SENTINEL" "non-UUID temp near-match was removed"
+
+        let clean_root = ($root | path join "clean-reference")
+        let clean_init = (run-command-process $clean_root "api init | ignore")
+        assert equal $clean_init.exit_code 0 $"clean reference init failed: ($clean_init.stderr)"
+        let clean_result = (run-command-process $clean_root "api auth bearer set blocked BLOCKED-WRITE-CREDENTIAL")
+        assert equal $clean_result.exit_code 0 $"clean reference credential write failed: ($clean_result.stderr)"
+        assert equal ($clean_result.stderr | str trim) "" "clean credential write emitted a warning"
+        let expected_secrets = (open ($clean_root | path join "secrets.nuon") --raw)
+
+        let blocked = ($root | path join ".secrets.nuon.nurl-44444444-4444-4444-4444-444444444444.tmp")
+        let secrets = ($root | path join "secrets.nuon")
+        let secrets_before = (open $secrets --raw)
+        let lock = if $nu.os-info.name == "windows" {
+            "BLOCKED-TEMP-CONTENT-SENTINEL" | save $blocked
+            age-state-entry $blocked
+            start-state-read-lock $root $blocked
+        } else {
+            mkdir $blocked
+            "BLOCKED-TEMP-CONTENT-SENTINEL" | save ($blocked | path join "content")
+            age-state-entry $blocked
+            null
+        }
+        let blocked_result = (run-command-process $root "api auth bearer set blocked BLOCKED-WRITE-CREDENTIAL")
+        let repeated_result = (run-command-process $root "api auth bearer set blocked BLOCKED-WRITE-CREDENTIAL")
+        let config_result = (run-command-process $root "api config set stale_cleanup two | ignore")
+        let vars_result = (run-command-process $root "api vars set unrelated exact | ignore")
+        if $lock != null {
+            stop-state-read-lock $lock
+        }
+        let warning = $"Warning: Could not remove stale state temp '($blocked)'; remove it manually."
+        assert equal $blocked_result.exit_code 0 $"unremovable same-destination stale temp blocked the write: ($blocked_result.stderr)"
+        assert equal $blocked_result.stdout $clean_result.stdout "stale temp changed successful write stdout"
+        assert equal ($blocked_result.stderr | str trim) $warning $"stale temp warning changed: ($blocked_result.stderr | to nuon)"
+        assert equal $repeated_result.exit_code 0 $"repeated stale warning write failed: ($repeated_result.stderr)"
+        assert equal $repeated_result.stdout $clean_result.stdout "repeated stale warning changed success stdout"
+        assert equal $repeated_result.stderr $blocked_result.stderr "stale warning wording changed across repeats"
+        assert equal $blocked_result.stderr ($blocked_result.stderr | ansi strip) "stale temp warning emitted ANSI"
+        for leaked in ["BLOCKED-TEMP-CONTENT-SENTINEL" "BLOCKED-WRITE-CREDENTIAL" "os error" "nu::" "originates from here"] {
+            assert (not ($blocked_result.stderr | str contains $leaked)) $"stale temp warning leaked forbidden text: ($leaked)"
+        }
+        assert ((open $secrets --raw) != $secrets_before) "same-path credential rotation did not commit new bytes"
+        assert equal (open $secrets --raw) $expected_secrets "stale temp changed committed credential bytes"
+        assert equal (api auth bearer get blocked) BLOCKED-WRITE-CREDENTIAL "same-path credential rotation did not commit new content"
+        assert equal $config_result.exit_code 0 $"secrets temp blocked config mutation: ($config_result.stderr)"
+        assert equal $vars_result.exit_code 0 $"secrets temp blocked variables mutation: ($vars_result.stderr)"
+        assert equal (open ($root | path join "config.nuon") | get stale_cleanup) two "unrelated config write did not complete"
+        assert equal (open ($root | path join "variables.nuon") | get unrelated) exact "unrelated variables mutation did not complete"
+        assert (not ($unrelated | path exists)) "variables mutation did not clean its own aged temp"
+        let blocked_content = if $nu.os-info.name == "windows" {
+            open $blocked --raw
+        } else {
+            open ($blocked | path join "content") --raw
+        }
+        assert equal $blocked_content "BLOCKED-TEMP-CONTENT-SENTINEL" "unremovable stale temp changed"
+        if $nu.os-info.name == "windows" { rm -f $blocked } else { rm -rf $blocked }
+        rm -f $fresh $near_temp
+        cleanup $clean_root
+        assert-no-state-artifacts $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def start-state-read-lock [root: string, target: string] {
+    let holder = ($root | path join "lock-holder.ps1")
+    let launcher = ($root | path join "lock-launcher.ps1")
+    let ready = ($root | path join "lock-ready.txt")
+    "param($Target, $Ready)
+$stream = [System.IO.File]::Open($Target, 'Open', 'Read', 'None')
+try {
+    [System.IO.File]::WriteAllText($Ready, 'ready')
+    [System.Threading.ManualResetEvent]::new($false).WaitOne() | Out-Null
+} finally { $stream.Dispose() }" | save $holder
+    "param($Holder, $Target, $Ready)
+$args = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('\"{0}\"' -f $Holder),('\"{0}\"' -f $Target),('\"{0}\"' -f $Ready))
+$process = Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden
+if (-not [System.Threading.SpinWait]::SpinUntil({ Test-Path -LiteralPath $Ready }, 10000)) {
+    Stop-Process -Id $process.Id -Force
+    throw 'lock barrier failed'
+}
+$process.Id" | save $launcher
+    let result = (test-complete-result (
+        ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher $holder $target $ready
+        | complete
+    ))
+    assert equal $result.exit_code 0 $"file lock failed: ($result.stderr)"
+    {pid: ($result.stdout | str trim | into int)}
+}
+
+def stop-state-read-lock [lock: record] {
+    let result = (test-complete-result (
+        ^powershell.exe -NoProfile -NonInteractive -Command (
+            "Stop-Process -Id " + ($lock.pid | into string) + " -Force -ErrorAction SilentlyContinue"
+        )
+        | complete
+    ))
+    assert equal $result.exit_code 0 $"file lock release failed: ($result.stderr)"
+}
+
+def test-state-failed-replacement-preserves-original [] {
+    let root = (make-temp-dir "state-failure")
     let failure = try {
         $env.API_ROOT = $root
         setup-state-workspace $root
@@ -197,30 +286,23 @@ def test-state-failed-commit-preserves-original [] {
             let lock = (start-state-read-lock $root $path)
             let result = (run-command-process $root "api auth bearer set interrupted NEW-CREDENTIAL-SENTINEL")
             stop-state-read-lock $lock
-            assert ($result.exit_code != 0) "locked commit failure exited zero"
-            assert equal ($result.stdout | str trim) "" "locked credential commit wrote stdout"
-            assert (not ($result.stderr | str contains "NEW-CREDENTIAL-SENTINEL")) "locked credential commit leaked the new credential"
+            assert ($result.exit_code != 0) "locked replacement exited zero"
+            assert equal ($result.stdout | str trim) "" "locked replacement wrote stdout"
+            assert (not ($result.stderr | str contains "NEW-CREDENTIAL-SENTINEL")) "locked replacement leaked credential"
         } else {
-            let temp_dir = ($root | path join ".nurl-state")
-            ^chmod 500 $temp_dir
-            let write_error = try {
-                api auth bearer set interrupted NEW-CREDENTIAL-SENTINEL | ignore
-                null
-            } catch {|error| $error}
-            ^chmod 700 $temp_dir
-            assert ($write_error != null) "read-only-directory write failure exited zero"
-            assert (not ($write_error.msg | str contains "NEW-CREDENTIAL-SENTINEL")) "failed credential write leaked the new credential"
+            ^chmod 500 $root
+            let result = (run-command-process $root "api auth bearer set interrupted NEW-CREDENTIAL-SENTINEL")
+            ^chmod 700 $root
+            assert ($result.exit_code != 0) "read-only parent replacement exited zero"
+            assert equal ($result.stdout | str trim) "" "read-only parent replacement wrote stdout"
         }
-        assert equal (open $path --raw) $before "failed credential write changed the original bytes"
-        assert equal (api auth bearer get durable) "CREDENTIAL-SENTINEL" "failed write damaged the original credential store"
-        assert equal (api auth bearer get interrupted) null "failed write persisted the interrupted credential"
-        assert-no-state-temps $root
+        assert equal (open $path --raw) $before "failed replacement changed original bytes"
+        assert equal (api auth bearer get durable) "CREDENTIAL-SENTINEL"
+        assert-no-state-artifacts $root
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 def test-state-corruption-contracts [] {
@@ -230,128 +312,156 @@ def test-state-corruption-contracts [] {
         setup-state-workspace $root
         for category in (state-category-cases $root) {
             let valid = (open $category.path --raw)
-            for corruption in ["syntax" "shape" "binary"] {
-                if $category.category == "chain" and $corruption == "shape" {
-                    "42" | save -f $category.path
-                } else {
-                    write-state-corruption $category.path $corruption
-                }
-                let result = (run-command-process $root $category.command)
-                assert-state-read-failure $result $category.path $"($category.category)/($corruption)"
+            for kind in [syntax shape binary] {
+                write-state-corruption $category.path $kind $category.category
+                assert-state-read-failure (run-command-process $root $category.command) $category.path $"($category.category)/($kind)"
                 $valid | save -f $category.path
             }
         }
-        assert-no-state-temps $root
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def start-state-read-lock [root: string, target: string] {
-    if $nu.os-info.name != "windows" {
-        let raw = (open $target --raw)
-        rm $target
-        mkdir $target
-        return {mode: "directory", target: $target, raw: $raw}
-    }
+def test-state-partial-new-file-recovery [] {
+    let root = (make-temp-dir "state-partial-create")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let chains_dir = ($root | path join "chains")
+        mkdir $chains_dir
+        let path = ($chains_dir | path join "interrupted.nuon")
+        if $nu.os-info.name == "windows" {
+            save-state-bytes $path "{name: PARTIAL-PUBLIC-SENTINEL, steps: [" --no-clobber
+        } else {
+            let payload = ($root | path join "partial-payload.txt")
+            let child = ($root | path join "partial-child.nu")
+            let launcher = ($root | path join "partial-launcher.sh")
+            let observed_size = ($root | path join "partial-size.txt")
+            let stdout = ($root | path join "partial.stdout")
+            let stderr = ($root | path join "partial.stderr")
+            let module = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+            let payload_size = 16777216
+            let generator = ($root | path join "partial-payload.sh")
+            ("#!/usr/bin/env bash\nset -e\nprintf 'PARTIAL-PUBLIC-SENTINEL-' > \"$1\"\nhead -c "
+                + ($payload_size | into string)
+                + " /dev/zero | tr '\\000' 'P' >> \"$1\""
+            ) | save $generator
+            let generated = (test-complete-result (^bash $generator $payload | complete))
+            assert equal $generated.exit_code 0 $"large partial-create payload failed: ($generated.stderr)"
+            [
+                $"use ($module | to nuon) *"
+                $"$env.API_ROOT = ($root | to nuon)"
+                ("let description = (open " + ($payload | to nuon) + " --raw)")
+                "api chain create interrupted --description $description | ignore"
+            ] | str join "\n" | save $child
+            ("#!/usr/bin/env bash\nset -e\nset +e\n(ulimit -f 2048; exec \""
+                + $nu.current-exe
+                + "\" --no-config-file \""
+                + $child
+                + "\" >\""
+                + $stdout
+                + "\" 2>\""
+                + $stderr
+                + "\")\nstatus=$?\nset -e\n"
+                + "if [ \"$status\" -eq 0 ]; then echo 'public create unexpectedly completed' >&2; exit 1; fi\n"
+                + "if [ ! -f \""
+                + $path
+                + "\" ]; then echo 'public create left no destination' >&2; exit 1; fi\n"
+                + "size=$(stat -c %s \""
+                + $path
+                + "\")\n"
+                + "if [ \"$size\" -le 0 ] || [ \"$size\" -ge "
+                + ($payload_size | into string)
+                + " ]; then echo \"unexpected partial size: $size\" >&2; exit 1; fi\n"
+                + "printf '%s' \"$size\" > \""
+                + $observed_size
+                + "\""
+            ) | save $launcher
+            let interrupted = (test-complete-result (^bash $launcher | complete))
+            assert equal $interrupted.exit_code 0 $"public create interruption failed: ($interrupted.stderr)"
+            let child_stderr = (open $stderr --raw)
+            assert (not ($child_stderr | str contains "already exists")) "interrupted create I/O failure was mislabeled as a duplicate"
+            let barrier_size = (open $observed_size --raw | into int)
+            let partial_size = (ls $path | get size | first | into int)
+            assert ($barrier_size > 0) "public create was terminated before writing bytes"
+            assert equal $partial_size $barrier_size "partial destination changed after termination"
+            assert ($partial_size < $payload_size) "public create completed instead of leaving a partial new file"
+        }
 
-    let holder = ($root | path join "state-read-lock-holder.ps1")
-    let launcher = ($root | path join "state-read-lock-launcher.ps1")
-    let ready = ($root | path join "state-read-lock-ready.txt")
-    "param($Target, $Ready)
-$stream = [System.IO.File]::Open($Target, 'Open', 'Read', 'None')
-try {
-    [System.IO.File]::WriteAllText($Ready, 'ready')
-    [System.Threading.ManualResetEvent]::new($false).WaitOne() | Out-Null
-} finally {
-    $stream.Dispose()
-}" | save -f $holder
-    "param($Holder, $Target, $Ready)
-$arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('\"{0}\"' -f $Holder), ('\"{0}\"' -f $Target), ('\"{0}\"' -f $Ready))
-$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden
-if (-not [System.Threading.SpinWait]::SpinUntil({ Test-Path -LiteralPath $Ready }, 10000)) {
-    Stop-Process -Id $process.Id -Force
-    throw 'State read lock did not reach the ready barrier'
-}
-$process.Id" | save -f $launcher
-    let result = (test-complete-result (
-        ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher $holder $target $ready
-        | complete
-    ))
-    assert equal $result.exit_code 0 $"state read lock failed: ($result.stderr)"
-    {mode: "lock", pid: ($result.stdout | str trim | into int)}
+        let result = (run-command-process $root "api chain show interrupted | ignore")
+        assert-state-read-failure $result $path "interrupted public new-file create"
+        assert (not ($result.stderr | str contains "PARTIAL-PUBLIC-SENTINEL")) "interrupted public create leaked payload"
+        assert-no-state-artifacts $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def stop-state-read-lock [lock: record] {
-    if $lock.mode == "directory" {
-        rm -rf $lock.target
-        $lock.raw | save $lock.target
-        return
-    }
-    let result = (test-complete-result (
-        ^powershell.exe -NoProfile -NonInteractive -Command (
-            "Stop-Process -Id " + ($lock.pid | into string) + " -Force -ErrorAction SilentlyContinue"
-        )
-        | complete
-    ))
-    assert equal $result.exit_code 0 $"state read lock release failed: ($result.stderr)"
+def test-history-config-corruption-contracts [] {
+    let root = (make-temp-dir "state-history-config")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let path = ($root | path join "config.nuon")
+        "{credential: HISTORY-CONFIG-SENTINEL" | save -f $path
+        for command in [
+            "api history save {method: GET, url: 'https://example.invalid', headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} | ignore"
+            "api history clear --force"
+        ] {
+            let result = (run-command-process $root $command)
+            assert-state-read-failure $result $path $command
+            assert (not ($result.stderr | str contains "HISTORY-CONFIG-SENTINEL")) "history config leaked bytes"
+        }
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def test-state-io-errors-and-no-clobber [] {
-    let root = (make-temp-dir "state-io")
+def test-state-no-clobber-and-io [] {
+    let root = (make-temp-dir "state-no-clobber")
     let failure = try {
         $env.API_ROOT = $root
         setup-state-workspace $root
         let config_path = ($root | path join "config.nuon")
-        let lock = (start-state-read-lock $root $config_path)
-        let unreadable = (run-command-process $root "api config get | ignore")
-        stop-state-read-lock $lock
-
-        assert ($unreadable.exit_code != 0) "unreadable config exited zero"
-        assert equal ($unreadable.stdout | str trim) "" "unreadable config wrote stdout"
-        assert ($unreadable.stderr | str contains "config.nuon") "unreadable config did not name its path"
-        assert (not ($unreadable.stderr | str contains "invalid or does not contain a NUON record")) "I/O failure was mislabeled as invalid NUON"
-
-        let chain_path = ($root | path join "chains" "durable.nuon")
-        let request_path = ($root | path join "collections" "durable" "requests" "ping.nuon")
-        let environment_path = ($root | path join "collections" "durable" "environments" "dev.nuon")
-        let before = {
-            chain: (open $chain_path --raw)
-            request: (open $request_path --raw)
-            environment: (open $environment_path --raw)
+        if $nu.os-info.name == "windows" {
+            let lock = (start-state-read-lock $root $config_path)
+            let unreadable = (run-command-process $root "api config get | ignore")
+            stop-state-read-lock $lock
+            assert ($unreadable.exit_code != 0) "unreadable config exited zero"
+            assert (not ($unreadable.stderr | str contains "invalid or does not contain")) "I/O error mislabeled as NUON"
         }
-        let duplicates = [
-            {
-                result: (run-command-process $root "api chain create durable")
-                expected: "Chain 'durable' already exists"
-            }
-            {
-                result: (run-command-process $root "api request create ping GET 'https://example.invalid' --collection durable")
-                expected: "Destination file already exists"
-            }
-            {
-                result: (run-command-process $root "api collection env create durable dev")
-                expected: "Environment 'dev' already exists in collection 'durable'"
-            }
+
+        let cases = [
+            {command: "api chain create durable", expected: "Chain 'durable' already exists"}
+            {command: "api request create ping GET 'https://example.invalid' --collection durable", expected: "Destination file already exists"}
+            {command: "api collection env create durable dev", expected: "Environment 'dev' already exists in collection 'durable'"}
         ]
-        for duplicate in $duplicates {
-            assert ($duplicate.result.exit_code != 0) $"duplicate create exited zero: ($duplicate.expected)"
-            assert equal ($duplicate.result.stdout | str trim) "" $"duplicate create wrote stdout: ($duplicate.expected)"
-            assert ($duplicate.result.stderr | str contains $duplicate.expected) $"duplicate create changed its message: ($duplicate.expected)"
+        let before = (state-snapshot $root)
+        for case in $cases {
+            let result = (run-command-process $root $case.command)
+            assert ($result.exit_code != 0) $"duplicate exited zero: ($case.command)"
+            assert equal ($result.stdout | str trim) ""
+            assert ($result.stderr | str contains $case.expected) $"duplicate message changed: ($result.stderr)"
         }
-        assert equal (open $chain_path --raw) $before.chain "duplicate chain create changed bytes"
-        assert equal (open $request_path --raw) $before.request "duplicate request create changed bytes"
-        assert equal (open $environment_path --raw) $before.environment "duplicate environment create changed bytes"
-        assert-no-state-temps $root
+        assert equal (state-snapshot $root) $before "duplicate create changed state"
+
+        # Removed lock/marker artifacts are irrelevant and never mutated.
+        let legacy = ($root | path join "chains" ".blocked.nuon.nurl-create.lock")
+        "FOREIGN-OWNER-TOKEN" | save $legacy
+        let legacy_before = (open $legacy --raw)
+        api chain create artifact-irrelevant | ignore
+        assert equal (open $legacy --raw) $legacy_before "Nurl touched irrelevant legacy artifact"
+        assert (($root | path join "chains" "artifact-irrelevant.nuon") | path exists)
+        rm -f $legacy
+        assert-no-state-artifacts $root
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 def test-state-read-only-and-credentials [] {
@@ -361,128 +471,416 @@ def test-state-read-only-and-credentials [] {
         setup-state-workspace $root
         api auth basic set retained retained-user PASSWORD-SENTINEL | ignore
         api auth bearer set second SECOND-CREDENTIAL-SENTINEL | ignore
-        let secrets_path = ($root | path join "secrets.nuon")
-        let mode_before = if $nu.os-info.name == "windows" {
+        let secrets = ($root | path join "secrets.nuon")
+        let mode_policy = if $nu.os-info.name == "windows" {
             null
         } else {
-            ^chmod 600 $secrets_path
-            (^stat -c "%a" $secrets_path | str trim)
+            ^chmod 600 $secrets
+            let old_mode = (^stat -c "%a" $secrets | str trim)
+            let control = ($root | path join "posix-policy-control.tmp")
+            "control" | save $control
+            let control_mode = (^stat -c "%a" $control | str trim)
+            assert ($old_mode != $control_mode) "custom POSIX mode fixture did not differ from directory policy"
+            {control: $control, expected: $control_mode}
         }
         api auth bearer set mode-check MODE-CHECK-SENTINEL | ignore
-        if $mode_before != null {
-            assert equal (^stat -c "%a" $secrets_path | str trim) $mode_before "credential update changed POSIX mode bits"
+        if $mode_policy != null {
+            assert equal (^stat -c "%a" $secrets | str trim) $mode_policy.expected "published replacement did not inherit POSIX directory policy"
+            rm -f $mode_policy.control
         }
-        let before = (state-durability-snapshot $root)
-
-        let commands = [
+        let before = (state-snapshot $root)
+        for command in [
             "api status | ignore"
             "api config get | ignore"
             "api vars list | ignore"
-            "api collection list | ignore"
             "api collection show durable | ignore"
-            "api collection env list durable | ignore"
             "api collection env show durable dev | ignore"
             "api request list --collection durable | ignore"
-            "api request show ping --collection durable | ignore"
             "api auth list | ignore"
             "api chain list | ignore"
-            "api chain show durable | ignore"
-        ]
-        for command in $commands {
+        ] {
             let result = (run-command-process $root $command)
-            assert equal $result.exit_code 0 $"read-only command failed: ($command); ($result.stderr)"
-            assert equal ($result.stderr | str trim) "" $"read-only command wrote stderr: ($command)"
+            assert equal $result.exit_code 0 $"read-only command failed: ($command): ($result.stderr)"
         }
-        assert equal (state-durability-snapshot $root) $before "read-only command sweep changed state bytes"
-
-        assert equal (api auth bearer get durable) "CREDENTIAL-SENTINEL"
-        assert equal (api auth bearer get second) "SECOND-CREDENTIAL-SENTINEL"
-        let secrets = (open-state-record $secrets_path)
-        assert equal $secrets.basic_auth.retained.username "retained-user"
-        assert equal $secrets.basic_auth.retained.password "PASSWORD-SENTINEL"
-        let expected_path = ($root | path join "expected-secrets")
-        $secrets | to nuon | save $expected_path
-        assert equal (open $secrets_path --raw) (open $expected_path --raw) "credential store serialization changed"
-
-        rm $secrets_path
+        assert equal (state-snapshot $root) $before "read-only commands changed bytes"
+        rm $secrets
         api auth bearer set recreated RECREATED-CREDENTIAL-SENTINEL | ignore
-        let recreated = (open-state-record $secrets_path)
-        assert equal ($recreated | columns) [tokens saml_tokens oauth api_keys basic_auth] "recreated credential store changed default key order"
-        assert-no-state-temps $root
+        assert equal (open-state-record $secrets | columns) [tokens saml_tokens oauth api_keys basic_auth]
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def set-state-path-stale [path: string] {
-    if $nu.os-info.name == "windows" {
-        let setter = if (($path | path type) == "dir") {
-            "[System.IO.Directory]::SetLastWriteTimeUtc("
-        } else {
-            "[System.IO.File]::SetLastWriteTimeUtc("
-        }
-        let result = (test-complete-result (
-            ^powershell.exe -NoProfile -NonInteractive -Command (
-                $setter
-                + ($path | to nuon)
-                + ", [DateTime]::UtcNow.AddHours(-2))"
-            )
-            | complete
-        ))
-        assert equal $result.exit_code 0 $"could not age state temp: ($result.stderr)"
-    } else {
-        let result = (test-complete-result (^touch -t "200001010000" $path | complete))
-        assert equal $result.exit_code 0 $"could not age state temp: ($result.stderr)"
-    }
+def test-state-fresh-pathless-lifecycle [] {
+    let root = (make-temp-dir "state-pathless")
+    let failure = try {
+        $env.API_ROOT = $root
+        let command = [
+            "with-env {PATH: ''} {"
+            "api init | ignore"
+            "api config set pathless true | ignore"
+            "api auth bearer set pathless PATHLESS-SENTINEL | ignore"
+            "api collection create pathless | ignore"
+            "api collection env create pathless active --activate | ignore"
+            "api collection env set pathless value exact --target active | ignore"
+            "api request create ping GET 'https://example.invalid' --collection pathless | ignore"
+            "api chain create pathless | ignore"
+            "}"
+        ] | str join "\n"
+        let result = (run-command-process $root $command)
+        assert equal $result.exit_code 0 $"fresh PATH-empty lifecycle failed: ($result.stderr)"
+        assert equal ($result.stderr | str trim) "" $"fresh PATH-empty lifecycle emitted a raw frame: ($result.stderr)"
+        assert equal (api auth bearer get pathless) PATHLESS-SENTINEL
+        assert equal (api collection env show pathless active | get variables | first | get value) exact
+        assert-no-state-artifacts $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-    def windows-dacl-info [path: string] {
-    let script = "$acl = [System.IO.Directory]::GetAccessControl($env:NURL_DACL_PATH)
-    $sddl = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
-$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
-    @{ ace_count = $raw.DiscretionaryAcl.Count; owner = $raw.Owner.Value } | ConvertTo-Json -Compress"
-    let result = (test-complete-result (
-        do {
-            with-env {NURL_DACL_PATH: $path} {
-                ^powershell.exe -NoProfile -NonInteractive -Command $script
-            }
-        }
-        | complete
-    ))
-    assert equal $result.exit_code 0 $"could not inspect Windows DACL: ($result.stderr)"
-    $result.stdout | from json
+def test-state-production-architecture-removed [] {
+    let modules = ($env.NURL_REPO_ROOT | path join "nu_modules")
+    let state_source = (open ($modules | path join "state-store.nu") --raw)
+    for forbidden in [
+        "powershell"
+        "pwsh"
+        "icacls"
+        "STATE_LOCK"
+        "NURL_TEST_STATE_STORE"
+        "path expand --no-symlink"
+        ".nurl-state"
+        ".secured-v"
+        "create-lock"
+        "^stat"
+        "^chmod"
+        "^ln"
+        "^mv"
+    ] {
+        assert (not ($state_source | str contains $forbidden)) $"production state store retained forbidden external pattern '($forbidden)'"
+    }
+
+    let production_source = (
+        ["state-store.nu" "mod.nu" "auth.nu" "vars.nu" "http.nu" "chain.nu"]
+        | each {|name| open ($modules | path join $name) --raw }
+        | str join "\n"
+    )
+    for retired in [
+        "initialize-state-store"
+        "state-store-ready"
+        "state-temp-dir"
+        "create-lock"
+        "release-create-lock"
+    ] {
+        assert (not ($production_source | str contains $retired)) $"production modules retained removed architecture symbol '($retired)'"
+    }
 }
 
 def windows-short-path [path: string] {
     let script = "Add-Type -TypeDefinition @'
-using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class NurlShortPath {
-    [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern uint GetShortPathName(string path, StringBuilder output, int length);
-    public static string Get(string path) {
-        StringBuilder output = new StringBuilder(32768);
-        uint result = GetShortPathName(path, output, output.Capacity);
-        if (result == 0) { throw new System.ComponentModel.Win32Exception(); }
-        return output.ToString();
-    }
+  [DllImport(\"kernel32.dll\", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern uint GetShortPathName(string path, StringBuilder output, int length);
+  public static string Get(string path) {
+    var output = new StringBuilder(32768);
+    if (GetShortPathName(path, output, output.Capacity) == 0) throw new System.ComponentModel.Win32Exception();
+    return output.ToString();
+  }
 }
 '@
 [NurlShortPath]::Get($env:NURL_LONG_PATH)"
     let result = (test-complete-result (
-        do {
-            with-env {NURL_LONG_PATH: $path} {
-                ^powershell.exe -NoProfile -NonInteractive -Command $script
-            }
-        }
+        do { with-env {NURL_LONG_PATH: $path} { ^powershell.exe -NoProfile -NonInteractive -Command $script } }
         | complete
     ))
-    assert equal $result.exit_code 0 $"could not resolve Windows short path: ($result.stderr)"
+    assert equal $result.exit_code 0 $"short path resolution failed: ($result.stderr)"
     $result.stdout | str trim
+}
+
+def test-windows-short-path-lifecycle [] {
+    if $nu.os-info.name != "windows" { return }
+    let root = (make-temp-dir "state short alias")
+    let failure = try {
+        let short_root = (windows-short-path $root | str replace -r '^C:' 'c:')
+        $env.API_ROOT = $short_root
+        api init | ignore
+        api config set short_alias true | ignore
+        api auth bearer set short-alias SHORT-ALIAS-SENTINEL | ignore
+        api collection create short-alias | ignore
+        api collection env create short-alias active --activate | ignore
+        api collection env set short-alias value exact --target active | ignore
+        api request create ping GET "https://example.invalid" --collection short-alias | ignore
+        api chain create short-alias | ignore
+        assert equal (open ($root | path join "config.nuon") | get short_alias) true
+        assert equal (api auth bearer get short-alias) SHORT-ALIAS-SENTINEL
+        assert (($root | path join "collections" "short-alias" "requests" "ping.nuon") | path exists)
+        assert (($root | path join "chains" "short-alias.nuon") | path exists)
+        assert-no-state-artifacts $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-posix-symlinked-ancestor-lifecycle [] {
+    if $nu.os-info.name == "windows" { return }
+    let target_parent = (make-temp-dir "state-link-target")
+    let parent = (make-temp-dir "state-link-parent")
+    let target = ($target_parent | path join "workspace")
+    let link = ($parent | path join "alias")
+    let workspace = ($link | path join "workspace")
+    let failure = try {
+        mkdir $target
+        ^ln -s $target_parent $link
+        $env.API_ROOT = $workspace
+        api init | ignore
+        api config set linked true | ignore
+        api vars set linked exact | ignore
+        api auth bearer set linked LINKED-SENTINEL | ignore
+        api collection create linked | ignore
+        api collection env create linked active --activate | ignore
+        api request create ping GET "https://example.invalid" --collection linked | ignore
+        api chain create linked | ignore
+        assert equal (open ($target | path join "config.nuon") | get linked) true
+        assert equal (api auth bearer get linked) LINKED-SENTINEL
+        assert (($target | path join "collections" "linked" "requests" "ping.nuon") | path exists)
+        assert (($target | path join "chains" "linked.nuon") | path exists)
+        assert equal (do { ^test -L $link } | complete | get exit_code) 0 "workspace ancestor symlink was replaced"
+        assert ((do { ^test -L $workspace } | complete | get exit_code) != 0) "workspace leaf unexpectedly became a symlink"
+        assert-no-state-artifacts $target
+        null
+    } catch {|error| $error}
+    cleanup $parent
+    cleanup $target_parent
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-state-concurrent-no-clobber [] {
+    let root = (make-temp-dir "state-race")
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let module = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+        for iteration in 1..20 {
+            let release = ($root | path join $"release-($iteration).txt")
+            let launcher = if $nu.os-info.name == "windows" {
+                $root | path join $"launcher-($iteration).ps1"
+            } else {
+                $root | path join $"launcher-($iteration).sh"
+            }
+            mut children = []
+            for index in 1..8 {
+                let script = ($root | path join $"child-($iteration)-($index).nu")
+                let result = ($root | path join $"result-($iteration)-($index).nuon")
+                let stdout = ($root | path join $"child-($iteration)-($index).stdout")
+                let stderr = ($root | path join $"child-($iteration)-($index).stderr")
+                let description = $"winner-($iteration)-($index)"
+                [
+                    $"use ($module | to nuon) *"
+                    $"$env.API_ROOT = ($root | to nuon)"
+                    $"let release = ($release | to nuon)"
+                    "while not ($release | path exists) {}"
+                    ("let outcome = try { api chain create "
+                        + $"race-($iteration)"
+                        + " --description "
+                        + ($description | to nuon)
+                        + "; {status: success, error: ''} } catch {|error| {status: failure, error: $error.msg}}")
+                    $"$outcome | to nuon | save ($result | to nuon)"
+                ] | str join "\n" | save $script
+                $children = ($children | append {
+                    script: $script
+                    result: $result
+                    stdout: $stdout
+                    stderr: $stderr
+                    description: $description
+                })
+            }
+            let launched = if $nu.os-info.name == "windows" {
+                mut start_lines = []
+                for child in $children {
+                    $start_lines = ($start_lines | append (
+                        "$processes += Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', "
+                        + ($child.script | to nuon)
+                        + ") -PassThru -RedirectStandardOutput "
+                        + ($child.stdout | to nuon)
+                        + " -RedirectStandardError "
+                        + ($child.stderr | to nuon)
+                    ))
+                }
+                let starts = ($start_lines | str join "\n")
+                ("param($Nu, $Release)\n$processes = @()\n"
+                    + $starts
+                    + "\n[System.IO.File]::WriteAllText($Release, 'release')\n"
+                    + "$deadline=[DateTime]::UtcNow.AddSeconds(120)\n"
+                    + "try {\n"
+                    + "  foreach($process in $processes){\n"
+                    + "    $remaining=[Math]::Max(0,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds)\n"
+                    + "    if($remaining -eq 0 -or -not $process.WaitForExit($remaining)){throw \"race child $($process.Id) timed out\"}\n"
+                    + "    $process.WaitForExit()\n"
+                    + "  }\n"
+                    + "} finally {\n"
+                    + "  $processes | Where-Object {-not $_.HasExited} | ForEach-Object {Stop-Process -Id $_.Id -Force}\n"
+                    + "}"
+                ) | save $launcher
+                test-complete-result (
+                    ^powershell.exe -NoProfile -NonInteractive -File $launcher $nu.current-exe $release
+                    | complete
+                )
+            } else {
+                mut start_lines = []
+                for child in $children {
+                    $start_lines = ($start_lines | append (
+                        "timeout 120s \""
+                        + $nu.current-exe
+                        + "\" --no-config-file \""
+                        + $child.script
+                        + "\" >\""
+                        + $child.stdout
+                        + "\" 2>\""
+                        + $child.stderr
+                        + "\" &\npids+=(\"$!\")"
+                    ))
+                }
+                let starts = ($start_lines | str join "\n")
+                ("#!/usr/bin/env bash\nset -e\npids=()\n"
+                    + $starts
+                    + "\nprintf 'release' > \""
+                    + $release
+                    + "\"\nstatus=0\nfor pid in \"${pids[@]}\"; do wait \"$pid\" || status=1; done\nexit $status"
+                ) | save $launcher
+                test-complete-result (^bash $launcher | complete)
+            }
+            assert equal $launched.exit_code 0 $"race launcher failed: ($launched.stderr)"
+            mut outcomes = []
+            for child in $children {
+                let outcome = (open $child.result --raw | from nuon)
+                $outcomes = ($outcomes | append ($outcome | insert description $child.description))
+            }
+            mut winner_count = 0
+            mut loser_count = 0
+            mut winner_description = ""
+            for outcome in $outcomes {
+                if $outcome.status == "success" {
+                    $winner_count = $winner_count + 1
+                    $winner_description = $outcome.description
+                } else if $outcome.status == "failure" {
+                    $loser_count = $loser_count + 1
+                    assert ($outcome.error | str contains $"Chain 'race-($iteration)' already exists") $"race duplicate message changed: ($outcome.error)"
+                }
+            }
+            assert equal $winner_count 1 $"race winner count changed: ($outcomes)"
+            assert equal $loser_count 7 $"race loser count changed: ($outcomes)"
+            let persisted = (open-state-record ($root | path join "chains" $"race-($iteration).nuon"))
+            assert equal $persisted.description $winner_description "race final bytes did not belong to sole winner"
+            assert-no-state-artifacts $root
+        }
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-state-concurrent-first-init [] {
+    let root = (make-temp-dir "state-first-init")
+    let failure = try {
+        let module = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+        let release = ($root | path join "release.txt")
+        let launcher = if $nu.os-info.name == "windows" {
+            $root | path join "launcher.ps1"
+        } else {
+            $root | path join "launcher.sh"
+        }
+        mut children = []
+        for index in 1..8 {
+            let script = ($root | path join $"child-($index).nu")
+            let result = ($root | path join $"result-($index).nuon")
+            let stdout = ($root | path join $"child-($index).stdout")
+            let stderr = ($root | path join $"child-($index).stderr")
+            [
+                $"use ($module | to nuon) *"
+                $"$env.API_ROOT = ($root | to nuon)"
+                $"let release = ($release | to nuon)"
+                "while not ($release | path exists) {}"
+                "let outcome = try { api init | ignore; {status: success, error: ''} } catch {|error| {status: failure, error: $error.msg}}"
+                $"$outcome | to nuon | save ($result | to nuon)"
+            ] | str join "\n" | save $script
+            $children = ($children | append {
+                script: $script
+                result: $result
+                stdout: $stdout
+                stderr: $stderr
+            })
+        }
+
+        let launched = if $nu.os-info.name == "windows" {
+            mut starts = []
+            for child in $children {
+                $starts = ($starts | append (
+                    "$processes += Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', "
+                    + ($child.script | to nuon)
+                    + ") -PassThru -RedirectStandardOutput "
+                    + ($child.stdout | to nuon)
+                    + " -RedirectStandardError "
+                    + ($child.stderr | to nuon)
+                ))
+            }
+            ("param($Nu,$Release)\n$processes=@()\n"
+                + ($starts | str join "\n")
+                + "\n[System.IO.File]::WriteAllText($Release,'release')\n"
+                + "$deadline=[DateTime]::UtcNow.AddSeconds(120)\n"
+                + "try { foreach($process in $processes){ $remaining=[Math]::Max(0,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds); if($remaining -eq 0 -or -not $process.WaitForExit($remaining)){throw \"init child $($process.Id) timed out\"}; $process.WaitForExit() } }\n"
+                + "finally { $processes | Where-Object {-not $_.HasExited} | ForEach-Object {Stop-Process -Id $_.Id -Force} }"
+            ) | save $launcher
+            test-complete-result (
+                ^powershell.exe -NoProfile -NonInteractive -File $launcher $nu.current-exe $release
+                | complete
+            )
+        } else {
+            mut starts = []
+            for child in $children {
+                $starts = ($starts | append (
+                    "timeout 120s \""
+                    + $nu.current-exe
+                    + "\" --no-config-file \""
+                    + $child.script
+                    + "\" >\""
+                    + $child.stdout
+                    + "\" 2>\""
+                    + $child.stderr
+                    + "\" &\npids+=(\"$!\")"
+                ))
+            }
+            ("#!/usr/bin/env bash\nset -e\npids=()\n"
+                + ($starts | str join "\n")
+                + "\nprintf release > \""
+                + $release
+                + "\"\nstatus=0\nfor pid in \"${pids[@]}\"; do wait \"$pid\" || status=1; done\nexit $status"
+            ) | save $launcher
+            test-complete-result (^bash $launcher | complete)
+        }
+        assert equal $launched.exit_code 0 $"concurrent init launcher failed: ($launched.stderr)"
+        mut successes = 0
+        for child in $children {
+            let outcome = (open $child.result --raw | from nuon)
+            if $outcome.status == success {
+                $successes = $successes + 1
+            } else {
+                assert ($outcome.error | str contains "Destination file") $"concurrent first init returned the wrong failure: ($outcome.error)"
+                assert ($outcome.error | str contains "already exists") $"concurrent first init duplicate message changed: ($outcome.error)"
+            }
+        }
+        assert ($successes >= 1) "concurrent first init had no successful initializer"
+        open-state-record ($root | path join "config.nuon") | ignore
+        open-state-record ($root | path join "variables.nuon") | ignore
+        open-state-record ($root | path join "secrets.nuon") | ignore
+        assert-no-state-artifacts $root
+        null
+    } catch {|error| $error}
+    cleanup $root
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 def normalize-windows-dacl [sddl: string] {
@@ -493,527 +891,25 @@ def normalize-windows-dacl [sddl: string] {
     | sort
 }
 
-def test-state-native-write-and-stale-cleanup [] {
-    let root = (make-temp-dir "state-native")
-    let failure = try {
-        $env.API_ROOT = $root
-        api init | ignore
-        let source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "state-store.nu") --raw)
-        for forbidden in ["powershell" "pwsh" "NURL_TEST_STATE_STORE_FAIL_COMMIT"] {
-            assert (not ($source | str contains $forbidden)) $"production state writes use forbidden external path '($forbidden)'"
-        }
-        if $nu.os-info.name == "windows" {
-            let no_external_root = (make-temp-dir "state-no-powershell")
-            $env.API_ROOT = $no_external_root
-            with-env {PATH: ""} {
-                api init | ignore
-                api config set no_external_runtime true | ignore
-                api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
-                api collection create no-external | ignore
-                api collection env create no-external active --activate | ignore
-                api collection env set no-external value exact --target active | ignore
-            }
-            assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
-            assert equal (api collection env show no-external active | get variables | first | get value) exact "collection environment write acquired a PowerShell/PATH dependency"
-            cleanup $no_external_root
-            $env.API_ROOT = $root
-
-            let precreated_root = (make-temp-dir "state-precreated-temp")
-            mkdir ($precreated_root | path join ".nurl-state")
-            $"secured-v2:($nu.pid)" | save ($precreated_root | path join ".nurl-state" ".secured-v2")
-            let explicit_grant = (test-complete-result (
-                ^icacls.exe ($precreated_root | path join ".nurl-state") "/grant" "*S-1-1-0:(OI)(CI)R" "/Q"
-                | complete
-            ))
-            assert equal $explicit_grant.exit_code 0 $"could not add explicit broad DACL fixture: ($explicit_grant.stderr)"
-            $env.API_ROOT = $precreated_root
-            api init | ignore
-            let dacl = (windows-dacl-info ($precreated_root | path join ".nurl-state"))
-            let current_sid = (
-                ^powershell.exe -NoProfile -NonInteractive -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
-                | str trim
-            )
-            assert equal $dacl.ace_count 1 "pre-created state temp directory was not resecured"
-            assert equal $dacl.owner $current_sid "pre-created state temp directory owner was not transferred"
-            let secured_marker = (open ($precreated_root | path join ".nurl-state" ".secured-v2") --raw)
-            assert ($secured_marker != $"secured-v2:($nu.pid)") "predictable PID marker bypassed re-hardening"
-            assert ($secured_marker | str starts-with "secured-v2:") "security marker was not replaced after verification"
-            cleanup $precreated_root
-            $env.API_ROOT = $root
-
-            let alias_root = (make-temp-dir "state short alias")
-            let short_root = (windows-short-path $alias_root)
-            $env.API_ROOT = $short_root
-            api init | ignore
-            api config set short_alias true | ignore
-            assert equal (open ($alias_root | path join "config.nuon") | get short_alias) true "ordinary Windows short-path alias failed state initialization"
-            cleanup $alias_root
-            $env.API_ROOT = $root
-        } else {
-            with-env {PATH: ""} {
-                api config set no_external_runtime true | ignore
-                api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
-            }
-            assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
-        }
-
-        let link_root = (make-temp-dir "state-temp-link")
-        let link_target = (make-temp-dir "state-temp-link-target")
-        let link_path = ($link_root | path join ".nurl-state")
-        if $nu.os-info.name == "windows" {
-            let linked = (test-complete-result (
-                ^powershell.exe -NoProfile -NonInteractive -Command (
-                    "New-Item -ItemType Junction -Path "
-                    + ($link_path | to nuon)
-                    + " -Target "
-                    + ($link_target | to nuon)
-                    + " | Out-Null"
-                )
-                | complete
-            ))
-            assert equal $linked.exit_code 0 $"could not create state junction fixture: ($linked.stderr)"
-        } else {
-            ^ln -s $link_target $link_path
-        }
-        let linked_result = (run-command-process $link_root "api init")
-        assert ($linked_result.exit_code != 0) "linked state temp directory unexpectedly initialized"
-        assert (
-            ($linked_result.stderr | str contains "State temp")
-                and (
-                    ($linked_result.stderr | str contains "link")
-                        or ($linked_result.stderr | str contains "directory")
-                )
-        ) $"linked state temp error was not actionable: ($linked_result.stderr)"
-        cleanup $link_root
-        cleanup $link_target
-        $env.API_ROOT = $root
-
-        api chain create warm-chain | ignore
-        let chain_state_dir = ($root | path join "chains" ".nurl-state")
-        let warm_lock = ($chain_state_dir | path join ".warm-chain.nuon.create.lock")
-        assert (not ($warm_lock | path exists)) "owner did not release successful create lock"
-
-        let foreign_lock = ($chain_state_dir | path join ".foreign.nuon.create.lock")
-        "FOREIGN-LOCK-TOKEN" | save $foreign_lock
-        let foreign_before = (open $foreign_lock --raw)
-        let foreign_result = (run-command-process $root "api chain create foreign")
-        assert ($foreign_result.exit_code != 0) "fresh foreign create lock did not block contender"
-        assert equal (open $foreign_lock --raw) $foreign_before "nonowner changed or deleted a fresh create lock"
-        assert (not (($root | path join "chains" "foreign.nuon") | path exists)) "foreign-lock contender published state"
-        rm -f $foreign_lock
-
-        let directory_lock = ($chain_state_dir | path join ".blocked.nuon.create.lock")
-        mkdir $directory_lock
-        "FOREIGN-OWNER-TOKEN" | save ($directory_lock | path join "owner")
-        let directory_owner_before = (open ($directory_lock | path join "owner") --raw)
-        let directory_blocked = (run-command-process $root "api chain create blocked")
-        assert ($directory_blocked.exit_code != 0) "fresh foreign directory lock did not block contender"
-        assert equal ($directory_blocked.stdout | str trim) "" "directory-lock contender wrote success output"
-        assert equal $directory_blocked.stderr ($directory_blocked.stderr | ansi strip) "directory-lock contender wrote ANSI stderr"
-        assert ($directory_blocked.stderr | str contains "create lock") $"directory-lock error was not actionable: ($directory_blocked.stderr)"
-        assert equal (open ($directory_lock | path join "owner") --raw) $directory_owner_before "foreign directory lock owner bytes changed"
-        assert (not (($root | path join "chains" "blocked.nuon") | path exists)) "directory-lock contender published destination"
-        assert-no-state-temps $root
-        rm -rf $directory_lock
-
-        let legacy_sibling_lock = ($root | path join "chains" ".blocked.nuon.nurl-create.lock")
-        "LEGACY-FOREIGN-LOCK-TOKEN" | save $legacy_sibling_lock
-        let legacy_sibling_before = (open $legacy_sibling_lock --raw)
-        let legacy_blocked = (run-command-process $root "api chain create blocked")
-        assert ($legacy_blocked.exit_code != 0) "fresh legacy sibling lock did not block contender"
-        assert equal ($legacy_blocked.stdout | str trim) "" "legacy-lock contender wrote success output"
-        assert equal $legacy_blocked.stderr ($legacy_blocked.stderr | ansi strip) "legacy-lock contender wrote ANSI stderr"
-        assert ($legacy_blocked.stderr | str contains "legacy lock is still active") $"legacy-lock error was not actionable: ($legacy_blocked.stderr)"
-        assert equal (open $legacy_sibling_lock --raw) $legacy_sibling_before "legacy-lock contender changed or deleted foreign lock bytes"
-        assert (not (($root | path join "chains" "blocked.nuon") | path exists)) "legacy-lock contender published destination"
-        assert-no-state-temps $root
-        rm -f $legacy_sibling_lock
-
-        let stale_lock = ($chain_state_dir | path join ".stale-chain.nuon.create.lock")
-        "STALE-LOCK-TOKEN" | save $stale_lock
-        set-state-path-stale $stale_lock
-        api chain create stale-chain | ignore
-        assert (not ($stale_lock | path exists)) "next no-clobber mutation did not remove stale create lock"
-        let legacy_lock = ($chain_state_dir | path join ".legacy-chain.nuon.create.lock")
-        mkdir $legacy_lock
-        set-state-path-stale $legacy_lock
-        api chain create legacy-chain | ignore
-        assert (not ($legacy_lock | path exists)) "next no-clobber mutation did not remove stale legacy directory lock"
-        let stale_sibling_lock = ($root | path join "chains" ".stale-sibling.nuon.nurl-create.lock")
-        "STALE-SIBLING-LOCK" | save $stale_sibling_lock
-        set-state-path-stale $stale_sibling_lock
-        api chain create stale-sibling | ignore
-        assert (not ($stale_sibling_lock | path exists)) "next no-clobber mutation did not remove stale legacy sibling lock"
-        assert-no-state-temps $root
-        null
-    } catch {|error| $error}
-    cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
-}
-
-def test-state-concurrent-no-clobber [] {
-    let root = (make-temp-dir "state-concurrent-create")
-    let failure = try {
-        $env.API_ROOT = $root
-        api init | ignore
-        api chain create warm | ignore
-        let lock_path = ($root | path join "chains" ".nurl-state" ".race.nuon.create.lock")
-        "STALE-CONCURRENT-LOCK" | save $lock_path
-        set-state-path-stale $lock_path
-        let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
-        let release_path = ($root | path join "release.txt")
-        let child_one = ($root | path join "create-one.nu")
-        let child_two = ($root | path join "create-two.nu")
-        let result_one = ($root | path join "result-one.txt")
-        let result_two = ($root | path join "result-two.txt")
-        let launcher = ($root | path join "launch-creates.ps1")
-        for child in [
-            {script: $child_one, result: $result_one, description: "winner-one"}
-            {script: $child_two, result: $result_two, description: "winner-two"}
-        ] {
-            [
-                $"use ($module_path | to nuon) *"
-                $"$env.API_ROOT = ($root | to nuon)"
-                $"let release = ($release_path | to nuon)"
-                "while not ($release | path exists) {}"
-                ("let outcome = try { api chain create race --description "
-                    + ($child.description | to nuon)
-                    + "; {status: 'success', error: ''} } catch {|error| {status: 'failure', error: $error.msg}}")
-                $"$outcome | to nuon | save ($child.result | to nuon)"
-            ] | str join "\n" | save $child.script
-        }
-        "param($Nu, $One, $Two, $Release)
-$first = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $One) -PassThru
-$second = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Two) -PassThru
-[System.IO.File]::WriteAllText($Release, 'release')
-$first.WaitForExit()
-$second.WaitForExit()" | save $launcher
-
-        let shell = if $nu.os-info.name == "windows" { "powershell.exe" } else { "pwsh" }
-        let launched = (test-complete-result (
-            ^$shell -NoProfile -NonInteractive -File $launcher $nu.current-exe $child_one $child_two $release_path
-            | complete
-        ))
-        assert equal $launched.exit_code 0 $"concurrent create launcher failed: ($launched.stderr)"
-        let outcomes = [
-            (open $result_one --raw | from nuon)
-            (open $result_two --raw | from nuon)
-        ]
-        let statuses = ($outcomes | get status | sort)
-        assert ($statuses == ["failure" "success"]) $"concurrent create expected one winner and loser: ($outcomes)"
-        let winner = (open-state-record ($root | path join "chains" "race.nuon"))
-        assert equal $winner.name "race" "concurrent create winner bytes were invalid"
-        assert ($winner.description in ["winner-one" "winner-two"]) "concurrent stale recovery did not preserve winner bytes"
-        assert (not ($lock_path | path exists)) "concurrent create left a lock sentinel"
-        assert-no-state-temps $root
-        null
-    } catch {|error| $error}
-    cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
-}
-
-def test-windows-constrained-language-writes [] {
-    if $nu.os-info.name != "windows" {
-        return
-    }
-
-    let root = (make-temp-dir "state-constrained-language")
-    let failure = try {
-        $env.API_ROOT = $root
-        let child_script = ($root | path join "constrained-child.nu")
-        let launcher_script = ($root | path join "constrained-launcher.ps1")
-        let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
-        [
-            $"use ($module_path | to nuon) *"
-            $"$env.API_ROOT = ($root | to nuon)"
-            "api init | ignore"
-            "api config set constrained true | ignore"
-            "api auth bearer set constrained CONSTRAINED-SENTINEL | ignore"
-            "api collection create constrained | ignore"
-            "api collection env create constrained active --activate | ignore"
-            "api collection env set constrained value exact --target active | ignore"
-        ] | str join "\n" | save $child_script
-        "param($Nu, $Child)
-$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
-& $Nu --no-config-file $Child
-exit $LASTEXITCODE" | save $launcher_script
-
-        let result = (test-complete-result (
-            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $nu.current-exe $child_script
-            | complete
-        ))
-        assert equal $result.exit_code 0 $"state writes failed under PowerShell Constrained Language Mode: ($result.stderr)"
-        assert equal (open-state-record ($root | path join "config.nuon") | get constrained) true
-        assert equal (api auth bearer get constrained) "CONSTRAINED-SENTINEL"
-        assert equal (api collection env show constrained active | get variables | first | get value) exact
-        null
-    } catch {|error| $error}
-    cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
-}
-
-def test-windows-state-temp-dacl [] {
-    if $nu.os-info.name != "windows" {
-        return
-    }
-
-    let root = (make-temp-dir "state-temp-dacl")
-    let failure = try {
-        $env.API_ROOT = $root
-        api init | ignore
-        let child_script = ($root | path join "dacl-child.nu")
-        let watcher_script = ($root | path join "dacl-watcher.ps1")
-        let token_path = ($root | path join "large-token.txt")
-        let result_path = ($root | path join "dacl-result.json")
-        let session_ready = $"($result_path).session-ready"
-        let session_release = $"($result_path).session-release"
-        let stdout_path = ($root | path join "dacl-child.stdout")
-        let stderr_path = ($root | path join "dacl-child.stderr")
-        let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
-        let original_secrets = (open ($root | path join "secrets.nuon") --raw)
-        let state_dir = ($root | path join ".nurl-state")
-        [
-            $"use ($module_path | to nuon) *"
-            $"$env.API_ROOT = ($root | to nuon)"
-            $"$env.NURL_STATE_SESSION_TOKEN | save ($session_ready | to nuon)"
-            $"let session_release = ($session_release | to nuon)"
-            "while not ($session_release | path exists) {}"
-            ("let token = (open " + ($token_path | to nuon) + " --raw)")
-            "api auth bearer set temp-dacl $token | ignore"
-        ] | str join "\n" | save $child_script
-
-        "param($Root, $Nu, $Child, $Token, $Result, $Stdout, $Stderr)
-$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Threading;
-
-public static class NurlTempAcl {
-    [DllImport(\"advapi32.dll\", SetLastError = true)]
-    private static extern uint GetSecurityInfo(
-        IntPtr handle,
-        int objectType,
-        uint securityInfo,
-        out IntPtr owner,
-        out IntPtr group,
-        out IntPtr dacl,
-        out IntPtr sacl,
-        out IntPtr descriptor);
-
-    [DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
-        IntPtr descriptor,
-        uint revision,
-        uint securityInfo,
-        out IntPtr text,
-        out uint length);
-
-    [DllImport(\"kernel32.dll\")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-
-    public static string GetSddl(FileStream stream) {
-        IntPtr owner;
-        IntPtr group;
-        IntPtr dacl;
-        IntPtr sacl;
-        IntPtr descriptor;
-        uint result = GetSecurityInfo(
-            stream.SafeFileHandle.DangerousGetHandle(),
-            1,
-            7,
-            out owner,
-            out group,
-            out dacl,
-            out sacl,
-            out descriptor);
-        if (result != 0) {
-            throw new Win32Exception((int)result);
-        }
-        try {
-            IntPtr text;
-            uint length;
-            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, 7, out text, out length)) {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
-            try {
-                return Marshal.PtrToStringUni(text);
-            } finally {
-                LocalFree(text);
-            }
-        } finally {
-            LocalFree(descriptor);
-        }
-    }
-}
-
-public sealed class NurlTempCapture : IDisposable {
-    private readonly FileSystemWatcher watcher;
-    private readonly ManualResetEvent ready = new ManualResetEvent(false);
-    private int captured;
-
-    public NurlTempCapture(string root, string filter) {
-        watcher = new FileSystemWatcher(root, filter);
-        watcher.NotifyFilter = NotifyFilters.FileName;
-        watcher.Created += OnCreated;
-        watcher.EnableRaisingEvents = true;
-    }
-
-    private void OnCreated(object sender, FileSystemEventArgs args) {
-        if (Interlocked.CompareExchange(ref captured, 1, 0) != 0) {
-            return;
-        }
-        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
-        while (DateTime.UtcNow < deadline) {
-            try {
-                using (FileStream candidate = new FileStream(
-                        args.FullPath,
-                        FileMode.Open,
-                        FileAccess.Read,
-                        FileShare.ReadWrite)) {
-                    Name = args.Name;
-                    Sddl = NurlTempAcl.GetSddl(candidate);
-                }
-                ready.Set();
-                return;
-            } catch (IOException) {
-                Thread.Sleep(2);
-            }
-        }
-        Interlocked.Exchange(ref captured, 0);
-    }
-
-    public string Name { get; private set; }
-    public string Sddl { get; private set; }
-    public bool Wait(int milliseconds) { return ready.WaitOne(milliseconds); }
-
-    public void Dispose() {
-        watcher.EnableRaisingEvents = false;
-        watcher.Dispose();
-        ready.Dispose();
-    }
-}
-'@
-$destination = Join-Path (Split-Path -Parent $Root) 'secrets.nuon'
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$destinationAcl = [System.Security.AccessControl.FileSecurity]::new()
-$destinationAcl.SetOwner($sid)
-$destinationAcl.SetAccessRuleProtection($true, $false)
-$destinationRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-    $sid,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    [System.Security.AccessControl.AccessControlType]::Allow)
-$destinationAcl.AddAccessRule($destinationRule)
-[System.IO.File]::SetAccessControl($destination, $destinationAcl)
-$destinationSddl = $destinationAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
-$broadControl = Join-Path (Split-Path -Parent $Root) 'dacl-broad-control.tmp'
-[System.IO.File]::WriteAllText($broadControl, '')
-$broadAcl = [System.IO.File]::GetAccessControl($broadControl)
-$broadSddl = $broadAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
-$filter = '.secrets.nuon.nurl-*.tmp'
-[System.IO.File]::WriteAllText($Token, ('X' * 134217728))
-$process = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Child) -PassThru -WindowStyle Hidden -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
-$sessionReady = $Result + '.session-ready'
-$sessionRelease = $Result + '.session-release'
-$sessionDeadline = [DateTime]::UtcNow.AddSeconds(30)
-while (-not (Test-Path -LiteralPath $sessionReady) -and [DateTime]::UtcNow -lt $sessionDeadline) {
-    Start-Sleep -Milliseconds 2
-}
-if (-not (Test-Path -LiteralPath $sessionReady)) {
-    if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-    }
-    throw 'State temp DACL child did not publish its process token'
-}
-$sessionToken = [System.IO.File]::ReadAllText($sessionReady)
-[System.IO.File]::WriteAllText((Join-Path $Root '.secured-v2'), ('secured-v2:' + $sessionToken))
-$capture = [NurlTempCapture]::new($Root, $filter)
-[System.IO.File]::WriteAllText($sessionRelease, 'release')
-if (-not $capture.Wait(60000)) {
-    $capture.Dispose()
-    if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-    }
-    throw 'State temp DACL capture did not become ready'
-}
-$tempSddl = $capture.Sddl
-$tempName = $capture.Name
-$capture.Dispose()
-$process.WaitForExit()
-$process.Refresh()
-$payload = @{
-    temp_sddl = $tempSddl
-    destination_sddl = $destinationSddl
-    broad_sddl = $broadSddl
-    temp_name = $tempName
-}
-[System.IO.File]::WriteAllText($Result, ($payload | ConvertTo-Json -Compress))" | save $watcher_script
-
-        let watched = (test-complete-result (
-            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $watcher_script $state_dir $nu.current-exe $child_script $token_path $result_path $stdout_path $stderr_path
-            | complete
-        ))
-        assert equal $watched.exit_code 0 $"state temp DACL watcher failed: ($watched.stderr)"
-        assert ($result_path | path exists) $"state temp DACL watcher produced no result: stdout=($watched.stdout) stderr=($watched.stderr)"
-        let result = (open $result_path --raw | from json)
-        let child_stderr = try { open $stderr_path --raw } catch { "" }
-        assert ($result.temp_name | str starts-with ".secrets.nuon.nurl-") "watcher observed the wrong temp file"
-        let destination_aces = (normalize-windows-dacl $result.destination_sddl)
-        assert ((normalize-windows-dacl $result.broad_sddl) != $destination_aces) "DACL mutation control did not differ from the protected destination"
-        assert equal (normalize-windows-dacl $result.temp_sddl) $destination_aces "credential temp effective DACL differed from the protected single-ACE destination"
-        if ($child_stderr | str trim | is-empty) {
-            assert equal (api auth bearer get temp-dacl | str length) 134217728 "observed credential mutation did not complete"
-        } else {
-            assert ($child_stderr | str contains "process cannot access") $"observed commit failed for an unexpected reason: ($child_stderr)"
-            assert equal (open ($root | path join "secrets.nuon") --raw) $original_secrets "observed commit failure changed credential bytes"
-            let orphan = ($state_dir | path join $result.temp_name)
-            rm -f $orphan
-        }
-        assert-no-state-temps $root
-        null
-    } catch {|error| $error}
-    cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
-}
-
 def windows-file-sddl [path: string] {
     let script = "$acl = [System.IO.File]::GetAccessControl($env:NURL_DACL_PATH)
 $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)"
     let result = (test-complete-result (
-        do {
-            with-env {NURL_DACL_PATH: $path} {
-                ^powershell.exe -NoProfile -NonInteractive -Command $script
-            }
-        }
+        do { with-env {NURL_DACL_PATH: $path} { ^powershell.exe -NoProfile -NonInteractive -Command $script } }
         | complete
     ))
-    assert equal $result.exit_code 0 $"could not inspect Windows file DACL: ($result.stderr)"
+    assert equal $result.exit_code 0 $"DACL inspection failed: ($result.stderr)"
     $result.stdout | str trim
 }
 
-def test-windows-final-dacl-policy [] {
-    if $nu.os-info.name != "windows" {
-        return
-    }
-
-    let root = (make-temp-dir "state-final-dacl")
+def test-windows-sibling-and-final-dacl [] {
+    if $nu.os-info.name != "windows" { return }
+    let root = (make-temp-dir "state-dacl")
     let failure = try {
         $env.API_ROOT = $root
         api init | ignore
-        let secrets_path = ($root | path join "secrets.nuon")
-        let state_dir = ($root | path join ".nurl-state")
-        let harden = "$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        let secrets = ($root | path join "secrets.nuon")
+        let old_harden = "$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl = [System.Security.AccessControl.FileSecurity]::new()
 $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true, $false)
@@ -1022,71 +918,174 @@ $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($system, 'Read', 'Allow'))
 [System.IO.File]::SetAccessControl($env:NURL_DACL_PATH, $acl)"
         let hardened = (test-complete-result (
-            do {
-                with-env {NURL_DACL_PATH: $secrets_path} {
-                    ^powershell.exe -NoProfile -NonInteractive -Command $harden
-                }
-            }
+            do { with-env {NURL_DACL_PATH: $secrets} { ^powershell.exe -NoProfile -NonInteractive -Command $old_harden } }
             | complete
         ))
-        assert equal $hardened.exit_code 0 $"could not harden destination DACL fixture: ($hardened.stderr)"
-        let old_sddl = (windows-file-sddl $secrets_path)
+        assert equal $hardened.exit_code 0 $"custom DACL fixture failed: ($hardened.stderr)"
+        let old_sddl = (windows-file-sddl $secrets)
 
-        api auth bearer set final-dacl FINAL-DACL-SENTINEL | ignore
-
-        let final_sddl = (windows-file-sddl $secrets_path)
-        let control_path = ($state_dir | path join "final-dacl-control.tmp")
-        "" | save $control_path
-        let control_sddl = (windows-file-sddl $control_path)
-        assert ((normalize-windows-dacl $old_sddl) != (normalize-windows-dacl $control_sddl)) "custom per-file DACL fixture did not differ from temp policy"
-        assert equal (normalize-windows-dacl $final_sddl) (normalize-windows-dacl $control_sddl) "final destination did not adopt the protected temp-directory DACL"
-        assert equal (api auth bearer get final-dacl) "FINAL-DACL-SENTINEL"
+        let child = ($root | path join "dacl-child.nu")
+        let watcher = ($root | path join "dacl-watcher.ps1")
+        let token_file = ($root | path join "large-token.txt")
+        let result_file = ($root | path join "dacl-result.json")
+        let stdout = ($root | path join "child.stdout")
+        let stderr = ($root | path join "child.stderr")
+        let module = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+        [
+            $"use ($module | to nuon) *"
+            $"$env.API_ROOT = ($root | to nuon)"
+            ("let token = (open " + ($token_file | to nuon) + " --raw)")
+            "api auth bearer set dacl-live $token | ignore"
+        ] | str join "\n" | save $child
+        "param($Root,$Nu,$Child,$Token,$Result,$Stdout,$Stderr)
+$ErrorActionPreference='Stop'
+$filter='.secrets.nuon.nurl-*.tmp'
+$watcher=[System.IO.FileSystemWatcher]::new($Root,$filter)
+$watcher.NotifyFilter=[System.IO.NotifyFilters]::FileName
+$watcher.EnableRaisingEvents=$true
+[System.IO.File]::WriteAllText($Token,('X'*134217728))
+$process=Start-Process $Nu -ArgumentList @('--no-config-file',$Child) -PassThru -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
+$change=$watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created,60000)
+if($change.TimedOut){$watcher.Dispose(); if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}; throw 'temp event timed out'}
+$temp=Join-Path $Root $change.Name
+$deadline=[DateTime]::UtcNow.AddSeconds(30)
+$tempSddl=$null
+while($null -eq $tempSddl -and [DateTime]::UtcNow -lt $deadline){
+  try{$tempSddl=[System.IO.File]::GetAccessControl($temp).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)}
+  catch{Start-Sleep -Milliseconds 2}
+}
+$watcher.Dispose()
+if($null -eq $tempSddl){if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}; throw 'temp ACL unavailable'}
+$control=Join-Path $Root 'directory-policy-control.tmp'
+[System.IO.File]::WriteAllText($control,'')
+$controlSddl=[System.IO.File]::GetAccessControl($control).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
+$process.WaitForExit()
+[System.IO.File]::WriteAllText($Result,(@{temp=$tempSddl;control=$controlSddl}|ConvertTo-Json -Compress))" | save $watcher
+        let watched = (test-complete-result (
+            ^powershell.exe -NoProfile -NonInteractive -File $watcher $root $nu.current-exe $child $token_file $result_file $stdout $stderr
+            | complete
+        ))
+        assert equal $watched.exit_code 0 $"DACL watcher failed: ($watched.stderr)"
+        let result = (open $result_file)
+        let control_path = ($root | path join "directory-policy-control.tmp")
+        let inherited_control_sddl = (windows-file-sddl $control_path)
+        assert equal (normalize-windows-dacl $result.temp) (normalize-windows-dacl $inherited_control_sddl) "live sibling temp did not inherit destination-directory DACL"
+        let final_sddl = (windows-file-sddl $secrets)
+        assert ((normalize-windows-dacl $old_sddl) != (normalize-windows-dacl $inherited_control_sddl)) "custom file DACL fixture did not differ"
+        assert equal (normalize-windows-dacl $final_sddl) (normalize-windows-dacl $inherited_control_sddl) "published replacement did not inherit directory DACL"
         rm -f $control_path
+        assert-no-state-artifacts $root
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
-def test-history-config-corruption-contracts [] {
-    let root = (make-temp-dir "state-history-config")
+def test-collection-copy-has-no-state-artifacts [] {
+    let root = (make-temp-dir "state-copy")
     let failure = try {
         $env.API_ROOT = $root
         api init | ignore
-        let config_path = ($root | path join "config.nuon")
-        "{credential: HISTORY-CONFIG-SENTINEL" | save -f $config_path
-        let commands = [
-            "api history save {method: GET, url: 'https://example.invalid', headers: {}, body: null} {status: 200, status_text: OK, headers: {}, body: null, time_ms: 1, size_bytes: 0} | ignore"
-            "api history clear --force"
-        ]
-        for command in $commands {
-            let result = (run-command-process $root $command)
-            assert-state-read-failure $result $config_path $command
-            assert (not ($result.stderr | str contains "HISTORY-CONFIG-SENTINEL")) $"history config error leaked content: ($command)"
+        api config set lifecycle true | ignore
+        api vars set lifecycle exact | ignore
+        api auth bearer set lifecycle LIFECYCLE-SENTINEL | ignore
+        api collection create source | ignore
+        api collection env create source active --activate | ignore
+        api request create ping GET "https://example.invalid" --collection source | ignore
+        api request update ping --method POST --collection source | ignore
+        api chain create lifecycle | ignore
+        let source = ($root | path join "collections" "source")
+        let retired_dir = ($source | path join ".nurl-state")
+        let setup_dir = ($source | path join ".nurl-state-setup-11111111-1111-1111-1111-111111111111")
+        let request_lock = ($source | path join "requests" ".ping.nuon.create.lock")
+        let legacy_lock = ($source | path join ".source.nuon.nurl-create.lock")
+        let sibling_temp = ($source | path join "requests" ".ping.nuon.nurl-22222222-2222-2222-2222-222222222222.tmp")
+        let hidden_user_file = ($source | path join ".user-metadata")
+        let near_marker = ($source | path join ".secured-video")
+        let near_lock = ($source | path join "database.create.lock")
+        let near_temp = ($source | path join ".notes.nurl-backup.tmp")
+        let near_lock_dir = ($source | path join ".cache.create.lock")
+        mkdir $retired_dir $setup_dir
+        "FORGED-MARKER-SENTINEL" | save ($retired_dir | path join ".secured-v1")
+        "SETUP-SENTINEL" | save ($setup_dir | path join "owner")
+        "REQUEST-LOCK-SENTINEL" | save $request_lock
+        "LEGACY-LOCK-SENTINEL" | save $legacy_lock
+        "ORPHAN-TEMP-SENTINEL" | save $sibling_temp
+        "USER-HIDDEN-SENTINEL" | save $hidden_user_file
+        "NEAR-MARKER-SENTINEL" | save $near_marker
+        "NEAR-LOCK-SENTINEL" | save $near_lock
+        "NEAR-TEMP-SENTINEL" | save $near_temp
+        mkdir $near_lock_dir
+        "NEAR-LOCK-DIR-SENTINEL" | save ($near_lock_dir | path join "content")
+        let source_env = ($source | path join "environments" "active.nuon")
+        let source_request = ($source | path join "requests" "ping.nuon")
+        let source_meta = ($source | path join "meta.nuon")
+        let source_env_bytes = (open $source_env --raw)
+        let source_request_bytes = (open $source_request --raw)
+        let source_meta_bytes = (open $source_meta --raw)
+        let source_artifacts = (
+            [$retired_dir $setup_dir $request_lock $legacy_lock $sibling_temp]
+            | each {|path|
+                if ($path | path type) == "dir" {
+                    state-entries $path | each {|child| {path: $child, bytes: (open $child --raw)}}
+                } else {
+                    [{path: $path, bytes: (open $path --raw)}]
+                }
+            }
+            | flatten
+        )
+        api collection copy source copied | ignore
+        let copied = ($root | path join "collections" "copied")
+        for artifact in $source_artifacts {
+            assert ($artifact.path | path exists) $"collection copy deleted source artifact: ($artifact.path)"
+            assert equal (open $artifact.path --raw) $artifact.bytes $"collection copy changed source artifact: ($artifact.path)"
         }
+        assert-no-state-artifacts $copied
+        assert equal (open ($copied | path join "environments" "active.nuon") --raw) $source_env_bytes "collection copy changed environment bytes"
+        assert equal (open ($copied | path join "requests" "ping.nuon") --raw) $source_request_bytes "collection copy changed nested request bytes"
+        assert equal (open ($copied | path join "meta.nuon") --raw) $source_meta_bytes "collection copy changed meta bytes"
+        assert equal (open ($copied | path join ".user-metadata") --raw) "USER-HIDDEN-SENTINEL" "collection copy dropped unrelated hidden user data"
+        assert equal (open ($copied | path join ".secured-video") --raw) "NEAR-MARKER-SENTINEL" "collection copy removed a marker near-match"
+        assert equal (open ($copied | path join "database.create.lock") --raw) "NEAR-LOCK-SENTINEL" "collection copy removed a lock near-match"
+        assert equal (open ($copied | path join ".notes.nurl-backup.tmp") --raw) "NEAR-TEMP-SENTINEL" "collection copy removed a temp near-match"
+        assert equal (open ($copied | path join ".cache.create.lock" "content") --raw) "NEAR-LOCK-DIR-SENTINEL" "collection copy removed a lock-shaped directory"
+        assert equal (api request show ping --collection copied | get method) POST "copied nested request is not readable"
+        rm -rf $retired_dir $setup_dir
+        rm -f $request_lock $legacy_lock $sibling_temp $hidden_user_file $near_marker $near_lock $near_temp
+        rm -rf $near_lock_dir
+        assert-no-state-artifacts $root
+
+        let bundled = ($env.NURL_REPO_ROOT | path join "collections" "jsonplaceholder")
+        let bundled_before = (state-snapshot $bundled)
+        let bundled_copy = ($root | path join "collections" "jsonplaceholder")
+        cp -r $bundled $bundled_copy
+        api collection copy jsonplaceholder jsonplaceholder-copy | ignore
+        assert equal (state-snapshot $bundled) $bundled_before "using bundled jsonplaceholder changed tracked source bytes"
+        assert-no-state-artifacts ($root | path join "collections" "jsonplaceholder-copy")
         null
     } catch {|error| $error}
     cleanup $root
-    if $failure != null {
-        error make {msg: $failure.msg}
-    }
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 export def run-suite-state-durability []: nothing -> list<record> {
     print "\nState durability"
     [
-        (run-test "atomic state commits preserve exact serialized bytes" { test-state-atomic-bytes })
-        (run-test "failed public credential commits preserve original bytes and clean temps" { test-state-failed-commit-preserves-original })
+        (run-test "replacement preserves exact serialized bytes and symlink targets" { test-state-atomic-bytes-and-symlink })
+        (run-test "later same-path writes clean only aged sibling temps" { test-state-stale-temp-cleanup })
+        (run-test "genuine replacement failures preserve original bytes and clean temps" { test-state-failed-replacement-preserves-original })
         (run-test "all state categories reject syntax, shape, and binary corruption cleanly" { test-state-corruption-contracts })
-        (run-test "state I/O errors propagate and no-clobber messages stay stable" { test-state-io-errors-and-no-clobber })
-        (run-test "read-only state commands are byte-stable and credentials survive mutations" { test-state-read-only-and-credentials })
-        (run-test "state writes avoid PowerShell and clean stale create locks" { test-state-native-write-and-stale-cleanup })
-        (run-test "concurrent no-clobber creates publish exactly one winner" { test-state-concurrent-no-clobber })
-        (run-test "Windows writes work under PowerShell Constrained Language Mode" { test-windows-constrained-language-writes })
-        (run-test "Windows credential temps match a protected single-ACE DACL" { test-windows-state-temp-dacl })
-        (run-test "Windows replacements adopt the protected temp-directory DACL" { test-windows-final-dacl-policy })
+        (run-test "partial new files fail closed through public readers" { test-state-partial-new-file-recovery })
         (run-test "history config readers use fail-closed state errors" { test-history-config-corruption-contracts })
+        (run-test "I/O and duplicate-create contracts remain stable" { test-state-no-clobber-and-io })
+        (run-test "read-only state is byte-stable and credentials preserve order/mode" { test-state-read-only-and-credentials })
+        (run-test "fresh PATH-empty lifecycle uses no external state commands" { test-state-fresh-pathless-lifecycle })
+        (run-test "production marker, lock, validator, and external paths are removed" { test-state-production-architecture-removed })
+        (run-test "Windows 8.3 alias lifecycle remains valid" { test-windows-short-path-lifecycle })
+        (run-test "POSIX symlinked workspace ancestors remain valid" { test-posix-symlinked-ancestor-lifecycle })
+        (run-test "concurrent first initialization remains valid" { test-state-concurrent-first-init })
+        (run-test "concurrent direct creates publish exactly one winner" { test-state-concurrent-no-clobber })
+        (run-test "Windows sibling temp and published file inherit directory DACL" { test-windows-sibling-and-final-dacl })
+        (run-test "collection copy cannot propagate removed state artifacts" { test-collection-copy-has-no-state-artifacts })
     ]
 }

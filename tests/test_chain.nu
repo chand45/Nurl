@@ -13,27 +13,58 @@ def test-chain-list-valued-files [] {
         api init | ignore
         let chains_dir = ($tmp | path join "chains")
         mkdir $chains_dir
-        let workspace_path = ($chains_dir | path join "list-workflow.nuon")
+        let homogeneous_path = ($chains_dir | path join "homogeneous.nuon")
+        let heterogeneous_path = ($chains_dir | path join "heterogeneous.nuon")
         let explicit_path = ($tmp | path join "explicit-list.nuon")
-        let populated = [{request: "missing-request", use: {}}]
-        $populated | to nuon | save $workspace_path
-        $populated | to nuon | save $explicit_path
+        let homogeneous = [{request: "nested/missing-request", use: {}}]
+        let heterogeneous = [
+            {request: "nested/missing-request", use: {}}
+            {request: "another/missing-request", delay_ms: 0}
+        ]
+        let runtime_minor = (version | get version | split row "." | get 1 | into int)
+        assert ($homogeneous | describe | str starts-with "table<") "homogeneous sequence no longer exercises raw table spelling"
+        if $runtime_minor < 100 {
+            assert equal ($heterogeneous | describe) "list<any>" "minimum-runtime heterogeneous fixture no longer exercises raw list spelling"
+        } else {
+            assert ($heterogeneous | describe | str starts-with "table<") "current-runtime heterogeneous fixture no longer exercises raw table spelling"
+        }
+        let homogeneous_detailed = ($homogeneous | describe --detailed)
+        let heterogeneous_detailed = ($heterogeneous | describe --detailed)
+        let homogeneous_type = ($homogeneous_detailed | get type)
+        let heterogeneous_type = ($heterogeneous_detailed | get type)
+        assert equal $homogeneous_type list "homogeneous detailed type did not normalize to list"
+        assert equal $heterogeneous_type list "heterogeneous detailed type did not normalize to list"
+        $homogeneous | to nuon | save $homogeneous_path
+        $heterogeneous | to nuon | save $heterogeneous_path
+        $heterogeneous | to nuon | save $explicit_path
 
-        let workspace_show = (api chain show list-workflow)
-        assert equal ($workspace_show | length) 1 "workspace populated list-valued chain show changed"
-        assert equal ($workspace_show | first | get request) "missing-request"
-        let explicit_show = (api chain show $explicit_path)
-        assert equal ($explicit_show | length) 1 "explicit-path populated list-valued chain show changed"
-        assert equal ($explicit_show | first | get request) "missing-request"
-        assert equal (api chain list | where name == list-workflow | first | get steps) 1 "chain list did not count a populated table-form chain"
+        let homogeneous_show = (api chain show homogeneous)
+        assert equal ($homogeneous_show | length) 1 "homogeneous populated list-valued chain show changed"
+        assert equal ($homogeneous_show | first | get request) "nested/missing-request"
+        let heterogeneous_show = (api chain show heterogeneous)
+        assert equal ($heterogeneous_show | length) 2 "heterogeneous populated list-valued chain show changed"
+        let listed = (api chain list)
+        assert equal ($listed | where name == homogeneous | first | get steps) 1 "chain list did not count a homogeneous table-form chain"
+        assert equal ($listed | where name == heterogeneous | first | get steps) 2 "chain list did not count a heterogeneous list-form chain"
 
-        let workspace_result = (api chain exec list-workflow --quiet)
-        assert equal $workspace_result.success false "workspace populated list-valued chain did not execute"
-        assert ($workspace_result.error | str contains "Request not found") "workspace populated list chain returned the wrong execution result"
+        let homogeneous_result = (api chain exec homogeneous --quiet)
+        assert equal $homogeneous_result.success false "homogeneous populated list-valued chain did not execute"
+        assert ($homogeneous_result.error | str contains "Request not found") "homogeneous populated list chain returned the wrong execution result"
+
+        let heterogeneous_result = (api chain exec heterogeneous --quiet)
+        assert equal $heterogeneous_result.success false "heterogeneous populated list-valued chain did not execute"
+        assert equal ($heterogeneous_result.results | length) 0 "heterogeneous missing-request chain unexpectedly reached the network"
+        assert ($heterogeneous_result.error | str contains "Request not found") "heterogeneous populated list chain returned the wrong execution result"
 
         let explicit_result = (api chain exec $explicit_path --quiet)
         assert equal $explicit_result.success false "explicit-path populated list-valued chain did not execute"
+        assert equal ($explicit_result.results | length) 0 "explicit-path missing-request chain unexpectedly reached the network"
         assert ($explicit_result.error | str contains "Request not found") "explicit-path populated list chain returned the wrong execution result"
+
+        let explicit_show = (run-command-process $tmp $"api chain show ($explicit_path | to nuon) | ignore")
+        assert ($explicit_show.exit_code != 0) "explicit-path chain show became supported"
+        assert equal ($explicit_show.stdout | str trim) "" "rejected explicit-path chain show wrote stdout"
+        assert ($explicit_show.stderr | str contains "Invalid chain name") "explicit-path chain show rejection changed"
         null
     } catch {|error| $error}
     cleanup $tmp
@@ -156,7 +187,7 @@ def test-chain-stop-on-error [] {
 def run-suite-chain [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)── Chain: api chain run ──(ansi reset)"
     mut results = [
-        (run-test "chain: record-or-list persisted definitions remain compatible" { test-chain-list-valued-files })
+        (run-test "chain: list/table persisted definitions remain compatible" { test-chain-list-valued-files })
         (run-test "chain: list preserves placeholders for corrupt files" { test-chain-list-preserves-corrupt-placeholder })
     ]
     if not $net_ok {
