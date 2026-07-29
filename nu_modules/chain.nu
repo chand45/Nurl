@@ -6,7 +6,7 @@ use http.nu ["api request"]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
-use state-store.nu [open-state-record save-state-bytes]
+use state-store.nu [open-state-record open-state-value save-state-bytes]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [optional-get]
 
@@ -299,13 +299,20 @@ export def "api chain exec" [
         }
     }
 
-    let chain_def = (open-state-record $file_path)
-    let steps = ($chain_def.steps? | default $chain_def)
+    let chain_def = (open-state-value $file_path)
+    let chain_type = ($chain_def | describe)
+    if not (($chain_type | str starts-with "record") or ($chain_type | str starts-with "list")) {
+        fail-command $"Chain file '($file_path)' must contain a record or list. Restore or recreate the file, then retry."
+    }
+    let list_form = ($chain_type | str starts-with "list")
+    let steps = if $list_form { $chain_def } else { $chain_def.steps? | default $chain_def }
     validate-chain-steps $steps
 
     if not $quiet {
-        print $"(ansi blue)Running chain: ($chain_def.name? | default $file)(ansi reset)"
-        if ($chain_def.description? | default "") != "" {
+        let display_name = if $list_form { $file } else { $chain_def.name? | default $file }
+        let description = if $list_form { "" } else { $chain_def.description? | default "" }
+        print $"(ansi blue)Running chain: ($display_name)(ansi reset)"
+        if $description != "" {
             print $"($chain_def.description)"
         }
         print ""
@@ -410,12 +417,23 @@ export def "api chain list" [] {
     $files | each {|file|
         let logical_name = ($file | path basename | str replace -r '\.nuon$' '')
         let resolved_file = (resolve-chain-file $chains_dir $logical_name)
-        let chain = (open-state-record $resolved_file)
+        let chain = try {
+            let value = (open-state-value $resolved_file)
+            let value_type = ($value | describe)
+            if (($value_type | str starts-with "record") or ($value_type | str starts-with "list")) {
+                $value
+            } else {
+                {name: $logical_name, description: "", steps: []}
+            }
+        } catch {
+            {name: $logical_name, description: "", steps: []}
+        }
+        let list_form = (($chain | describe) | str starts-with "list")
 
         {
-            name: ($chain.name? | default $logical_name)
-            description: ($chain.description? | default "")
-            steps: ($chain.steps? | default [] | length)
+            name: (if $list_form { $logical_name } else { $chain.name? | default $logical_name })
+            description: (if $list_form { "" } else { $chain.description? | default "" })
+            steps: (if $list_form { $chain | length } else { $chain.steps? | default [] | length })
         }
     }
 }
@@ -430,7 +448,12 @@ export def "api chain show" [name: string] {
         fail-command $"Chain '($name)' not found"
     }
 
-    open-state-record $file_path
+    let chain = (open-state-value $file_path)
+    let chain_type = ($chain | describe)
+    if not (($chain_type | str starts-with "record") or ($chain_type | str starts-with "list")) {
+        fail-command $"Chain file '($file_path)' must contain a record or list. Restore or recreate the file, then retry."
+    }
+    $chain
 }
 
 # Delete a chain

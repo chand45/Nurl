@@ -26,7 +26,7 @@
 
 **Never lose a completed request again:** Every completed HTTP response is automatically saved to history with full request/response details. Search through past requests, inspect responses, and resend any request with a single command — no need to remember or retype complex curl commands.
 
-Workspace configuration, credentials, variables, collections, environments, saved requests, and chains are committed atomically. If a state file is corrupt or has the wrong shape, Nurl stops with a path-specific recovery error instead of exposing parser internals or continuing with partial state.
+Workspace configuration, credentials, variables, collections, environments, saved requests, and chains are committed through unique same-directory files and native replacement. If a state file is corrupt or has the wrong shape, Nurl stops with a path-specific recovery error instead of exposing parser internals or continuing with partial state. Temporary files inherit the workspace directory's Windows access policy; POSIX replacements preserve mode bits, but not extended ACLs or ownership. Secure the workspace directory when it contains credentials. Stale Nurl state temps are removed on a later mutation.
 
 ---
 

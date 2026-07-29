@@ -38,7 +38,12 @@ def default-secrets [] {
 def load-secrets [] {
     let path = (get-secrets-path)
     let legacy_default = (default-secrets | reject saml_tokens)
-    $legacy_default | merge (open-state-record-or-default $path (default-secrets))
+    let loaded = (open-state-record-or-default $path (default-secrets))
+    if "saml_tokens" in ($loaded | columns) {
+        (default-secrets) | merge $loaded
+    } else {
+        $legacy_default | merge $loaded
+    }
 }
 
 # Save secrets

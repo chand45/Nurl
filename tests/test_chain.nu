@@ -4,6 +4,63 @@
 
 use test-assert.nu [assert "assert equal" "assert not"]
 
+# ── Chain: persisted compatibility ────────────────────────────────────────────
+
+def test-chain-list-valued-files [] {
+    let tmp = (make-temp-dir "chain-list-value")
+    let failure = try {
+        $env.API_ROOT = $tmp
+        api init | ignore
+        let chains_dir = ($tmp | path join "chains")
+        mkdir $chains_dir
+        let workspace_path = ($chains_dir | path join "list-workflow.nuon")
+        let explicit_path = ($tmp | path join "explicit-list.nuon")
+        [] | to nuon | save $workspace_path
+        [] | to nuon | save $explicit_path
+
+        assert equal (api chain show list-workflow) [] "workspace list-valued chain show changed"
+        let workspace_result = (api chain exec list-workflow --quiet)
+        assert equal $workspace_result.success true "workspace list-valued chain exec failed"
+        assert equal $workspace_result.results [] "workspace empty list chain executed unexpected steps"
+
+        let explicit_result = (api chain exec $explicit_path --quiet)
+        assert equal $explicit_result.success true "explicit-path list-valued chain exec failed"
+        assert equal $explicit_result.results [] "explicit-path empty list chain executed unexpected steps"
+        null
+    } catch {|error| $error}
+    cleanup $tmp
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
+def test-chain-list-preserves-corrupt-placeholder [] {
+    let tmp = (make-temp-dir "chain-list-corrupt")
+    let failure = try {
+        $env.API_ROOT = $tmp
+        api init | ignore
+        let chains_dir = ($tmp | path join "chains")
+        mkdir $chains_dir
+        [] | to nuon | save ($chains_dir | path join "list-form.nuon")
+        "{secret: CHAIN-LIST-SENTINEL" | save ($chains_dir | path join "corrupt.nuon")
+        "42" | save ($chains_dir | path join "wrong-shape.nuon")
+
+        let result = (run-command-process $tmp "api chain list | to json --raw")
+        assert equal $result.exit_code 0 $"chain list no longer tolerates one corrupt file: ($result.stderr)"
+        assert equal ($result.stderr | str trim) "" "chain list wrote a corruption error"
+        assert (not ($result.stdout | str contains "CHAIN-LIST-SENTINEL")) "chain list leaked corrupt content"
+        let rows = ($result.stdout | from json)
+        assert equal ($rows | where name == list-form | first | get steps) 0
+        assert equal ($rows | where name == corrupt | first | get steps) 0
+        assert equal ($rows | where name == wrong-shape | first | get steps) 0
+        null
+    } catch {|error| $error}
+    cleanup $tmp
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
 # ── Chain: sequential requests with body and extraction ───────────────────────
 
 def test-chain-post-and-get [] {
@@ -90,10 +147,15 @@ def test-chain-stop-on-error [] {
 
 def run-suite-chain [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)── Chain: api chain run ──(ansi reset)"
+    mut results = [
+        (run-test "chain: record-or-list persisted definitions remain compatible" { test-chain-list-valued-files })
+        (run-test "chain: list preserves placeholders for corrupt files" { test-chain-list-preserves-corrupt-placeholder })
+    ]
     if not $net_ok {
-        return [(skip-test "Chain" "network unavailable")]
+        $results = ($results | append (skip-test "Chain network" "network unavailable"))
+        return $results
     }
-    [
+    $results | append [
         (run-test "chain: POST + GET succeeds end-to-end"           { test-chain-post-and-get })
         (run-test "chain: pre-serialized string body works"         { test-chain-string-body-works })
         (run-test "chain: extraction populates context"             { test-chain-extraction })

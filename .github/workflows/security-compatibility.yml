@@ -89,6 +89,12 @@ jobs:
           & $env:NU_EXE --no-config-file "${{ matrix.runner }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Run state durability suite
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-state-durability.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run minimum-runtime status compatibility suite
         if: matrix.nu_version == '0.89.0'
         shell: pwsh

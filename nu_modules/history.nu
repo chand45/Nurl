@@ -4,6 +4,7 @@
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use resource-path.nu [path-type-safe resolve-under-base]
+use state-store.nu [open-state-record-or-default]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 
@@ -758,11 +759,7 @@ export def "api history save" [
     # Get current environment
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
-    let current_env = if ($config_path | path exists) {
-        (open $config_path).default_environment? | default null
-    } else {
-        null
-    }
+    let current_env = (open-state-record-or-default $config_path {}).default_environment? | default null
 
     let entry = {
         id: $id
@@ -1082,11 +1079,7 @@ export def "api history clear" [
     # Default: clear entries older than retention period
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
-    let retention_days = if ($config_path | path exists) {
-        (open $config_path).history_retention_days? | default 30
-    } else {
-        30
-    }
+    let retention_days = (open-state-record-or-default $config_path {}).history_retention_days? | default 30
 
     let cutoff = ((date now) - ($retention_days | into duration --unit day))
     let recovery = (capture-history-recovery-hints)

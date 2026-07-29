@@ -61,9 +61,10 @@ cleaned up after each test.
 | `test_credential_boundaries.nu` | Live response-header and config/environment/extra-variable interpolation boundaries |
 | `test_credential_blackbox.nu` | Nine independent public-CLI reproductions with literal policy tables and byte/network mutation checks |
 | `test_secure_header_capture.nu` | Fileless curl response parsing, sensitive live response masking, trailers, redirects, and transport artifacts |
-| `test_state_durability.nu` | Atomic state bytes, failed-commit preservation, corruption/shape/I/O errors, no-clobber behavior, and read-only byte stability |
+| `test_state_durability.nu` | Atomic state bytes, genuine failure preservation, corruption/shape/I/O errors, record-or-list chains, temp DACL/mode behavior, stale cleanup, no-clobber, and read-only byte stability |
 | `run-security.nu` | Current-runtime focused security runner |
 | `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
+| `run-state-durability.nu` | Cross-platform state durability gate for Nushell 0.89.0 and current |
 | `run.nu` | Main runner — sources all suites, prints summary, exits non-zero on failure |
 
 ## Adding a new test
