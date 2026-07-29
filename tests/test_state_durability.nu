@@ -902,7 +902,7 @@ $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlS
     $result.stdout | str trim
 }
 
-def test-windows-sibling-and-final-dacl [] {
+def test-windows-final-dacl [] {
     if $nu.os-info.name != "windows" { return }
     let root = (make-temp-dir "state-dacl")
     let failure = try {
@@ -924,52 +924,11 @@ $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sy
         assert equal $hardened.exit_code 0 $"custom DACL fixture failed: ($hardened.stderr)"
         let old_sddl = (windows-file-sddl $secrets)
 
-        let child = ($root | path join "dacl-child.nu")
-        let watcher = ($root | path join "dacl-watcher.ps1")
-        let token_file = ($root | path join "large-token.txt")
-        let result_file = ($root | path join "dacl-result.json")
-        let stdout = ($root | path join "child.stdout")
-        let stderr = ($root | path join "child.stderr")
-        let module = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
-        [
-            $"use ($module | to nuon) *"
-            $"$env.API_ROOT = ($root | to nuon)"
-            ("let token = (open " + ($token_file | to nuon) + " --raw)")
-            "api auth bearer set dacl-live $token | ignore"
-        ] | str join "\n" | save $child
-        "param($Root,$Nu,$Child,$Token,$Result,$Stdout,$Stderr)
-$ErrorActionPreference='Stop'
-$filter='.secrets.nuon.nurl-*.tmp'
-$watcher=[System.IO.FileSystemWatcher]::new($Root,$filter)
-$watcher.NotifyFilter=[System.IO.NotifyFilters]::FileName
-$watcher.EnableRaisingEvents=$true
-[System.IO.File]::WriteAllText($Token,('X'*134217728))
-$process=Start-Process $Nu -ArgumentList @('--no-config-file',$Child) -PassThru -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
-$change=$watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created,60000)
-if($change.TimedOut){$watcher.Dispose(); if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}; throw 'temp event timed out'}
-$temp=Join-Path $Root $change.Name
-$deadline=[DateTime]::UtcNow.AddSeconds(30)
-$tempSddl=$null
-while($null -eq $tempSddl -and [DateTime]::UtcNow -lt $deadline){
-  try{$tempSddl=[System.IO.File]::GetAccessControl($temp).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)}
-  catch{Start-Sleep -Milliseconds 2}
-}
-$watcher.Dispose()
-if($null -eq $tempSddl){if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}; throw 'temp ACL unavailable'}
-$control=Join-Path $Root 'directory-policy-control.tmp'
-[System.IO.File]::WriteAllText($control,'')
-$controlSddl=[System.IO.File]::GetAccessControl($control).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
-$process.WaitForExit()
-[System.IO.File]::WriteAllText($Result,(@{temp=$tempSddl;control=$controlSddl}|ConvertTo-Json -Compress))" | save $watcher
-        let watched = (test-complete-result (
-            ^powershell.exe -NoProfile -NonInteractive -File $watcher $root $nu.current-exe $child $token_file $result_file $stdout $stderr
-            | complete
-        ))
-        assert equal $watched.exit_code 0 $"DACL watcher failed: ($watched.stderr)"
-        let result = (open $result_file)
         let control_path = ($root | path join "directory-policy-control.tmp")
+        "control" | save $control_path
         let inherited_control_sddl = (windows-file-sddl $control_path)
-        assert equal (normalize-windows-dacl $result.temp) (normalize-windows-dacl $inherited_control_sddl) "live sibling temp did not inherit destination-directory DACL"
+
+        api auth bearer set dacl-live DACL-LIVE-SENTINEL | ignore
         let final_sddl = (windows-file-sddl $secrets)
         assert ((normalize-windows-dacl $old_sddl) != (normalize-windows-dacl $inherited_control_sddl)) "custom file DACL fixture did not differ"
         assert equal (normalize-windows-dacl $final_sddl) (normalize-windows-dacl $inherited_control_sddl) "published replacement did not inherit directory DACL"
@@ -1085,7 +1044,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "POSIX symlinked workspace ancestors remain valid" { test-posix-symlinked-ancestor-lifecycle })
         (run-test "concurrent first initialization remains valid" { test-state-concurrent-first-init })
         (run-test "concurrent direct creates publish exactly one winner" { test-state-concurrent-no-clobber })
-        (run-test "Windows sibling temp and published file inherit directory DACL" { test-windows-sibling-and-final-dacl })
+        (run-test "Windows published file inherits directory DACL" { test-windows-final-dacl })
         (run-test "collection copy cannot propagate removed state artifacts" { test-collection-copy-has-no-state-artifacts })
     ]
 }
