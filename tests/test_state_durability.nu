@@ -622,8 +622,8 @@ def test-state-concurrent-no-clobber [] {
                 "while not ($release | path exists) {}"
                 ("let outcome = try { api chain create race --description "
                     + ($child.description | to nuon)
-                    + "; 'success' } catch { 'failure' }")
-                $"$outcome | save ($child.result | to nuon)"
+                    + "; {status: 'success', error: ''} } catch {|error| {status: 'failure', error: $error.msg}}")
+                $"$outcome | to nuon | save ($child.result | to nuon)"
             ] | str join "\n" | save $child.script
         }
         "param($Nu, $One, $Two, $Release)
@@ -639,9 +639,12 @@ $second.WaitForExit()" | save $launcher
             | complete
         ))
         assert equal $launched.exit_code 0 $"concurrent create launcher failed: ($launched.stderr)"
-        let outcomes = [(open $result_one --raw | str trim) (open $result_two --raw | str trim)]
-        assert equal ($outcomes | where $it == "success" | length) 1 $"concurrent create expected one winner: ($outcomes)"
-        assert equal ($outcomes | where $it == "failure" | length) 1 $"concurrent create expected one loser: ($outcomes)"
+        let outcomes = [
+            (open $result_one --raw | from nuon)
+            (open $result_two --raw | from nuon)
+        ]
+        let statuses = ($outcomes | get status | sort)
+        assert ($statuses == ["failure" "success"]) $"concurrent create expected one winner and loser: ($outcomes)"
         let winner = (open-state-record ($root | path join "chains" "race.nuon"))
         assert equal $winner.name "race" "concurrent create winner bytes were invalid"
         assert ($winner.description in ["winner-one" "winner-two"]) "concurrent stale recovery did not preserve winner bytes"
