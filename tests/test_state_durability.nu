@@ -555,25 +555,6 @@ def test-state-native-write-and-stale-cleanup [] {
             assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
         }
 
-        def test-public-entrypoint-state-token [] {
-            let root = (make-temp-dir "state-public-entrypoint")
-            let script = ($root | path join "entrypoint.nu")
-            let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
-            [
-                $"source ($api_path | to nuon)"
-                $"$env.API_ROOT = ($root | to nuon)"
-                "api init | ignore"
-                "api config set entrypoint true | ignore"
-            ] | str join "\n" | save $script
-            let result = (test-complete-result (
-                ^$nu.current-exe --no-config-file $script
-                | complete
-            ))
-            assert equal $result.exit_code 0 $"public api.nu entrypoint did not initialize state session token: ($result.stderr)"
-            assert equal (open-state-record ($root | path join "config.nuon") | get entrypoint) true
-            cleanup $root
-        }
-
         let link_root = (make-temp-dir "state-temp-link")
         let link_target = (make-temp-dir "state-temp-link-target")
         let link_path = ($link_root | path join ".nurl-state")
@@ -1080,7 +1061,6 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "state I/O errors propagate and no-clobber messages stay stable" { test-state-io-errors-and-no-clobber })
         (run-test "read-only state commands are byte-stable and credentials survive mutations" { test-state-read-only-and-credentials })
         (run-test "state writes avoid PowerShell and clean stale create locks" { test-state-native-write-and-stale-cleanup })
-        (run-test "public api.nu entrypoint initializes state session token" { test-public-entrypoint-state-token })
         (run-test "concurrent no-clobber creates publish exactly one winner" { test-state-concurrent-no-clobber })
         (run-test "Windows writes work under PowerShell Constrained Language Mode" { test-windows-constrained-language-writes })
         (run-test "Windows credential temps match a protected single-ACE DACL" { test-windows-state-temp-dacl })

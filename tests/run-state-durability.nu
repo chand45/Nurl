@@ -6,6 +6,10 @@ source ../api.nu
 $env.NURL_REPO_ROOT = $repo_root
 $env.API_ROOT = $repo_root
 
+if ($env.NURL_STATE_SESSION_TOKEN? | default "" | is-empty) {
+    error make {msg: "api.nu did not initialize the state-store process token"}
+}
+
 source helpers.nu
 source test_state_durability.nu
 
