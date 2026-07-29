@@ -771,6 +771,8 @@ def test-windows-state-temp-dacl [] {
         let watcher_script = ($root | path join "dacl-watcher.ps1")
         let token_path = ($root | path join "large-token.txt")
         let result_path = ($root | path join "dacl-result.json")
+        let session_ready = $"($result_path).session-ready"
+        let session_release = $"($result_path).session-release"
         let stdout_path = ($root | path join "dacl-child.stdout")
         let stderr_path = ($root | path join "dacl-child.stderr")
         let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
@@ -779,6 +781,9 @@ def test-windows-state-temp-dacl [] {
         [
             $"use ($module_path | to nuon) *"
             $"$env.API_ROOT = ($root | to nuon)"
+            $"$env.NURL_STATE_SESSION_TOKEN | save ($session_ready | to nuon)"
+            $"let session_release = ($session_release | to nuon)"
+            "while not ($session_release | path exists) {}"
             ("let token = (open " + ($token_path | to nuon) + " --raw)")
             "api auth bearer set temp-dacl $token | ignore"
         ] | str join "\n" | save $child_script
@@ -915,9 +920,24 @@ $broadControl = Join-Path (Split-Path -Parent $Root) 'dacl-broad-control.tmp'
 $broadAcl = [System.IO.File]::GetAccessControl($broadControl)
 $broadSddl = $broadAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
 $filter = '.secrets.nuon.nurl-*.tmp'
-$capture = [NurlTempCapture]::new($Root, $filter)
 [System.IO.File]::WriteAllText($Token, ('X' * 134217728))
 $process = Start-Process -FilePath $Nu -ArgumentList @('--no-config-file', $Child) -PassThru -WindowStyle Hidden -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
+$sessionReady = $Result + '.session-ready'
+$sessionRelease = $Result + '.session-release'
+$sessionDeadline = [DateTime]::UtcNow.AddSeconds(30)
+while (-not (Test-Path -LiteralPath $sessionReady) -and [DateTime]::UtcNow -lt $sessionDeadline) {
+    Start-Sleep -Milliseconds 2
+}
+if (-not (Test-Path -LiteralPath $sessionReady)) {
+    if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force
+    }
+    throw 'State temp DACL child did not publish its process token'
+}
+$sessionToken = [System.IO.File]::ReadAllText($sessionReady)
+[System.IO.File]::WriteAllText((Join-Path $Root '.secured-v2'), ('secured-v2:' + $sessionToken))
+$capture = [NurlTempCapture]::new($Root, $filter)
+[System.IO.File]::WriteAllText($sessionRelease, 'release')
 if (-not $capture.Wait(60000)) {
     $capture.Dispose()
     if (-not $process.HasExited) {
