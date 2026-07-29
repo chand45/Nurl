@@ -233,15 +233,21 @@ request, interpolates variables, or touches `.nuon` files.
   parser errors and could make authenticated or all requests unusable.
 - **Root cause:** non-history workspace state used truncate-then-stream `save`/`save -f` and bare
   `open`, with no atomic commit boundary or shared syntax/record-shape validation.
-- **Fix:** serialized state now commits through a unique protected same-filesystem temp and native
-  replacement, without a PowerShell write-path dependency. Failed writes/replacements preserve the
-  prior destination and clean temporary files. Readers load raw bytes before parsing and report a
-  clean path-specific recovery error for invalid/non-record NUON while preserving genuine I/O
-  failures. Windows temps use a protected current-user DACL; POSIX replacement temps retain mode
-  bits, not extended ACLs/ownership. A killed process can leave a protected temp; stale cooperative
-  create locks are removed by a later create. History entry persistence remains a separate
-  snapshot/restore system, while its config reads use this reader.
+- **Fix:** replacements serialize fully, write a unique dotted sibling in the destination directory,
+  then publish with a native same-filesystem move. Failed handled replacements preserve prior bytes
+  and clean their temp. New files write directly; interruption can leave a partial new file,
+  matching prior behavior without risking pre-existing bytes. Readers report clean
+  path-specific syntax/shape recovery errors while preserving genuine I/O failures. Sibling temps
+  and replacements inherit the destination directory policy; custom Windows per-file DACLs and
+  POSIX mode/extended ACL/owner/group settings are not preserved. A hard kill can leave a full sibling temp; a
+  later same-path mutation opportunistically removes matching temps older than one hour. Cleanup
+  failure emits a stable path-only manual-remedy warning on stderr while the requested write still
+  commits and preserves its normal stdout, because refusing a credential rotation cannot remediate
+  an existing orphan and would permit local denial of service. Nurl runs no cleanup daemon, and external writers do not participate in advisory
+  coordination. History entry persistence remains separate; its config reads use the fail-closed
+  reader.
 - **Re-check:** run the state durability suite through `tests/run.nu`; it covers every workspace
   state category, exact bytes, genuine write/commit failures, credential preservation, I/O
-  propagation, record-or-list chains, no-clobber creates, protected temp DACL/mode behavior,
-  read-only byte stability, stale lock cleanup, and temporary-file cleanup.
+  propagation, list/table chains, direct no-clobber races, sibling temp/final DACL and POSIX mode
+  behavior, PATH-empty lifecycle, read-only byte stability, age-gated sibling cleanup, and
+  temporary-file hygiene.

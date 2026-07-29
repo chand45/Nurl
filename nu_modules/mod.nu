@@ -3,12 +3,7 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files path-type-safe]
 use command-error.nu [fail-command]
-use state-store.nu [initialize-state-store open-state-record open-state-record-or-default save-state-bytes]
-
-export-env {
-    # Transitive module imports do not propagate state-store.nu's export-env.
-    $env.NURL_STATE_SESSION_TOKEN = (random uuid)
-}
+use state-store.nu [open-state-record open-state-record-or-default save-state-bytes]
 
 # Get the directory where this module is located
 def get-api-root [] {
@@ -86,7 +81,6 @@ export use tui.nu *
 # Initialize the API client workspace
 export def "api init" [] {
     let root = (get-api-root)
-    initialize-state-store $root
 
     # Create directories if they don't exist
     let dirs = [
@@ -550,6 +544,29 @@ export def "api collection show" [name: string] {
     }
 }
 
+def remove-copied-state-artifacts [root: string] {
+    for entry in (ls -a $root) {
+        let name = ($entry.name | path basename)
+        let retired_dir = ($entry.type == "dir") and (
+            ($name == ".nurl-state")
+            or ($name =~ '^\.nurl-state-setup-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+        )
+        let retired_file = ($entry.type == "file") and (
+            ($name =~ '^\.secured-v[0-9]+$')
+            or ($name =~ '^\..+\.create\.lock$')
+            or ($name =~ '^\..+\.nurl-create\.lock$')
+            or ($name =~ '^\..+\.nurl-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.tmp$')
+        )
+        if $retired_dir {
+            rm -rf $entry.name
+        } else if $retired_file {
+            rm -f $entry.name
+        } else if $entry.type == "dir" {
+            remove-copied-state-artifacts $entry.name
+        }
+    }
+}
+
 # Copy a collection
 export def "api collection copy" [
     source: string  # Source collection name
@@ -570,6 +587,7 @@ export def "api collection copy" [
     }
 
     cp -r $source_dir $target_dir
+    remove-copied-state-artifacts $target_dir
 
     # Update collection metadata
     let coll_file = (resolve-under-base $target_dir "collection.nuon" "collection metadata" --scope $"collection '($target)'" --base-is-canonical)
