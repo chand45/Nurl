@@ -558,6 +558,19 @@ def test-state-native-write-and-stale-cleanup [] {
         assert (not (($root | path join "chains" "foreign.nuon") | path exists)) "foreign-lock contender published state"
         rm -f $foreign_lock
 
+        let legacy_sibling_lock = ($root | path join "chains" ".blocked.nuon.nurl-create.lock")
+        "LEGACY-FOREIGN-LOCK-TOKEN" | save $legacy_sibling_lock
+        let legacy_sibling_before = (open $legacy_sibling_lock --raw)
+        let legacy_blocked = (run-command-process $root "api chain create blocked")
+        assert ($legacy_blocked.exit_code != 0) "fresh legacy sibling lock did not block contender"
+        assert equal ($legacy_blocked.stdout | str trim) "" "legacy-lock contender wrote success output"
+        assert equal $legacy_blocked.stderr ($legacy_blocked.stderr | ansi strip) "legacy-lock contender wrote ANSI stderr"
+        assert ($legacy_blocked.stderr | str contains "legacy lock is still active") $"legacy-lock error was not actionable: ($legacy_blocked.stderr)"
+        assert equal (open $legacy_sibling_lock --raw) $legacy_sibling_before "legacy-lock contender changed or deleted foreign lock bytes"
+        assert (not (($root | path join "chains" "blocked.nuon") | path exists)) "legacy-lock contender published destination"
+        assert-no-state-temps $root
+        rm -f $legacy_sibling_lock
+
         let stale_lock = ($chain_state_dir | path join ".stale-chain.nuon.create.lock")
         "STALE-LOCK-TOKEN" | save $stale_lock
         set-state-path-stale $stale_lock
@@ -568,6 +581,11 @@ def test-state-native-write-and-stale-cleanup [] {
         set-state-path-stale $legacy_lock
         api chain create legacy-chain | ignore
         assert (not ($legacy_lock | path exists)) "next no-clobber mutation did not remove stale legacy directory lock"
+        let stale_sibling_lock = ($root | path join "chains" ".stale-sibling.nuon.nurl-create.lock")
+        "STALE-SIBLING-LOCK" | save $stale_sibling_lock
+        set-state-path-stale $stale_sibling_lock
+        api chain create stale-sibling | ignore
+        assert (not ($stale_sibling_lock | path exists)) "next no-clobber mutation did not remove stale legacy sibling lock"
         assert-no-state-temps $root
         null
     } catch {|error| $error}

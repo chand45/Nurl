@@ -20,6 +20,10 @@ def state-create-lock-path [path: string] {
     (state-temp-dir $path) | path join $".($path | path basename).create.lock"
 }
 
+def legacy-state-create-lock-path [path: string] {
+    ($path | path dirname) | path join $".($path | path basename).nurl-create.lock"
+}
+
 def state-temp-ready-path [path: string] {
     (state-temp-dir $path) | path join ".secured-v1"
 }
@@ -259,6 +263,15 @@ def legacy-lock-move-required [] {
 }
 
 def commit-state-no-clobber [temp_path: string, path: string, exists_message: string] {
+    let legacy_lock_path = (legacy-state-create-lock-path $path)
+    cleanup-stale-create-lock $legacy_lock_path
+    if ($legacy_lock_path | path exists) {
+        if ($path | path exists) {
+            fail-command $exists_message
+        }
+        error make {msg: $"Could not acquire state create lock for '($path)': a legacy lock is still active"}
+    }
+
     let lock_path = (state-create-lock-path $path)
     cleanup-stale-create-lock $lock_path
     let owner = (random uuid)
