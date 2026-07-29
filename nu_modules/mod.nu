@@ -3,7 +3,7 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files path-type-safe]
 use command-error.nu [fail-command]
-use state-store.nu [open-state-record open-state-record-or-default save-state-bytes]
+use state-store.nu [initialize-state-store open-state-record open-state-record-or-default save-state-bytes]
 
 # Get the directory where this module is located
 def get-api-root [] {
@@ -81,6 +81,7 @@ export use tui.nu *
 # Initialize the API client workspace
 export def "api init" [] {
     let root = (get-api-root)
+    initialize-state-store $root
 
     # Create directories if they don't exist
     let dirs = [

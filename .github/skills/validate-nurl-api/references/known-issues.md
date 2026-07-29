@@ -233,14 +233,15 @@ request, interpolates variables, or touches `.nuon` files.
   parser errors and could make authenticated or all requests unusable.
 - **Root cause:** non-history workspace state used truncate-then-stream `save`/`save -f` and bare
   `open`, with no atomic commit boundary or shared syntax/record-shape validation.
-- **Fix:** serialized state now commits through a unique same-directory temporary file and native
+- **Fix:** serialized state now commits through a unique protected same-filesystem temp and native
   replacement, without a PowerShell write-path dependency. Failed writes/replacements preserve the
   prior destination and clean temporary files. Readers load raw bytes before parsing and report a
   clean path-specific recovery error for invalid/non-record NUON while preserving genuine I/O
-  failures. Windows temps inherit the workspace directory DACL; POSIX replacement temps retain mode
-  bits, not extended ACLs/ownership. Stale Nurl temps are removed by a later mutation. History entry
-  persistence remains a separate snapshot/restore system, while its config reads use this reader.
+  failures. Windows temps use a protected current-user DACL; POSIX replacement temps retain mode
+  bits, not extended ACLs/ownership. A killed process can leave a protected temp; stale cooperative
+  create locks are removed by a later create. History entry persistence remains a separate
+  snapshot/restore system, while its config reads use this reader.
 - **Re-check:** run the state durability suite through `tests/run.nu`; it covers every workspace
   state category, exact bytes, genuine write/commit failures, credential preservation, I/O
-  propagation, record-or-list chains, no-clobber creates, DACL/mode behavior, read-only byte
-  stability, stale cleanup, and temporary-file cleanup.
+  propagation, record-or-list chains, no-clobber creates, protected temp DACL/mode behavior,
+  read-only byte stability, stale lock cleanup, and temporary-file cleanup.

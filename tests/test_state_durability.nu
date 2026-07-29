@@ -436,30 +436,109 @@ def set-state-path-stale [path: string] {
     }
 }
 
+    def windows-dacl-info [path: string] {
+    let script = "$acl = [System.IO.Directory]::GetAccessControl($env:NURL_DACL_PATH)
+    $sddl = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
+$raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    @{ ace_count = $raw.DiscretionaryAcl.Count; owner = $raw.Owner.Value } | ConvertTo-Json -Compress"
+    let result = (test-complete-result (
+        do {
+            with-env {NURL_DACL_PATH: $path} {
+                ^powershell.exe -NoProfile -NonInteractive -Command $script
+            }
+        }
+        | complete
+    ))
+    assert equal $result.exit_code 0 $"could not inspect Windows DACL: ($result.stderr)"
+    $result.stdout | from json
+}
+
 def test-state-native-write-and-stale-cleanup [] {
     let root = (make-temp-dir "state-native")
     let failure = try {
         $env.API_ROOT = $root
         api init | ignore
         let source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "state-store.nu") --raw)
-        for forbidden in ["powershell" "pwsh" "NURL_TEST_STATE_STORE" "^stat" "^chmod" "^ln" "^mv"] {
+        for forbidden in ["powershell" "pwsh" "NURL_TEST_STATE_STORE_FAIL_COMMIT"] {
             assert (not ($source | str contains $forbidden)) $"production state writes use forbidden external path '($forbidden)'"
         }
-        with-env {PATH: ""} {
-            api config set no_external_runtime true | ignore
-            api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
-        }
-        assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
+        if $nu.os-info.name == "windows" {
+            let no_external_root = (make-temp-dir "state-no-powershell")
+            $env.API_ROOT = $no_external_root
+            with-env {PATH: ""} {
+                api init | ignore
+                api config set no_external_runtime true | ignore
+                api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
+                api collection create no-external | ignore
+                api collection env create no-external active --activate | ignore
+                api collection env set no-external value exact --target active | ignore
+            }
+            assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
+            assert equal (api collection env show no-external active | get variables | first | get value) exact "collection environment write acquired a PowerShell/PATH dependency"
+            cleanup $no_external_root
+            $env.API_ROOT = $root
 
-        let stale = ($root | path join ".config.nuon.nurl-stale.tmp")
-        let stale_lock = ($root | path join ".config.nuon.nurl-create.lock")
-        "STALE-CREDENTIAL-SENTINEL" | save $stale
+            let precreated_root = (make-temp-dir "state-precreated-temp")
+            mkdir ($precreated_root | path join ".nurl-state")
+            let explicit_grant = (test-complete-result (
+                ^icacls.exe ($precreated_root | path join ".nurl-state") "/grant" "*S-1-1-0:(OI)(CI)R" "/Q"
+                | complete
+            ))
+            assert equal $explicit_grant.exit_code 0 $"could not add explicit broad DACL fixture: ($explicit_grant.stderr)"
+            $env.API_ROOT = $precreated_root
+            api init | ignore
+            let dacl = (windows-dacl-info ($precreated_root | path join ".nurl-state"))
+            let current_sid = (
+                ^powershell.exe -NoProfile -NonInteractive -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
+                | str trim
+            )
+            assert equal $dacl.ace_count 1 "pre-created state temp directory was not resecured"
+            assert equal $dacl.owner $current_sid "pre-created state temp directory owner was not transferred"
+            cleanup $precreated_root
+            $env.API_ROOT = $root
+        } else {
+            with-env {PATH: ""} {
+                api config set no_external_runtime true | ignore
+                api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
+            }
+            assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
+        }
+
+        let link_root = (make-temp-dir "state-temp-link")
+        let link_target = (make-temp-dir "state-temp-link-target")
+        let link_path = ($link_root | path join ".nurl-state")
+        if $nu.os-info.name == "windows" {
+            let linked = (test-complete-result (
+                ^powershell.exe -NoProfile -NonInteractive -Command (
+                    "New-Item -ItemType Junction -Path "
+                    + ($link_path | to nuon)
+                    + " -Target "
+                    + ($link_target | to nuon)
+                    + " | Out-Null"
+                )
+                | complete
+            ))
+            assert equal $linked.exit_code 0 $"could not create state junction fixture: ($linked.stderr)"
+        } else {
+            ^ln -s $link_target $link_path
+        }
+        let linked_result = (run-command-process $link_root "api init")
+        assert ($linked_result.exit_code != 0) "linked state temp directory unexpectedly initialized"
+        assert (
+            ($linked_result.stderr | str contains "must not be a link")
+                or ($linked_result.stderr | str contains "must be a directory")
+        ) $"linked state temp error was not actionable: ($linked_result.stderr)"
+        cleanup $link_root
+        cleanup $link_target
+        $env.API_ROOT = $root
+
+        api chain create warm-chain | ignore
+        let chain_state_dir = ($root | path join "chains" ".nurl-state")
+        let stale_lock = ($chain_state_dir | path join ".stale-chain.nuon.create.lock")
         mkdir $stale_lock
-        set-state-path-stale $stale
         set-state-path-stale $stale_lock
-        api config set stale_cleanup true | ignore
-        assert (not ($stale | path exists)) "next state mutation did not remove stale sibling temp"
-        assert (not ($stale_lock | path exists)) "next state mutation did not remove stale create lock"
+        api chain create stale-chain | ignore
+        assert (not ($stale_lock | path exists)) "next no-clobber mutation did not remove stale create lock"
         assert-no-state-temps $root
         null
     } catch {|error| $error}
@@ -477,15 +556,18 @@ def test-windows-constrained-language-writes [] {
     let root = (make-temp-dir "state-constrained-language")
     let failure = try {
         $env.API_ROOT = $root
-        api init | ignore
         let child_script = ($root | path join "constrained-child.nu")
         let launcher_script = ($root | path join "constrained-launcher.ps1")
         let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
         [
             $"use ($module_path | to nuon) *"
             $"$env.API_ROOT = ($root | to nuon)"
+            "api init | ignore"
             "api config set constrained true | ignore"
             "api auth bearer set constrained CONSTRAINED-SENTINEL | ignore"
+            "api collection create constrained | ignore"
+            "api collection env create constrained active --activate | ignore"
+            "api collection env set constrained value exact --target active | ignore"
         ] | str join "\n" | save $child_script
         "param($Nu, $Child)
 $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
@@ -499,6 +581,7 @@ exit $LASTEXITCODE" | save $launcher_script
         assert equal $result.exit_code 0 $"state writes failed under PowerShell Constrained Language Mode: ($result.stderr)"
         assert equal (open-state-record ($root | path join "config.nuon") | get constrained) true
         assert equal (api auth bearer get constrained) "CONSTRAINED-SENTINEL"
+        assert equal (api collection env show constrained active | get variables | first | get value) exact
         null
     } catch {|error| $error}
     cleanup $root
@@ -524,6 +607,7 @@ def test-windows-state-temp-dacl [] {
         let stderr_path = ($root | path join "dacl-child.stderr")
         let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
         let original_secrets = (open ($root | path join "secrets.nuon") --raw)
+        let state_dir = ($root | path join ".nurl-state")
         [
             $"use ($module_path | to nuon) *"
             $"$env.API_ROOT = ($root | to nuon)"
@@ -646,6 +730,22 @@ public sealed class NurlTempCapture : IDisposable {
     }
 }
 '@
+$destination = Join-Path (Split-Path -Parent $Root) 'secrets.nuon'
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$destinationAcl = [System.Security.AccessControl.FileSecurity]::new()
+$destinationAcl.SetOwner($sid)
+$destinationAcl.SetAccessRuleProtection($true, $false)
+$destinationRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $sid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    [System.Security.AccessControl.AccessControlType]::Allow)
+$destinationAcl.AddAccessRule($destinationRule)
+[System.IO.File]::SetAccessControl($destination, $destinationAcl)
+$destinationSddl = $destinationAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
+$broadControl = Join-Path (Split-Path -Parent $Root) 'dacl-broad-control.tmp'
+[System.IO.File]::WriteAllText($broadControl, '')
+$broadAcl = [System.IO.File]::GetAccessControl($broadControl)
+$broadSddl = $broadAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
 $filter = '.secrets.nuon.nurl-*.tmp'
 $capture = [NurlTempCapture]::new($Root, $filter)
 [System.IO.File]::WriteAllText($Token, ('X' * 134217728))
@@ -657,23 +757,20 @@ if (-not $capture.Wait(10000)) {
     throw 'State temp DACL capture did not become ready'
 }
 $tempSddl = $capture.Sddl
-$control = Join-Path $Root 'dacl-control.tmp'
-[System.IO.File]::WriteAllText($control, '')
-$controlAcl = [System.IO.File]::GetAccessControl($control)
-$controlSddl = $controlAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
 $tempName = $capture.Name
 $capture.Dispose()
 $process.WaitForExit()
 $process.Refresh()
 $payload = @{
     temp_sddl = $tempSddl
-    control_sddl = $controlSddl
+    destination_sddl = $destinationSddl
+    broad_sddl = $broadSddl
     temp_name = $tempName
 }
 [System.IO.File]::WriteAllText($Result, ($payload | ConvertTo-Json -Compress))" | save $watcher_script
 
         let watched = (test-complete-result (
-            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $watcher_script $root $nu.current-exe $child_script $token_path $result_path $stdout_path $stderr_path
+            ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $watcher_script $state_dir $nu.current-exe $child_script $token_path $result_path $stdout_path $stderr_path
             | complete
         ))
         assert equal $watched.exit_code 0 $"state temp DACL watcher failed: ($watched.stderr)"
@@ -681,17 +778,23 @@ $payload = @{
         let result = (open $result_path --raw | from json)
         let child_stderr = try { open $stderr_path --raw } catch { "" }
         assert ($result.temp_name | str starts-with ".secrets.nuon.nurl-") "watcher observed the wrong temp file"
-        assert equal $result.temp_sddl $result.control_sddl "credential temp had broader access than a same-directory control file"
+        let normalize_dacl = {|sddl|
+            $sddl
+            | parse --regex '\((?<ace>[^)]+)\)'
+            | get ace
+            | each {|ace| $ace | str replace ";ID;" ";;" }
+            | sort
+        }
+        let destination_aces = (do $normalize_dacl $result.destination_sddl)
+        assert ((do $normalize_dacl $result.broad_sddl) != $destination_aces) "DACL mutation control did not differ from the protected destination"
+        assert equal (do $normalize_dacl $result.temp_sddl) $destination_aces "credential temp effective DACL differed from the protected single-ACE destination"
         if ($child_stderr | str trim | is-empty) {
             assert equal (api auth bearer get temp-dacl | str length) 134217728 "observed credential mutation did not complete"
         } else {
             assert ($child_stderr | str contains "process cannot access") $"observed commit failed for an unexpected reason: ($child_stderr)"
             assert equal (open ($root | path join "secrets.nuon") --raw) $original_secrets "observed commit failure changed credential bytes"
-            let orphan = ($root | path join $result.temp_name)
-            assert ($orphan | path exists) "locked observed temp did not remain available for stale cleanup coverage"
-            set-state-path-stale $orphan
-            api auth bearer set recovered-after-observation RECOVERED-SENTINEL | ignore
-            assert (not ($orphan | path exists)) "later credential mutation did not sweep the observed stale temp"
+            let orphan = ($state_dir | path join $result.temp_name)
+            rm -f $orphan
         }
         assert-no-state-temps $root
         null
@@ -734,9 +837,9 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "all state categories reject syntax, shape, and binary corruption cleanly" { test-state-corruption-contracts })
         (run-test "state I/O errors propagate and no-clobber messages stay stable" { test-state-io-errors-and-no-clobber })
         (run-test "read-only state commands are byte-stable and credentials survive mutations" { test-state-read-only-and-credentials })
-        (run-test "state writes stay native and clean stale sibling temps" { test-state-native-write-and-stale-cleanup })
+        (run-test "state writes avoid PowerShell and clean stale create locks" { test-state-native-write-and-stale-cleanup })
         (run-test "Windows writes work under PowerShell Constrained Language Mode" { test-windows-constrained-language-writes })
-        (run-test "Windows credential temps inherit the workspace DACL" { test-windows-state-temp-dacl })
+        (run-test "Windows credential temps match a protected single-ACE DACL" { test-windows-state-temp-dacl })
         (run-test "history config readers use fail-closed state errors" { test-history-config-corruption-contracts })
     ]
 }

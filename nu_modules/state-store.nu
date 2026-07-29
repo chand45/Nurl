@@ -2,19 +2,26 @@
 
 use command-error.nu [fail-command]
 
-const STATE_TEMP_MAX_AGE = 1hr
+const STATE_LOCK_MAX_AGE = 1hr
+
+def state-temp-dir [path: string] {
+    ($path | path dirname) | path join ".nurl-state"
+}
 
 def state-temp-prefix [path: string] {
     $".($path | path basename).nurl-"
 }
 
 def state-temp-path [path: string] {
-    let parent = ($path | path dirname)
-    $parent | path join $"(state-temp-prefix $path)(random uuid).tmp"
+    (state-temp-dir $path) | path join $"(state-temp-prefix $path)(random uuid).tmp"
 }
 
 def state-create-lock-path [path: string] {
-    ($path | path dirname) | path join $".($path | path basename).nurl-create.lock"
+    (state-temp-dir $path) | path join $".($path | path basename).create.lock"
+}
+
+def state-temp-ready-path [path: string] {
+    (state-temp-dir $path) | path join ".secured-v1"
 }
 
 def remove-state-path [path: string] {
@@ -40,51 +47,121 @@ def fail-after-cleanup [error: record, temp_path: string] {
     error make {msg: $message}
 }
 
-def cleanup-stale-state-path [path: string] {
-    let parent = ($path | path dirname)
-    if not ($parent | path exists) {
+def validate-state-temp-dir [dir: string] {
+    if not ($dir | path exists) {
         return
     }
-    let name = ($path | path basename)
-    let entries = (
-        try { ls -a $parent } catch { [] }
-        | where {|entry| ($entry.name | path basename) == $name}
-    )
-    if ($entries | is-empty) {
-        return
+    if (($dir | path type) != "dir") {
+        fail-command $"State temp path '($dir)' must be a directory"
     }
-    let entry = ($entries | first)
-    if $entry.modified < ((date now) - $STATE_TEMP_MAX_AGE) {
-        let cleanup_error = (remove-state-path $path)
-        if $cleanup_error != null {
-            error make {msg: $"Could not clean stale state path '($path)': ($cleanup_error.msg)"}
-        }
+    let lexical = ($dir | path expand --no-symlink)
+    let resolved = ($dir | path expand)
+    if $lexical != $resolved {
+        fail-command $"State temp directory '($dir)' must not be a link or reparse point"
     }
 }
 
-def cleanup-stale-state-temps [path: string] {
-    let parent = ($path | path dirname)
-    if not ($parent | path exists) {
-        return
+def secure-state-temp-dir [path: string] {
+    let dir = (state-temp-dir $path)
+    let ready = (state-temp-ready-path $path)
+    validate-state-temp-dir $dir
+    if ($ready | path exists) {
+        return $dir
     }
-    let prefix = (state-temp-prefix $path)
-    let stale = (
-        try { ls -a $parent } catch { [] }
-        | where type == file
-        | where {|entry|
-            let name = ($entry.name | path basename)
-            (($name | str starts-with $prefix)
-                and ($name | str ends-with ".tmp")
-                and ($entry.modified < ((date now) - $STATE_TEMP_MAX_AGE)))
+
+    let candidate = if ($dir | path exists) {
+        $dir
+    } else {
+        ($dir | path dirname) | path join $".nurl-state-setup-(random uuid)"
+    }
+    if not ($candidate | path exists) {
+        let create_error = try {
+            mkdir $candidate
+            null
+        } catch {|error|
+            $error
         }
-    )
-    for entry in $stale {
-        let cleanup_error = (remove-state-path $entry.name)
-        if $cleanup_error != null {
-            error make {msg: $"Could not clean stale state temporary file '($entry.name)': ($cleanup_error.msg)"}
+        if $create_error != null {
+            error make {msg: $"Could not create state temp directory '($candidate)': ($create_error.msg)"}
         }
     }
-    cleanup-stale-state-path (state-create-lock-path $path)
+
+    let secured = if $nu.os-info.name == "windows" {
+        let system_root = ($env.SystemRoot? | default 'C:\Windows')
+        let icacls = ($system_root | path join "System32" "icacls.exe")
+        let domain = ($env.USERDOMAIN? | default "")
+        let user = ($env.USERNAME? | default "")
+        let identity = if ($domain | is-empty) { $user } else { $domain + "\\" + $user }
+        if ($identity | is-empty) {
+            {ok: false, detail: "current Windows identity is unavailable"}
+        } else {
+            let grant = $identity + ":(OI)(CI)F"
+            let owner_result = (
+                do { ^$icacls $candidate "/setowner" $identity "/Q" }
+                | complete
+            )
+            let reset_result = (
+                do { ^$icacls $candidate "/reset" "/T" "/C" "/Q" }
+                | complete
+            )
+            let acl_result = (
+                do { ^$icacls $candidate "/inheritance:r" "/grant:r" $grant "/Q" }
+                | complete
+            )
+            {
+                ok: (
+                    (($owner_result.exit_code? | default 1) == 0)
+                        and (($reset_result.exit_code? | default 1) == 0)
+                        and (($acl_result.exit_code? | default 1) == 0)
+                )
+                detail: (
+                    [
+                        ($owner_result.stderr? | default "")
+                        ($reset_result.stderr? | default "")
+                        ($acl_result.stderr? | default "")
+                    ]
+                    | str join " "
+                    | str trim
+                )
+            }
+        }
+    } else {
+        let result = (do { ^chmod 700 $candidate } | complete)
+        {
+            ok: (($result.exit_code? | default 1) == 0)
+            detail: ($result.stderr? | default "" | str trim)
+        }
+    }
+
+    if not $secured.ok {
+        if $candidate != $dir {
+            remove-state-path $candidate | ignore
+        }
+        fail-command $"Could not secure state temp directory '($candidate)'"
+    }
+
+    "secured" | save -f ($candidate | path join ".secured-v1")
+    if $candidate != $dir {
+        if ($dir | path exists) {
+            validate-state-temp-dir $dir
+            if not ((state-temp-ready-path $path) | path exists) {
+                remove-state-path $candidate | ignore
+                fail-command $"State temp directory '($dir)' appeared without a security marker"
+            }
+            remove-state-path $candidate | ignore
+        } else {
+            mv -f $candidate $dir
+        }
+    }
+    validate-state-temp-dir $dir
+    if not ($ready | path exists) {
+        mv -f $candidate $dir
+    }
+    $dir
+}
+
+export def initialize-state-store [root: string] {
+    secure-state-temp-dir ($root | path join "config.nuon") | ignore
 }
 
 def release-state-create-lock [lock_path: string, path: string, published: bool] {
@@ -97,9 +174,25 @@ def release-state-create-lock [lock_path: string, path: string, published: bool]
     }
 }
 
+def cleanup-stale-create-lock [lock_path: string] {
+    if not ($lock_path | path exists) {
+        return
+    }
+    let entries = (
+        ls -a ($lock_path | path dirname)
+        | where {|entry| ($entry.name | path basename) == ($lock_path | path basename)}
+    )
+    if not ($entries | is-empty) and (($entries | first | get modified) < ((date now) - $STATE_LOCK_MAX_AGE)) {
+        let cleanup_error = (remove-state-path $lock_path)
+        if $cleanup_error != null {
+            error make {msg: $"Could not clean stale state create lock '($lock_path)': ($cleanup_error.msg)"}
+        }
+    }
+}
+
 def commit-state-no-clobber [temp_path: string, path: string, exists_message: string] {
     let lock_path = (state-create-lock-path $path)
-    cleanup-stale-state-path $lock_path
+    cleanup-stale-create-lock $lock_path
     let lock_error = try {
         mkdir $lock_path
         null
@@ -141,7 +234,18 @@ def commit-state-replace [temp_path: string, path: string] {
     mv -f $temp_path $path
 }
 
-# Commit already serialized state bytes through a unique same-directory file.
+def write-state-temp [destination_path: string, temp_path: string, serialized: any] {
+    if $nu.os-info.name != "windows" and ($destination_path | path exists) {
+        # Nushell's native copy carries POSIX mode bits to the protected temp.
+        # Extended ACLs and ownership are intentionally not claimed.
+        cp $destination_path $temp_path
+        $serialized | save -f $temp_path
+    } else {
+        $serialized | save $temp_path
+    }
+}
+
+# Commit already serialized state bytes through a unique protected temp file.
 export def save-state-bytes [
     path: string
     serialized: any
@@ -151,24 +255,24 @@ export def save-state-bytes [
     # Resolve an existing leaf symlink so replacement updates its target rather
     # than replacing the link itself.
     let destination_path = ($path | path expand)
-    cleanup-stale-state-temps $destination_path
+    if not ((state-temp-ready-path $destination_path) | path exists) {
+        secure-state-temp-dir $destination_path | ignore
+    }
     if $no_clobber and ($destination_path | path exists) {
         fail-command $exists_message
     }
 
     let temp_path = (state-temp-path $destination_path)
-    let write_error = try {
-        if $nu.os-info.name != "windows" and ($destination_path | path exists) {
-            # Nushell's native copy carries POSIX mode bits to the sibling temp.
-            # Extended ACLs and ownership are intentionally not claimed.
-            cp $destination_path $temp_path
-            $serialized | save -f $temp_path
-        } else {
-            $serialized | save $temp_path
-        }
+    mut write_error = try {
+        write-state-temp $destination_path $temp_path $serialized
         null
-    } catch {|error|
-        $error
+    } catch {|error| $error}
+    if ($write_error != null) and (not ((state-temp-ready-path $destination_path) | path exists)) {
+        secure-state-temp-dir $destination_path | ignore
+        $write_error = (try {
+            write-state-temp $destination_path $temp_path $serialized
+            null
+        } catch {|error| $error})
     }
     if $write_error != null {
         fail-after-cleanup $write_error $temp_path
