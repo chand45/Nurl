@@ -518,7 +518,7 @@ def test-state-native-write-and-stale-cleanup [] {
 
             let precreated_root = (make-temp-dir "state-precreated-temp")
             mkdir ($precreated_root | path join ".nurl-state")
-            "ATTACKER-SECURITY-MARKER" | save ($precreated_root | path join ".nurl-state" ".secured-v2")
+            $"secured-v2:($nu.pid)" | save ($precreated_root | path join ".nurl-state" ".secured-v2")
             let explicit_grant = (test-complete-result (
                 ^icacls.exe ($precreated_root | path join ".nurl-state") "/grant" "*S-1-1-0:(OI)(CI)R" "/Q"
                 | complete
@@ -534,7 +534,7 @@ def test-state-native-write-and-stale-cleanup [] {
             assert equal $dacl.ace_count 1 "pre-created state temp directory was not resecured"
             assert equal $dacl.owner $current_sid "pre-created state temp directory owner was not transferred"
             let secured_marker = (open ($precreated_root | path join ".nurl-state" ".secured-v2") --raw)
-            assert ($secured_marker != "ATTACKER-SECURITY-MARKER") "forged security marker bypassed re-hardening"
+            assert ($secured_marker != $"secured-v2:($nu.pid)") "predictable PID marker bypassed re-hardening"
             assert ($secured_marker | str starts-with "secured-v2:") "security marker was not replaced after verification"
             cleanup $precreated_root
             $env.API_ROOT = $root
@@ -553,6 +553,25 @@ def test-state-native-write-and-stale-cleanup [] {
                 api auth bearer set no-external-runtime NO-EXTERNAL-SENTINEL | ignore
             }
             assert equal (api auth bearer get no-external-runtime) "NO-EXTERNAL-SENTINEL" "state writes acquired an external runtime dependency"
+        }
+
+        def test-public-entrypoint-state-token [] {
+            let root = (make-temp-dir "state-public-entrypoint")
+            let script = ($root | path join "entrypoint.nu")
+            let api_path = ($env.NURL_REPO_ROOT | path join "api.nu")
+            [
+                $"source ($api_path | to nuon)"
+                $"$env.API_ROOT = ($root | to nuon)"
+                "api init | ignore"
+                "api config set entrypoint true | ignore"
+            ] | str join "\n" | save $script
+            let result = (test-complete-result (
+                ^$nu.current-exe --no-config-file $script
+                | complete
+            ))
+            assert equal $result.exit_code 0 $"public api.nu entrypoint did not initialize state session token: ($result.stderr)"
+            assert equal (open-state-record ($root | path join "config.nuon") | get entrypoint) true
+            cleanup $root
         }
 
         let link_root = (make-temp-dir "state-temp-link")
@@ -1061,6 +1080,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "state I/O errors propagate and no-clobber messages stay stable" { test-state-io-errors-and-no-clobber })
         (run-test "read-only state commands are byte-stable and credentials survive mutations" { test-state-read-only-and-credentials })
         (run-test "state writes avoid PowerShell and clean stale create locks" { test-state-native-write-and-stale-cleanup })
+        (run-test "public api.nu entrypoint initializes state session token" { test-public-entrypoint-state-token })
         (run-test "concurrent no-clobber creates publish exactly one winner" { test-state-concurrent-no-clobber })
         (run-test "Windows writes work under PowerShell Constrained Language Mode" { test-windows-constrained-language-writes })
         (run-test "Windows credential temps match a protected single-ACE DACL" { test-windows-state-temp-dacl })

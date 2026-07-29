@@ -4,6 +4,12 @@ use command-error.nu [fail-command]
 
 const STATE_LOCK_MAX_AGE = 1hr
 
+export-env {
+    # Process-local proof that a marker was written after this module loaded.
+    # Unlike a PID, this token cannot be predicted by a preexisting workspace.
+    $env.NURL_STATE_SESSION_TOKEN = (random uuid)
+}
+
 def state-temp-dir [path: string] {
     ($path | path dirname) | path join ".nurl-state"
 }
@@ -29,7 +35,7 @@ def state-temp-ready-path [path: string] {
 }
 
 def state-temp-ready-value [] {
-    $"secured-v2:($nu.pid)"
+    $"secured-v2:($env.NURL_STATE_SESSION_TOKEN)"
 }
 
 def remove-state-path [path: string] {

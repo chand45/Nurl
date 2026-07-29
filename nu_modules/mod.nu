@@ -5,6 +5,11 @@ use resource-path.nu [validate-resource-name resolve-under-base list-contained-r
 use command-error.nu [fail-command]
 use state-store.nu [initialize-state-store open-state-record open-state-record-or-default save-state-bytes]
 
+export-env {
+    # Transitive module imports do not propagate state-store.nu's export-env.
+    $env.NURL_STATE_SESSION_TOKEN = (random uuid)
+}
+
 # Get the directory where this module is located
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
