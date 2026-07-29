@@ -25,7 +25,11 @@ def legacy-state-create-lock-path [path: string] {
 }
 
 def state-temp-ready-path [path: string] {
-    (state-temp-dir $path) | path join ".secured-v1"
+    (state-temp-dir $path) | path join ".secured-v2"
+}
+
+def state-temp-ready-value [] {
+    $"secured-v2:($nu.pid)"
 }
 
 def remove-state-path [path: string] {
@@ -58,10 +62,17 @@ def validate-state-temp-dir [dir: string] {
     if (($dir | path type) != "dir") {
         fail-command $"State temp path '($dir)' must be a directory"
     }
-    let lexical = ($dir | path expand --no-symlink)
-    let resolved = ($dir | path expand)
-    if $lexical != $resolved {
-        fail-command $"State temp directory '($dir)' must not be a link or reparse point"
+}
+
+def state-temp-ready-for-process [path: string] {
+    let ready = (state-temp-ready-path $path)
+    if not ($ready | path exists) {
+        return false
+    }
+    try {
+        (open $ready --raw) == (state-temp-ready-value)
+    } catch {
+        false
     }
 }
 
@@ -69,7 +80,7 @@ def secure-state-temp-dir [path: string] {
     let dir = (state-temp-dir $path)
     let ready = (state-temp-ready-path $path)
     validate-state-temp-dir $dir
-    if ($ready | path exists) {
+    if (state-temp-ready-for-process $path) {
         return $dir
     }
 
@@ -144,15 +155,12 @@ def secure-state-temp-dir [path: string] {
         fail-command $"Could not secure state temp directory '($candidate)'"
     }
 
-    "secured" | save -f ($candidate | path join ".secured-v1")
+    (state-temp-ready-value) | save -f ($candidate | path join ".secured-v2")
     if $candidate != $dir {
         if ($dir | path exists) {
             validate-state-temp-dir $dir
-            if not ((state-temp-ready-path $path) | path exists) {
-                remove-state-path $candidate | ignore
-                fail-command $"State temp directory '($dir)' appeared without a security marker"
-            }
             remove-state-path $candidate | ignore
+            return (secure-state-temp-dir $path)
         } else {
             mv -f $candidate $dir
         }
@@ -348,7 +356,7 @@ export def save-state-bytes [
     # Resolve an existing leaf symlink so replacement updates its target rather
     # than replacing the link itself.
     let destination_path = ($path | path expand)
-    if not ((state-temp-ready-path $destination_path) | path exists) {
+    if not (state-temp-ready-for-process $destination_path) {
         secure-state-temp-dir $destination_path | ignore
     }
     if $no_clobber and ($destination_path | path exists) {
@@ -360,7 +368,7 @@ export def save-state-bytes [
         write-state-temp $destination_path $temp_path $serialized
         null
     } catch {|error| $error}
-    if ($write_error != null) and (not ((state-temp-ready-path $destination_path) | path exists)) {
+    if ($write_error != null) and (not (state-temp-ready-for-process $destination_path)) {
         secure-state-temp-dir $destination_path | ignore
         $write_error = (try {
             write-state-temp $destination_path $temp_path $serialized

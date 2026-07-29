@@ -454,6 +454,35 @@ $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
     $result.stdout | from json
 }
 
+def windows-short-path [path: string] {
+    let script = "Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NurlShortPath {
+    [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathName(string path, StringBuilder output, int length);
+    public static string Get(string path) {
+        StringBuilder output = new StringBuilder(32768);
+        uint result = GetShortPathName(path, output, output.Capacity);
+        if (result == 0) { throw new System.ComponentModel.Win32Exception(); }
+        return output.ToString();
+    }
+}
+'@
+[NurlShortPath]::Get($env:NURL_LONG_PATH)"
+    let result = (test-complete-result (
+        do {
+            with-env {NURL_LONG_PATH: $path} {
+                ^powershell.exe -NoProfile -NonInteractive -Command $script
+            }
+        }
+        | complete
+    ))
+    assert equal $result.exit_code 0 $"could not resolve Windows short path: ($result.stderr)"
+    $result.stdout | str trim
+}
+
 def normalize-windows-dacl [sddl: string] {
     $sddl
     | parse --regex '\((?<ace>[^)]+)\)'
@@ -489,6 +518,7 @@ def test-state-native-write-and-stale-cleanup [] {
 
             let precreated_root = (make-temp-dir "state-precreated-temp")
             mkdir ($precreated_root | path join ".nurl-state")
+            "ATTACKER-SECURITY-MARKER" | save ($precreated_root | path join ".nurl-state" ".secured-v2")
             let explicit_grant = (test-complete-result (
                 ^icacls.exe ($precreated_root | path join ".nurl-state") "/grant" "*S-1-1-0:(OI)(CI)R" "/Q"
                 | complete
@@ -503,7 +533,19 @@ def test-state-native-write-and-stale-cleanup [] {
             )
             assert equal $dacl.ace_count 1 "pre-created state temp directory was not resecured"
             assert equal $dacl.owner $current_sid "pre-created state temp directory owner was not transferred"
+            let secured_marker = (open ($precreated_root | path join ".nurl-state" ".secured-v2") --raw)
+            assert ($secured_marker != "ATTACKER-SECURITY-MARKER") "forged security marker bypassed re-hardening"
+            assert ($secured_marker | str starts-with "secured-v2:") "security marker was not replaced after verification"
             cleanup $precreated_root
+            $env.API_ROOT = $root
+
+            let alias_root = (make-temp-dir "state short alias")
+            let short_root = (windows-short-path $alias_root)
+            $env.API_ROOT = $short_root
+            api init | ignore
+            api config set short_alias true | ignore
+            assert equal (open ($alias_root | path join "config.nuon") | get short_alias) true "ordinary Windows short-path alias failed state initialization"
+            cleanup $alias_root
             $env.API_ROOT = $root
         } else {
             with-env {PATH: ""} {
@@ -557,6 +599,20 @@ def test-state-native-write-and-stale-cleanup [] {
         assert equal (open $foreign_lock --raw) $foreign_before "nonowner changed or deleted a fresh create lock"
         assert (not (($root | path join "chains" "foreign.nuon") | path exists)) "foreign-lock contender published state"
         rm -f $foreign_lock
+
+        let directory_lock = ($chain_state_dir | path join ".blocked.nuon.create.lock")
+        mkdir $directory_lock
+        "FOREIGN-OWNER-TOKEN" | save ($directory_lock | path join "owner")
+        let directory_owner_before = (open ($directory_lock | path join "owner") --raw)
+        let directory_blocked = (run-command-process $root "api chain create blocked")
+        assert ($directory_blocked.exit_code != 0) "fresh foreign directory lock did not block contender"
+        assert equal ($directory_blocked.stdout | str trim) "" "directory-lock contender wrote success output"
+        assert equal $directory_blocked.stderr ($directory_blocked.stderr | ansi strip) "directory-lock contender wrote ANSI stderr"
+        assert ($directory_blocked.stderr | str contains "create lock") $"directory-lock error was not actionable: ($directory_blocked.stderr)"
+        assert equal (open ($directory_lock | path join "owner") --raw) $directory_owner_before "foreign directory lock owner bytes changed"
+        assert (not (($root | path join "chains" "blocked.nuon") | path exists)) "directory-lock contender published destination"
+        assert-no-state-temps $root
+        rm -rf $directory_lock
 
         let legacy_sibling_lock = ($root | path join "chains" ".blocked.nuon.nurl-create.lock")
         "LEGACY-FOREIGN-LOCK-TOKEN" | save $legacy_sibling_lock
