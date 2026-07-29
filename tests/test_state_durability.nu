@@ -615,19 +615,24 @@ public sealed class NurlTempCapture : IDisposable {
         if (Interlocked.CompareExchange(ref captured, 1, 0) != 0) {
             return;
         }
-        try {
-            using (FileStream candidate = new FileStream(
-                    args.FullPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite)) {
-                Name = args.Name;
-                Sddl = NurlTempAcl.GetSddl(candidate);
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline) {
+            try {
+                using (FileStream candidate = new FileStream(
+                        args.FullPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite)) {
+                    Name = args.Name;
+                    Sddl = NurlTempAcl.GetSddl(candidate);
+                }
+                ready.Set();
+                return;
+            } catch (IOException) {
+                Thread.SpinWait(1000);
             }
-            ready.Set();
-        } catch (IOException) {
-            Interlocked.Exchange(ref captured, 0);
         }
+        Interlocked.Exchange(ref captured, 0);
     }
 
     public string Name { get; private set; }
