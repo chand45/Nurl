@@ -2,6 +2,7 @@
 # Handles Bearer, SAML, Basic, API Key, and OAuth2 authentication
 
 use command-error.nu [fail-command]
+use state-store.nu [open-state-record-or-default save-state-bytes]
 use string-compat.nu [ascii-upcase optional-get]
 
 export const SAML_AUTH_SCHEME = "http://schemas.microsoft.com/dsts/saml2-bearer"
@@ -36,17 +37,14 @@ def default-secrets [] {
 # Load secrets. Legacy files intentionally remain without saml_tokens until a SAML mutation.
 def load-secrets [] {
     let path = (get-secrets-path)
-    if ($path | path exists) {
-        (default-secrets | reject saml_tokens) | merge (open $path)
-    } else {
-        default-secrets
-    }
+    let legacy_default = (default-secrets | reject saml_tokens)
+    $legacy_default | merge (open-state-record-or-default $path (default-secrets))
 }
 
 # Save secrets
 def save-secrets [secrets: record] {
     let path = (get-secrets-path)
-    $secrets | to nuon | save -f $path
+    save-state-bytes $path ($secrets | to nuon)
 }
 
 # --- Bearer Token Authentication ---

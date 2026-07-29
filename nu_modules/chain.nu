@@ -6,6 +6,7 @@ use http.nu ["api request"]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
+use state-store.nu [open-state-record save-state-bytes]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [optional-get]
 
@@ -298,7 +299,7 @@ export def "api chain exec" [
         }
     }
 
-    let chain_def = (open $file_path)
+    let chain_def = (open-state-record $file_path)
     let steps = ($chain_def.steps? | default $chain_def)
     validate-chain-steps $steps
 
@@ -338,7 +339,7 @@ def load-saved-request-with-collection [name: string] {
             let request_file = (resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix --scope "<collection>/requests" --base-is-canonical)
             if ($request_file | path exists) {
                 return {
-                    request: (open $request_file)
+                    request: (open-state-record $request_file)
                     collection: $collection
                 }
             }
@@ -365,7 +366,7 @@ export def "api chain create" [
         fail-command $"Chain '($name)' already exists"
     }
 
-    {
+    let serialized = ({
         name: $name
         description: $description
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
@@ -383,7 +384,8 @@ export def "api chain create" [
                 }
             }
         ]
-    } | to nuon | save $file_path
+    } | to nuon)
+    save-state-bytes $file_path $serialized --no-clobber --exists-message $"Chain '($name)' already exists"
 
     print $"(ansi green)Chain '($name)' created at: ($file_path)(ansi reset)"
     print "Edit the file to define your request chain."
@@ -408,11 +410,7 @@ export def "api chain list" [] {
     $files | each {|file|
         let logical_name = ($file | path basename | str replace -r '\.nuon$' '')
         let resolved_file = (resolve-chain-file $chains_dir $logical_name)
-        let chain = try {
-            open $resolved_file
-        } catch {
-            { name: $logical_name, description: "", steps: [] }
-        }
+        let chain = (open-state-record $resolved_file)
 
         {
             name: ($chain.name? | default $logical_name)
@@ -432,7 +430,7 @@ export def "api chain show" [name: string] {
         fail-command $"Chain '($name)' not found"
     }
 
-    open $file_path
+    open-state-record $file_path
 }
 
 # Delete a chain

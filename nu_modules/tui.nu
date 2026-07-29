@@ -2,6 +2,7 @@
 # Interactive interface for browsing and managing API requests
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files run-tui-resource-action]
+use state-store.nu [open-state-record]
 use string-compat.nu [ascii-upcase]
 
 def get-collections-dir [] {
@@ -109,7 +110,7 @@ def "api tui collection-requests" [collection: string] {
     let requests = (
         list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
         | each {|request_file|
-        let req = (open $request_file.path)
+        let req = (open-state-record $request_file.path)
         {
             file: $request_file.path
             lookup: ($request_file.path | path relative-to $requests_dir | str replace --all "\\" "/")
