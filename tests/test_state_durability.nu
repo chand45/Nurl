@@ -201,9 +201,10 @@ def test-state-failed-commit-preserves-original [] {
             assert equal ($result.stdout | str trim) "" "locked credential commit wrote stdout"
             assert (not ($result.stderr | str contains "NEW-CREDENTIAL-SENTINEL")) "locked credential commit leaked the new credential"
         } else {
-            ^chmod 500 $root
+            let temp_dir = ($root | path join ".nurl-state")
+            ^chmod 500 $temp_dir
             let result = (run-command-process $root "api auth bearer set interrupted NEW-CREDENTIAL-SENTINEL")
-            ^chmod 700 $root
+            ^chmod 700 $temp_dir
             assert ($result.exit_code != 0) "read-only-directory write failure exited zero"
             assert equal ($result.stdout | str trim) "" "read-only-directory credential write wrote stdout"
             assert (not ($result.stderr | str contains "NEW-CREDENTIAL-SENTINEL")) "failed credential write leaked the new credential"
