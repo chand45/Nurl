@@ -166,5 +166,6 @@ export def open-state-record-or-default [
     if not ($path | path exists) {
         return $default_value
     }
+    # A present path never defaults: disappearance and native I/O propagate from the strict reader.
     open-state-record $path $description
 }
