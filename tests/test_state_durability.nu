@@ -529,7 +529,17 @@ def sd-assert-canonical-nuon [path: string, indent: int = 0] {
 def sd-find-temp-artifacts [root: string] {
     sd-entries $root | where {|p|
         let b = ($p | path basename)
-        ($b | str starts-with ".") and ($b | str contains ".nurl-") and ($b | str ends-with ".tmp")
+        $b =~ '^\..+\.nurl-[^.]+\.tmp$'
+    }
+}
+
+def sd-find-retired-artifacts [root: string] {
+    sd-entries $root | where {|path|
+        let name = ($path | path basename)
+        (
+            ($name in [".nurl-state" ".secured-v1"])
+            or ($name =~ '^\..+\.nurl-(setup|lock|pending|reclaim)-[^.]+(\.tmp)?$')
+        )
     }
 }
 
@@ -1227,10 +1237,15 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         api request create req1 GET "http://example.invalid/x" -c source-coll | ignore
         api chain create chain1 | ignore
 
+        assert equal (sd-find-retired-artifacts $tmp) [] "normal lifecycle created a retired state artifact"
+        assert equal (sd-find-temp-artifacts $tmp) [] "normal lifecycle left a generated sibling temp"
+
         api collection copy source-coll target-coll
 
         let source_dir = ($tmp | path join "collections" "source-coll")
         let target_dir = ($tmp | path join "collections" "target-coll")
+        assert equal (sd-find-retired-artifacts $target_dir) [] "clean collection copy introduced a retired state artifact"
+        assert equal (sd-find-temp-artifacts $target_dir) [] "clean collection copy introduced a generated sibling temp"
 
         assert equal (open ($target_dir | path join "requests" "req1.nuon") --raw) (open ($source_dir | path join "requests" "req1.nuon") --raw) "copied request bytes diverged from source"
         assert equal (open ($target_dir | path join "environments" "env1.nuon") --raw) (open ($source_dir | path join "environments" "env1.nuon") --raw) "copied environment bytes diverged from source"
@@ -1243,16 +1258,19 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         assert equal $target_def.version $source_def.version "copied collection.nuon version diverged from source"
         assert (not ($target_def.created_at == $source_def.created_at and $target_def.name == $source_def.name)) "copied collection.nuon did not update created_at/name at all"
 
-        let entries = (sd-entries $tmp)
-        let forbidden_substrings = [".nurl-state" ".secured-v1" "marker" "candidate" "lock" "sentinel" "reclaim"]
-        for entry in $entries {
-            let lowered = ($entry | path basename | sd-lower)
-            for forbidden in $forbidden_substrings {
-                assert (not ($lowered | str contains $forbidden)) $"forbidden artifact-like name found: ($entry)"
-            }
-        }
-        let temp_leftovers = (sd-find-temp-artifacts $tmp)
-        assert equal $temp_leftovers [] "recursive lifecycle (incl. collection copy) left .nurl temp artifacts behind"
+        let inert_dir = ($source_dir | path join ".nurl-state")
+        mkdir $inert_dir
+        let inert_bytes = 0x[00 01 7f 80 fe ff]
+        $inert_bytes | save ($inert_dir | path join "user-payload.bin")
+        "user marker bytes" | save ($inert_dir | path join ".secured-v1")
+        "ordinary user temp" | save ($inert_dir | path join "user-note.tmp")
+
+        api collection copy source-coll inert-copy | ignore
+        let inert_copy = ($tmp | path join "collections" "inert-copy" ".nurl-state")
+        assert equal (open ($inert_copy | path join "user-payload.bin") --raw | encode base64) ($inert_bytes | encode base64) "collection copy filtered or changed inert user binary data"
+        assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "collection copy filtered inert user marker-named data"
+        assert equal (open ($inert_copy | path join "user-note.tmp") --raw) "ordinary user temp" "collection copy filtered an arbitrary user .tmp file"
+        assert equal (sd-find-temp-artifacts ($tmp | path join "collections" "inert-copy")) [] "copy left a generated sibling temp"
     } { cleanup $tmp }
 }
 
@@ -1702,6 +1720,9 @@ def test-sd-r12-state-store-installer-and-mod-wiring [] {
     let sh_modules = (sd-installer-modules ($repo | path join "install.sh") "MODULES=(")
     assert ("state-store.nu" in $ps_modules) "install.ps1's module list does not include state-store.nu"
     assert ("state-store.nu" in $sh_modules) "install.sh's module list does not include state-store.nu"
+    let ignore = (open ($repo | path join ".gitignore") --raw)
+    assert (not ($ignore | str contains ".nurl-state")) ".gitignore masks retired state directories"
+    assert (not ($ignore | str contains ".secured-v1")) ".gitignore masks retired markers"
 
     let mod_path = ($repo | path join "nu_modules" "mod.nu")
     let mod_lines = (open $mod_path --raw | lines)
