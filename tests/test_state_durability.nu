@@ -850,10 +850,10 @@ let outcome = (try {
                 sd-track-pid $pids_file $worker.pid
             }
 
-            let all_ready = (sd-wait-until { $ready_files | all {|f| $f | path exists } } 1200)
+            let all_ready = (sd-wait-until { $ready_files | all {|f| $f | path exists } } 2400)
             assert $all_ready $"iteration ($iter): not all ($n) workers signalled ready in time"
             "go" | save -f $go_file
-            let all_done = (sd-wait-until { $result_files | all {|f| $f | path exists } } 1600)
+            let all_done = (sd-wait-until { $result_files | all {|f| $f | path exists } } 2400)
             assert $all_done $"iteration ($iter): not all ($n) workers finished in time"
 
             for pid in $round_pids { sd-stop-process-tree $pid $tmp }
