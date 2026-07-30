@@ -137,11 +137,7 @@ def state-base-type [value: any] {
 }
 
 export def open-state-value [path: string, description: string] {
-    let raw = try {
-        open $path --raw
-    } catch {|error|
-        fail-command $"Could not read ($description) at '($path)': ($error.msg)"
-    }
+    let raw = (open $path --raw)
     try {
         $raw | from nuon
     } catch {

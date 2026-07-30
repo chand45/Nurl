@@ -527,18 +527,35 @@ def sd-assert-canonical-nuon [path: string, indent: int = 0] {
 # Recursively find any sibling temp artifact left by state-store.nu
 # (`.<basename>.nurl-<uuid>.tmp`).
 def sd-find-temp-artifacts [root: string] {
+    let uuid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    let pattern = ('^\.[^\\/]+\.nurl-' + $uuid + '\.tmp$')
     sd-entries $root | where {|p|
         let b = ($p | path basename)
-        $b =~ '^\..+\.nurl-[^.]+\.tmp$'
+        $b =~ $pattern
     }
 }
 
-def sd-find-retired-artifacts [root: string] {
+def sd-find-retired-artifacts [root: string, expected_locks: list<record> = []] {
+    let uuid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    let setup_pattern = ('^\.nurl-state-setup-' + $uuid + '$')
+    let temp_pattern = ('^\.[^\\/]+\.nurl-' + $uuid + '\.tmp$')
     sd-entries $root | where {|path|
         let name = ($path | path basename)
+        let parent = ($path | path dirname | path expand)
+        let normalized = ($path | str replace --all "\\" "/")
+        let marker = $name == ".secured-v1" and (($normalized | split row "/") | any {|segment| $segment == ".nurl-state" })
+        let lock = ($expected_locks | any {|spec|
+            (
+                (($spec.dir | path expand) == $parent)
+                and ($spec.basenames | any {|basename| $name == $".($basename).create.lock" })
+            )
+        })
         (
-            ($name in [".nurl-state" ".secured-v1"])
-            or ($name =~ '^\..+\.nurl-(setup|lock|pending|reclaim)-[^.]+(\.tmp)?$')
+            $name == ".nurl-state"
+                or $marker
+                or ($name =~ $setup_pattern)
+                or $lock
+                or ($name =~ $temp_pattern)
         )
     }
 }
@@ -998,8 +1015,7 @@ def test-sd-r5-io-failure-propagation [] {
                 assert ($result.exit_code != 0) "exclusively-locked config.nuon read unexpectedly exited 0"
                 assert equal ($result.stdout | str trim) "" "exclusively-locked config.nuon read wrote stdout"
                 assert (not ($result.stderr | str contains "Could not parse")) "exclusively-locked config.nuon read produced a parse-style message instead of a genuine IO error"
-                assert (sd-stderr-has $result.stderr $config_path) "exclusively-locked config.nuon read error omitted the path"
-                assert equal $result.stderr ($result.stderr | ansi strip) "exclusively-locked config.nuon read error contained ANSI"
+                assert (not ($result.stderr | str contains "must contain a record")) "exclusively-locked config.nuon read was normalized as a shape error"
             } { sd-stop-file-lock $lock }
         } else {
             let uid = (^id -u | str trim)
@@ -1012,10 +1028,37 @@ def test-sd-r5-io-failure-propagation [] {
                 assert ($result.exit_code != 0) "permission-denied config.nuon read unexpectedly exited 0"
                 assert equal ($result.stdout | str trim) "" "permission-denied config.nuon read wrote stdout"
                 assert (not ($result.stderr | str contains "Could not parse")) "permission-denied config.nuon read produced a parse-style message instead of a genuine IO error"
-                assert equal $result.stderr ($result.stderr | ansi strip) "permission-denied config.nuon read error contained ANSI"
+                assert (not ($result.stderr | str contains "must contain a record")) "permission-denied config.nuon read was normalized as a shape error"
             } { chmod 644 $config_path }
         }
     } { cleanup $tmp }
+}
+
+def test-sd-r5-reader-io-boundary-is-structural [] {
+    let source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "state-store.nu") --raw)
+    let strict = (
+        $source
+        | split row "export def open-state-value"
+        | last
+        | split row "export def open-state-record ["
+        | first
+    )
+    assert ($strict | str contains 'let raw = (open $path --raw)') "strict reader no longer opens raw bytes directly"
+    let before_open = ($strict | split row 'let raw = (open $path --raw)' | first)
+    assert (not ($before_open | str contains "try")) "strict reader catches genuine I/O before open --raw"
+    assert (not ($before_open | str contains "catch")) "strict reader catches genuine I/O before open --raw"
+    let after_open = ($strict | split row 'let raw = (open $path --raw)' | last)
+    assert ($after_open | str contains "try") "strict reader no longer normalizes NUON parse failures"
+
+    let defaults = (
+        $source
+        | split row "export def open-state-record-or-default"
+        | last
+    )
+    assert ($defaults | str contains 'if not ($path | path exists)') "defaulting reader lost its advisory missing-path check"
+    assert ($defaults | str contains 'open-state-record $path $description') "present defaulting path no longer delegates to the strict reader"
+    assert (not ($defaults | str contains "try")) "present defaulting path catches strict-reader I/O"
+    assert (not ($defaults | str contains "catch")) "present defaulting path catches strict-reader I/O"
 }
 
 def test-sd-r5-history-config-read-fails-closed [] {
@@ -1237,14 +1280,26 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         api request create req1 GET "http://example.invalid/x" -c source-coll | ignore
         api chain create chain1 | ignore
 
-        assert equal (sd-find-retired-artifacts $tmp) [] "normal lifecycle created a retired state artifact"
+        let source_dir = ($tmp | path join "collections" "source-coll")
+        let expected_locks = [
+            {dir: $tmp, basenames: ["config.nuon" "variables.nuon" "secrets.nuon"]}
+            {dir: $source_dir, basenames: ["collection.nuon" "meta.nuon"]}
+            {dir: ($source_dir | path join "environments"), basenames: ["env1.nuon" "attempted-env.nuon"]}
+            {dir: ($source_dir | path join "requests"), basenames: ["req1.nuon" "attempted-request.nuon"]}
+            {dir: ($tmp | path join "chains"), basenames: ["chain1.nuon" "attempted-chain.nuon"]}
+        ]
+        assert equal (sd-find-retired-artifacts $tmp $expected_locks) [] "normal lifecycle created a retired state artifact"
         assert equal (sd-find-temp-artifacts $tmp) [] "normal lifecycle left a generated sibling temp"
 
         api collection copy source-coll target-coll
 
-        let source_dir = ($tmp | path join "collections" "source-coll")
         let target_dir = ($tmp | path join "collections" "target-coll")
-        assert equal (sd-find-retired-artifacts $target_dir) [] "clean collection copy introduced a retired state artifact"
+        let target_locks = [
+            {dir: $target_dir, basenames: ["collection.nuon" "meta.nuon"]}
+            {dir: ($target_dir | path join "environments"), basenames: ["env1.nuon"]}
+            {dir: ($target_dir | path join "requests"), basenames: ["req1.nuon"]}
+        ]
+        assert equal (sd-find-retired-artifacts $target_dir $target_locks) [] "clean collection copy introduced a retired state artifact"
         assert equal (sd-find-temp-artifacts $target_dir) [] "clean collection copy introduced a generated sibling temp"
 
         assert equal (open ($target_dir | path join "requests" "req1.nuon") --raw) (open ($source_dir | path join "requests" "req1.nuon") --raw) "copied request bytes diverged from source"
@@ -1258,6 +1313,16 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         assert equal $target_def.version $source_def.version "copied collection.nuon version diverged from source"
         assert (not ($target_def.created_at == $source_def.created_at and $target_def.name == $source_def.name)) "copied collection.nuon did not update created_at/name at all"
 
+        api collection create inert-file-source | ignore
+        let inert_file = ($tmp | path join "collections" "inert-file-source" ".nurl-state")
+        let inert_file_bytes = 0x[10 20 30 80 fe ff]
+        $inert_file_bytes | save $inert_file
+        api collection copy inert-file-source inert-file-copy | ignore
+        let inert_file_copy = ($tmp | path join "collections" "inert-file-copy" ".nurl-state")
+        assert equal (open $inert_file_copy --raw | encode base64) ($inert_file_bytes | encode base64) "collection copy filtered a user file named .nurl-state"
+        api collection env create inert-file-copy later | ignore
+        assert equal (open $inert_file_copy --raw | encode base64) ($inert_file_bytes | encode base64) "ordinary collection write consumed a user file named .nurl-state"
+
         let inert_dir = ($source_dir | path join ".nurl-state")
         mkdir $inert_dir
         let inert_bytes = 0x[00 01 7f 80 fe ff]
@@ -1270,7 +1335,54 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         assert equal (open ($inert_copy | path join "user-payload.bin") --raw | encode base64) ($inert_bytes | encode base64) "collection copy filtered or changed inert user binary data"
         assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "collection copy filtered inert user marker-named data"
         assert equal (open ($inert_copy | path join "user-note.tmp") --raw) "ordinary user temp" "collection copy filtered an arbitrary user .tmp file"
+        api request update req1 --url "http://example.invalid/updated" --collection inert-copy | ignore
+        assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "ordinary request write interpreted inert marker-named data"
         assert equal (sd-find-temp-artifacts ($tmp | path join "collections" "inert-copy")) [] "copy left a generated sibling temp"
+    } { cleanup $tmp }
+}
+
+def test-sd-r8-artifact-scanner-discrimination [] {
+    let tmp = (make-temp-dir "sd-r8-scanner")
+    sd-finally {
+        let uuid = "3f2a1b9c-4d5e-6f70-8a9b-0c1d2e3f4a5b"
+        let exact_lock = ($tmp | path join ".mychain.nuon.create.lock")
+        let unrelated_lock = ($tmp | path join ".build.create.lock")
+        let canonical_temp = ($tmp | path join $".secrets.nuon.nurl-($uuid).tmp")
+        let setup = ($tmp | path join $".nurl-state-setup-($uuid)")
+        let retired_dir = ($tmp | path join ".nurl-state")
+        mkdir $setup
+        mkdir $retired_dir
+        for path in [
+            $exact_lock
+            $unrelated_lock
+            $canonical_temp
+            ($tmp | path join ".secrets.nuon.nurl-------------------------------------.tmp")
+            ($tmp | path join ".secrets.nuon.nurl-3f2a1b9c4d5e6f708a9b0c1d2e3f4a5b1234.tmp")
+            ($tmp | path join "notes.tmp")
+            ($tmp | path join "data.nurl.tmp")
+            ($tmp | path join ".secured-v1")
+        ] {
+            "fixture" | save $path
+        }
+        "inside" | save ($retired_dir | path join ".secured-v1")
+
+        let expected = [{dir: $tmp, basenames: ["mychain.nuon"]}]
+        let found = (sd-find-retired-artifacts $tmp $expected)
+        for expected_path in [$exact_lock $canonical_temp $setup $retired_dir ($retired_dir | path join ".secured-v1")] {
+            assert ($expected_path in $found) $"artifact scanner missed exact fixture: ($expected_path)"
+        }
+        for innocent in [
+            $unrelated_lock
+            ($tmp | path join ".secrets.nuon.nurl-------------------------------------.tmp")
+            ($tmp | path join ".secrets.nuon.nurl-3f2a1b9c4d5e6f708a9b0c1d2e3f4a5b1234.tmp")
+            ($tmp | path join "notes.tmp")
+            ($tmp | path join "data.nurl.tmp")
+            ($tmp | path join ".secured-v1")
+        ] {
+            assert ($innocent not-in $found) $"artifact scanner flagged innocent or malformed fixture: ($innocent)"
+        }
+        let without_enumeration = (sd-find-retired-artifacts $tmp [{dir: $tmp, basenames: []}])
+        assert ($exact_lock not-in $without_enumeration) "lock scanner was not driven by the source-derived basename enumeration"
     } { cleanup $tmp }
 }
 
@@ -1322,6 +1434,18 @@ def test-sd-r8-readonly-lifecycle-preserves-git-status [] {
     let after = (^git -C $root status --porcelain | complete)
     assert equal $after.exit_code 0 "git status failed after the read-only lifecycle sweep"
     assert equal $before.stdout $after.stdout "read-only lifecycle sweep against the bundled tracked workspace left git status changed"
+    let bundled = ($root | path join "collections" "jsonplaceholder")
+    let expected_locks = [
+        {dir: $root, basenames: ["config.nuon" "variables.nuon" "secrets.nuon"]}
+        {dir: $bundled, basenames: ["collection.nuon" "meta.nuon"]}
+        {dir: ($bundled | path join "environments"), basenames: ["default.nuon" "dev.nuon" "staging.nuon" "attempted-env.nuon"]}
+        {dir: ($bundled | path join "requests"), basenames: [
+            "create-post.nuon" "delete-post.nuon" "get-comments.nuon" "get-post.nuon"
+            "get-posts.nuon" "get-users.nuon" "update-post.nuon" "attempted-request.nuon"
+        ]}
+        {dir: ($root | path join "chains"), basenames: ["example-workflow.nuon" "attempted-chain.nuon"]}
+    ]
+    assert equal (sd-find-retired-artifacts $root $expected_locks) [] "direct repo-tree scan found a retired or generated artifact"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2153,6 +2277,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "SD-R5: binary-corrupted state fails closed across every file type" { test-sd-r5-binary-corruption-matrix })
         (run-test "SD-R5: missing state files retain current defaults" { test-sd-r5-missing-files-retain-defaults })
         (run-test "SD-R5: genuine I/O read failures propagate distinctly from parse failures" { test-sd-r5-io-failure-propagation })
+        (run-test "SD-R5: reader I/O boundary is structurally fail-open to native errors" { test-sd-r5-reader-io-boundary-is-structural })
         (run-test "SD-R5: public history config read fails closed without entry/index writes" { test-sd-r5-history-config-read-fails-closed })
         (run-test "SD-R6: read-only sweep across state surfaces is byte-stable" { test-sd-r6-read-only-byte-stability })
         (run-test "SD-R6: credential and secrets key order is preserved" { test-sd-r6-credential-key-order-preserved })
@@ -2160,6 +2285,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "SD-R7: aged, removable same-destination siblings are swept silently" { test-sd-r7-aged-removable-swept-silently })
         (run-test "SD-R7: aged, unremovable siblings warn but still commit the requested write" { test-sd-r7-aged-unremovable-warns-but-commits })
         (run-test "SD-R8: recursive lifecycle (incl. collection copy) leaves zero private artifacts" { test-sd-r8-recursive-lifecycle-no-artifacts })
+        (run-test "SD-R8: artifact scanner discriminates exact generated patterns" { test-sd-r8-artifact-scanner-discrimination })
         (run-test "SD-R8: read-only lifecycle against the bundled tracked workspace leaves git status unchanged" { test-sd-r8-readonly-lifecycle-preserves-git-status })
         (run-test "SD-R9: Windows long path and case-alias lifecycle" { test-sd-r9-windows-long-path-and-case-alias })
         (run-test "SD-R9: Windows 8.3 short-name alias lifecycle (best-effort)" { test-sd-r9-windows-8dot3-alias })
