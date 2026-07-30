@@ -111,35 +111,41 @@ export def "api init" [] {
 
     # Create config if it doesn't exist
     let config_path = ($root | path join "config.nuon")
-    save-state-if-absent ({
-        default_headers: {
-            "Content-Type": "application/json"
-            "Accept": "application/json"
-        }
-        timeout_seconds: 30
-        history_retention_days: 30
-        editor: "code"
-        colors: {
-            success: "green"
-            error: "red"
-            warning: "yellow"
-            info: "blue"
-        }
-    } | to nuon) $config_path
+    if not ($config_path | path exists) {
+        save-state-if-absent ({
+            default_headers: {
+                "Content-Type": "application/json"
+                "Accept": "application/json"
+            }
+            timeout_seconds: 30
+            history_retention_days: 30
+            editor: "code"
+            colors: {
+                success: "green"
+                error: "red"
+                warning: "yellow"
+                info: "blue"
+            }
+        } | to nuon) $config_path
+    }
 
     # Create global variables if it doesn't exist
     let vars_path = ($root | path join "variables.nuon")
-    save-state-if-absent ({} | to nuon) $vars_path
+    if not ($vars_path | path exists) {
+        save-state-if-absent ({} | to nuon) $vars_path
+    }
 
     # Create secrets if it doesn't exist
     let secrets_path = ($root | path join "secrets.nuon")
-    save-state-if-absent ({
-        tokens: {}
-        saml_tokens: {}
-        oauth: {}
-        api_keys: {}
-        basic_auth: {}
-    } | to nuon) $secrets_path
+    if not ($secrets_path | path exists) {
+        save-state-if-absent ({
+            tokens: {}
+            saml_tokens: {}
+            oauth: {}
+            api_keys: {}
+            basic_auth: {}
+        } | to nuon) $secrets_path
+    }
 
     print $"(ansi green)API workspace initialized at: ($root)(ansi reset)"
     print "  - config.nuon: Global configuration"

@@ -1730,6 +1730,32 @@ def test-sd-r12-no-clobber-create-is-direct-save [] {
     for forbidden in ["save -f" "state-temp-path" "mv " "cp " "lock" "marker"] {
         assert (not ($body | str contains $forbidden)) $"no-clobber create contains forbidden staging/overwrite primitive: ($forbidden)"
     }
+
+    let indexed = ($body | lines | enumerate)
+    let save_index = ($indexed | where {|row| $row.item | str contains '$serialized | save $destination' } | first | get index)
+    let exists_index = ($indexed | where {|row| $row.item | str contains '$destination | path exists' } | first | get index)
+    assert ($save_index < $exists_index) "the helper added a synchronization precheck before direct save"
+
+    let mod_source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu") --raw)
+    for precheck in [
+        'if not ($config_path | path exists)'
+        'if not ($vars_path | path exists)'
+        'if not ($secrets_path | path exists)'
+        'if ($collection_dir | path exists)'
+        'if ($env_path | path exists)'
+    ] {
+        assert ($mod_source | str contains $precheck) $"main caller-level advisory precheck changed: ($precheck)"
+    }
+    let chain_source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "chain.nu") --raw)
+    assert ($chain_source | str contains 'if ($file_path | path exists)') "chain caller-level advisory precheck changed"
+    let request_create = (
+        open ($env.NURL_REPO_ROOT | path join "nu_modules" "http.nu") --raw
+        | split row 'export def "api request create"'
+        | last
+        | split row '# List saved requests'
+        | first
+    )
+    assert (not ($request_create | str contains 'if ($request_file | path exists)')) "request create added a caller-level synchronization precheck absent from main"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

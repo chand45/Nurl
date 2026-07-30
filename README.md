@@ -734,10 +734,12 @@ claim owner-only temp permissions.
 
 New-file creates intentionally retain main's single direct bare `save`: they do not stage, lock,
 or overwrite an existing destination. Sequential collisions keep the existing bytes and return
-the command's duplicate message. Nushell implements this as an existence check followed by
-`File::create`, so synchronized same-name creators can report multiple successes; the final file
-is one complete contender payload, not interleaved bytes. A hard kill can leave a partial new
-file, which public readers reject fail-closed.
+the command's duplicate message. Existing caller-level existence checks are retained only for
+their advisory UX/messages; they do not synchronize creators or provide exclusivity. Nushell
+implements the actual save as an existence check followed by `File::create`, so synchronized
+same-name creators can report multiple successes; the final file is one complete contender
+payload, not interleaved bytes. A hard kill can leave a partial new file, which public readers
+reject fail-closed.
 
 Fresh sibling temps are left alone. A later write to the same destination silently removes only
 aged temps with that destination's exact prefix. If an aged temp cannot be removed, Nurl warns

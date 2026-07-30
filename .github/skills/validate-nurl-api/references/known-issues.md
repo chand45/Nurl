@@ -253,7 +253,8 @@ request, interpolates variables, or touches `.nuon` files.
 - **Root cause:** supported Nushell `save` versions check `path.exists()` and then call
   `File::create` rather than an OS-exclusive `create_new`, leaving a pre-existing TOCTOU. Nurl
   intentionally retains main's direct bare-save behavior in this batch; no lock, staging path,
-  or external helper is added.
+  or external helper is added. Existing caller-level existence checks are advisory UX/message
+  checks only and do not synchronize writers.
 - **Status:** retained main-parity residual, non-blocking for replacement durability. A hard kill
   during direct create may also leave a partial new file; fail-closed readers report it cleanly.
   No separate tracking issue is filed in this batch.

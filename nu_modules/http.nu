@@ -1770,9 +1770,6 @@ export def "api request create" [
         if not ($request_parent | path exists) {
             mkdir $request_parent
         }
-        if ($request_file | path exists) {
-            fail-command $"Request '($name)' already exists in collection '($collection)'"
-        }
 
         save-state-no-clobber ({
             name: $name
