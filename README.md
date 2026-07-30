@@ -674,6 +674,10 @@ Without `--stop-on-error`, a transport failure is recorded as a failed step, lat
 and the returned summary has `success: false`. With `--stop-on-error`, the transport failure exits
 nonzero. `--quiet` suppresses chain progress and caught-failure diagnostics.
 
+Chain files may be a record with a `steps` list or a bare step list. `api chain show <name>` reads
+workspace chains by name only; `api chain exec <name|path>` accepts either a workspace name or an
+explicit chain file path.
+
 ### TUI (Terminal UI)
 
 For those who prefer a visual interface:
@@ -713,6 +717,35 @@ Global settings are stored in `config.nuon`:
 collection's `active_environment`; both fields are `null` when no default collection is configured.
 Configured collection or environment references must exist.
 
+### Workspace state durability
+
+Nurl parses workspace NUON state fail-closed: malformed, binary, or wrong-shaped config,
+variables, secrets, collection, environment, request, and chain files produce a path-specific
+error instead of a partial/default value. Missing optional state still uses the documented
+defaults.
+
+Replacement writes serialize exactly as before, stage a unique
+`.<name>.nurl-<uuid>.tmp` sibling in the resolved destination directory, and publish it with a
+same-filesystem native rename. Existing destination bytes therefore remain unchanged if staging
+or publication fails. On POSIX, native `cp` carries existing mode bits before the temp is
+overwritten; Windows custom per-file DACLs and POSIX extended ACLs, owner, and group are not
+preserved. Temp and published files inherit the destination directory's policy; Nurl does not
+claim owner-only temp permissions.
+
+New-file creates intentionally retain main's single direct bare `save`: they do not stage, lock,
+or overwrite an existing destination. Sequential collisions keep the existing bytes and return
+the command's duplicate message. Nushell implements this as an existence check followed by
+`File::create`, so synchronized same-name creators can report multiple successes; the final file
+is one complete contender payload, not interleaved bytes. A hard kill can leave a partial new
+file, which public readers reject fail-closed.
+
+Fresh sibling temps are left alone. A later write to the same destination silently removes only
+aged temps with that destination's exact prefix. If an aged temp cannot be removed, Nurl warns
+with its path and continues the requested write. There is no daemon or global sweep, so a hard
+kill can leave a sibling temp (including credential bytes beside `secrets.nuon`) until a later
+same-path mutation or manual removal. History entry/index persistence is intentionally outside
+this durability layer.
+
 ---
 
 ## Project Structure
@@ -735,6 +768,7 @@ When installed via the install script, Nurl lives in `~/.nurl`:
 │   ├── vars.nu            # Variable interpolation
 │   ├── history.nu         # Request history
 │   ├── chain.nu           # Request chaining
+│   ├── state-store.nu     # Private workspace state persistence
 │   ├── tui.nu             # Terminal UI
 │   └── log.nu             # Logging utilities
 ├── collections/           # Request collections

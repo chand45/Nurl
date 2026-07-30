@@ -3,6 +3,7 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files path-type-safe]
 use command-error.nu [fail-command]
+use state-store.nu [open-state-record open-state-record-or-default save-state-if-absent save-state-no-clobber save-state-replace]
 
 # Get the directory where this module is located
 def get-api-root [] {
@@ -58,7 +59,7 @@ def get-status-context [] {
     if (path-type-safe $environment_path) != "file" {
         fail-command $"Configured active environment '($active_environment)' not found in collection '($active_collection)'"
     }
-    let environment = (open $environment_path)
+    let environment = (open-state-record $environment_path $"environment '($active_environment)' in collection '($active_collection)'")
     if not (($environment | describe) | str starts-with "record") {
         fail-command $"Environment '($active_environment)' in collection '($active_collection)' must contain a record"
     }
@@ -67,6 +68,20 @@ def get-status-context [] {
         active_collection: $active_collection
         active_environment: $active_environment
     }
+}
+
+# Get configuration
+export def "api config get" [] {
+    let config_path = ((get-api-root) | path join "config.nuon")
+    open-state-record-or-default $config_path {
+        default_headers: {
+            "Content-Type": "application/json"
+            "Accept": "application/json"
+        }
+        timeout_seconds: 30
+        history_retention_days: 30
+        editor: "code"
+    } "config.nuon"
 }
 
 # Export submodules
@@ -96,41 +111,35 @@ export def "api init" [] {
 
     # Create config if it doesn't exist
     let config_path = ($root | path join "config.nuon")
-    if not ($config_path | path exists) {
-        {
-            default_headers: {
-                "Content-Type": "application/json"
-                "Accept": "application/json"
-            }
-            timeout_seconds: 30
-            history_retention_days: 30
-            editor: "code"
-            colors: {
-                success: "green"
-                error: "red"
-                warning: "yellow"
-                info: "blue"
-            }
-        } | to nuon | save $config_path
-    }
+    save-state-if-absent ({
+        default_headers: {
+            "Content-Type": "application/json"
+            "Accept": "application/json"
+        }
+        timeout_seconds: 30
+        history_retention_days: 30
+        editor: "code"
+        colors: {
+            success: "green"
+            error: "red"
+            warning: "yellow"
+            info: "blue"
+        }
+    } | to nuon) $config_path
 
     # Create global variables if it doesn't exist
     let vars_path = ($root | path join "variables.nuon")
-    if not ($vars_path | path exists) {
-        {} | to nuon | save $vars_path
-    }
+    save-state-if-absent ({} | to nuon) $vars_path
 
     # Create secrets if it doesn't exist
     let secrets_path = ($root | path join "secrets.nuon")
-    if not ($secrets_path | path exists) {
-        {
-            tokens: {}
-            saml_tokens: {}
-            oauth: {}
-            api_keys: {}
-            basic_auth: {}
-        } | to nuon | save $secrets_path
-    }
+    save-state-if-absent ({
+        tokens: {}
+        saml_tokens: {}
+        oauth: {}
+        api_keys: {}
+        basic_auth: {}
+    } | to nuon) $secrets_path
 
     print $"(ansi green)API workspace initialized at: ($root)(ansi reset)"
     print "  - config.nuon: Global configuration"
@@ -148,7 +157,7 @@ export def "api status" [] {
     # Count global variables
     let vars_path = ($root | path join "variables.nuon")
     let global_vars_count = if ($vars_path | path exists) {
-        (open $vars_path) | columns | length
+        (open-state-record $vars_path "variables.nuon") | columns | length
     } else { 0 }
 
     # Count collections
@@ -175,26 +184,6 @@ export def "api status" [] {
     }
 }
 
-# Get configuration
-export def "api config get" [] {
-    let root = (get-api-root)
-    let config_path = ($root | path join "config.nuon")
-
-    if ($config_path | path exists) {
-        open $config_path
-    } else {
-        {
-            default_headers: {
-                "Content-Type": "application/json"
-                "Accept": "application/json"
-            }
-            timeout_seconds: 30
-            history_retention_days: 30
-            editor: "code"
-        }
-    }
-}
-
 # Set configuration value
 export def "api config set" [key: string, value: any] {
     let root = (get-api-root)
@@ -202,7 +191,7 @@ export def "api config set" [key: string, value: any] {
 
     mut config = (api config get)
     $config = ($config | upsert $key $value)
-    $config | to nuon | save -f $config_path
+    save-state-replace ($config | to nuon) $config_path
 
     print $"(ansi green)Config updated: ($key) = ($value)(ansi reset)"
 }
@@ -404,7 +393,7 @@ export def "api collection list" [] {
         let collection_dir = (resolve-under-base $collections_dir $collection_name "collection" --scope "API workspace collections" --base-is-canonical)
         let coll_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($collection_name)'" --base-is-canonical)
         let meta = if ($coll_file | path exists) {
-            open $coll_file
+            open-state-record $coll_file $"collection '($collection_name)' definition"
         } else {
             { name: $collection_name, description: "" }
         }
@@ -448,12 +437,12 @@ export def "api collection create" [
     mkdir $requests_dir
     mkdir $environments_dir
 
-    {
+    save-state-no-clobber ({
         name: $name
         description: $description
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
         version: "1.0"
-    } | to nuon --indent 4 | save $collection_file
+    } | to nuon --indent 4) $collection_file $"Collection '($name)' already exists"
 
     print $"(ansi green)Collection '($name)' created(ansi reset)"
 }
@@ -493,7 +482,7 @@ export def "api collection show" [name: string] {
 
     let coll_file = (resolve-under-base $collection_dir "collection.nuon" "collection metadata" --scope $"collection '($name)'" --base-is-canonical)
     let meta = if ($coll_file | path exists) {
-        open $coll_file
+        open-state-record $coll_file $"collection '($name)' definition"
     } else {
         { name: $name, description: "" }
     }
@@ -502,7 +491,7 @@ export def "api collection show" [name: string] {
     let requests_dir = (resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($name)'" --base-is-canonical)
     let requests = if ($requests_dir | path exists) {
         list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests" | each {|request_file|
-            let req = (open $request_file.path)
+            let req = (open-state-record $request_file.path $"request '($request_file.name)' in collection '($name)'")
             {
                 name: ($req.name? | default $request_file.name)
                 method: ($req.method? | default "GET")
@@ -515,7 +504,7 @@ export def "api collection show" [name: string] {
 
     let collection_meta_file = (resolve-under-base $collection_dir "meta.nuon" "collection runtime metadata" --scope $"collection '($name)'" --base-is-canonical)
     let collection_meta = if ($collection_meta_file | path exists) {
-        open $collection_meta_file
+        open-state-record $collection_meta_file $"collection '($name)' runtime metadata"
     } else {
         {active_environment: null}
     }
@@ -523,7 +512,7 @@ export def "api collection show" [name: string] {
     let environments_dir = (resolve-under-base $collection_dir "environments" "environment directory" --scope $"collection '($name)'" --base-is-canonical)
     let environments = if ($environments_dir | path exists) {
         list-contained-resource-files $environments_dir "environment" --suffix ".nuon" --scope $"collection '($name)'/environments" | each {|environment_file|
-            let environment = (open $environment_file.path)
+            let environment = (open-state-record $environment_file.path $"environment '($environment_file.name)' in collection '($name)'")
             let environment_name = ($environment.name? | default $environment_file.name)
             {
                 name: $environment_name
@@ -568,10 +557,10 @@ export def "api collection copy" [
     # Update collection metadata
     let coll_file = (resolve-under-base $target_dir "collection.nuon" "collection metadata" --scope $"collection '($target)'" --base-is-canonical)
     if ($coll_file | path exists) {
-        mut meta = (open $coll_file)
+        mut meta = (open-state-record $coll_file $"collection '($target)' definition")
         $meta = ($meta | upsert name $target)
         $meta = ($meta | upsert created_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
-        $meta | to nuon --indent 4 | save -f $coll_file
+        save-state-replace ($meta | to nuon --indent 4) $coll_file
     }
 
     print $"(ansi green)Collection '($source)' copied to '($target)'(ansi reset)"
@@ -587,17 +576,13 @@ def get-coll-meta-path [collection_dir: string] {
 # Helper: Load collection meta
 def load-coll-meta [collection_dir: string] {
     let path = (get-coll-meta-path $collection_dir)
-    if ($path | path exists) {
-        open $path
-    } else {
-        { active_environment: null }
-    }
+    open-state-record-or-default $path {active_environment: null} "collection runtime metadata"
 }
 
 # Helper: Save collection meta
 def save-coll-meta [collection_dir: string, meta: record] {
     let path = (get-coll-meta-path $collection_dir)
-    $meta | to nuon --indent 4 | save -f $path
+    save-state-replace ($meta | to nuon --indent 4) $path
 }
 
 # Helper: Get the contained environments directory.
@@ -650,7 +635,7 @@ export def "api collection env list" [
     $env_files | each {|f|
         let logical_name = ($f | path basename | str replace -r '\.nuon$' '')
         let env_path = (resolve-under-base $envs_dir $logical_name "environment" --suffix ".nuon" --always-suffix --scope $"collection '($collection)'/environments" --base-is-canonical)
-        let data = (open $env_path)
+        let data = (open-state-record $env_path $"environment '($logical_name)' in collection '($collection)'")
         let name = ($data.name? | default $logical_name)
         {
             name: $name
@@ -682,12 +667,12 @@ export def "api collection env create" [
         fail-command $"Environment '($name)' already exists in collection '($collection)'"
     }
 
-    {
+    save-state-no-clobber ({
         name: $name
         description: ""
         variables: {}
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-    } | to nuon --indent 4 | save $env_path
+    } | to nuon --indent 4) $env_path $"Environment '($name)' already exists in collection '($collection)'"
 
     print $"(ansi green)Environment '($name)' created in collection '($collection)'(ansi reset)"
 
@@ -751,7 +736,7 @@ export def "api collection env show" [
         fail-command $"Environment '($target)' not found in collection '($collection)'"
     }
 
-    let env_data = (open $env_path)
+    let env_data = (open-state-record $env_path $"environment '($target)' in collection '($collection)'")
 
     {
         collection: $collection
@@ -795,9 +780,9 @@ export def "api collection env set" [
         fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
-    mut env_data = (open $env_path)
+    mut env_data = (open-state-record $env_path $"environment '($target_env)' in collection '($collection)'")
     $env_data = ($env_data | upsert variables ($env_data.variables | upsert $key $value))
-    $env_data | to nuon --indent 4 | save -f $env_path
+    save-state-replace ($env_data | to nuon --indent 4) $env_path
 
     print $"(ansi green)Set ($key) = ($value) in ($collection)/($target_env)(ansi reset)"
 }
@@ -835,7 +820,7 @@ export def "api collection env unset" [
         fail-command $"Environment '($target_env)' not found in collection '($collection)'"
     }
 
-    mut env_data = (open $env_path)
+    mut env_data = (open-state-record $env_path $"environment '($target_env)' in collection '($collection)'")
 
     if not ($key in ($env_data.variables? | default {})) {
         print $"(ansi yellow)Variable '($key)' not found in ($collection)/($target_env)(ansi reset)"
@@ -843,7 +828,7 @@ export def "api collection env unset" [
     }
 
     $env_data = ($env_data | upsert variables ($env_data.variables | reject $key))
-    $env_data | to nuon --indent 4 | save -f $env_path
+    save-state-replace ($env_data | to nuon --indent 4) $env_path
 
     print $"(ansi green)Removed ($key) from ($collection)/($target_env)(ansi reset)"
 }

@@ -25,6 +25,9 @@ nu --no-config-file tests/run-security.nu
 
 # Documented minimum Nushell 0.89-compatible boundary and black-box suites
 nu --no-config-file tests/run-security-compat.nu
+
+# Native state durability on any supported runtime
+nu --no-config-file tests/run-state-durability.nu
 ```
 
 ## Network requirements
@@ -61,8 +64,10 @@ cleaned up after each test.
 | `test_credential_boundaries.nu` | Live response-header and config/environment/extra-variable interpolation boundaries |
 | `test_credential_blackbox.nu` | Nine independent public-CLI reproductions with literal policy tables and byte/network mutation checks |
 | `test_secure_header_capture.nu` | Fileless curl response parsing, sensitive live response masking, trailers, redirects, and transport artifacts |
+| `test_state_durability.nu` | Atomic replacement, fail-closed state readers, corruption/I/O matrices, stale sibling policy, path aliases/symlinks, chain shapes, lifecycle artifacts, and permission disclosures |
 | `run-security.nu` | Current-runtime focused security runner |
 | `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
+| `run-state-durability.nu` | Cross-runtime native state durability gate with explicit OS/capability skip accounting |
 | `run.nu` | Main runner — sources all suites, prints summary, exits non-zero on failure |
 
 ## Adding a new test
@@ -87,4 +92,9 @@ if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
 `.github/workflows/security-compatibility.yml` pins official Nushell release artifacts and
 checksums for Windows and Linux. It runs the minimum-compatible security gate on 0.89.0, the
 broader focused security gate on the current runtime, and keeps the full suite and command
-discovery as separate current-runtime jobs.
+discovery as separate current-runtime jobs. The same four-cell matrix runs
+`run-state-durability.nu`, including exact replacement bytes, corruption/I/O handling, stale
+sibling policy, Windows alias/DACL behavior, POSIX mode/symlink behavior, and PATH-empty
+lifecycles. Same-name create races are characterization only because Nushell's direct bare
+`save` has a pre-existing TOCTOU; deterministic gates require complete contender bytes, stable
+sequential collision behavior, and zero internal artifacts.

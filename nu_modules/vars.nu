@@ -3,6 +3,7 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base]
 use string-compat.nu [optional-get]
+use state-store.nu [open-state-record open-state-record-or-default save-state-replace]
 
 # ============================================================================
 # Global Variables Management
@@ -17,17 +18,13 @@ def get-global-vars-path [] {
 # Load global variables from variables.nuon
 def load-global-vars [] {
     let path = (get-global-vars-path)
-    if ($path | path exists) {
-        open $path
-    } else {
-        {}
-    }
+    open-state-record-or-default $path {} "variables.nuon"
 }
 
 # Save global variables to variables.nuon
 def save-global-vars [vars: record] {
     let path = (get-global-vars-path)
-    $vars | to nuon | save -f $path
+    save-state-replace ($vars | to nuon) $path
 }
 
 # Get collection meta path
@@ -47,11 +44,7 @@ def get-collection-meta-path [collection_dir: string, collection: string] {
 # Load collection meta
 def load-collection-meta [collection_dir: string, collection: string] {
     let path = (get-collection-meta-path $collection_dir $collection)
-    if ($path | path exists) {
-        open $path
-    } else {
-        { active_environment: null }
-    }
+    open-state-record-or-default $path {active_environment: null} $"collection '($collection)' metadata"
 }
 
 # Get collection environment path
@@ -112,7 +105,7 @@ export def "api vars get-merged" [
         if $active_env != null {
             let env_path = (get-collection-env-path $collection_dir $collection $active_env)
             if ($env_path | path exists) {
-                let env_data = (open $env_path)
+                let env_data = (open-state-record $env_path $"environment '($active_env)' in collection '($collection)'")
                 let env_vars = ($env_data.variables? | default {})
                 $merged = ($merged | merge $env_vars)
             }
@@ -135,7 +128,7 @@ def get-secrets [] {
     let secrets_path = ($root | path join "secrets.nuon")
 
     if ($secrets_path | path exists) {
-        open $secrets_path
+        open-state-record $secrets_path "secrets.nuon"
     } else {
         {
             tokens: {}
@@ -313,7 +306,7 @@ export def "api vars list" [
         if $active_env != null {
             let env_path = (get-collection-env-path $collection_dir $collection $active_env)
             if ($env_path | path exists) {
-                let env_data = (open $env_path)
+                let env_data = (open-state-record $env_path $"environment '($active_env)' in collection '($collection)'")
                 let env_vars = ($env_data.variables? | default {})
                 if not ($env_vars | is-empty) {
                     let type_label = $"($collection):($active_env)"

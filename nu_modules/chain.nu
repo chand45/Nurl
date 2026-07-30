@@ -8,6 +8,7 @@ use resource-path.nu [path-type-safe validate-resource-name resolve-under-base]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [optional-get]
+use state-store.nu [open-state-record open-state-value]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -33,11 +34,45 @@ def resolve-chain-file [chains_dir: string, name: string] {
     resolve-under-base $chains_dir $name "chain" --suffix ".nuon" --always-suffix --scope "API workspace chains" --base-is-canonical
 }
 
-def validate-chain-steps [steps: list] {
+def validate-chain-steps [steps: any, path: string] {
     for step in $steps {
+        if (chain-base-type $step) != "record" {
+            fail-command $"Invalid chain state at '($path)': each step must be a NUON record."
+        }
         if "request" in ($step | columns) {
             validate-resource-name "request" $step.request --nested --scope "<collection>/requests" | ignore
         }
+    }
+}
+
+def chain-base-type [value: any] {
+    let described = ($value | describe --detailed)
+    $described | get type
+}
+
+def normalize-chain-state [value: any, path: string] {
+    let base_type = (chain-base-type $value)
+    if $base_type != "record" and $base_type != "list" {
+        fail-command $"Invalid chain state at '($path)': expected a NUON record or list."
+    }
+
+    let steps = if $base_type == "record" {
+        let record_steps = ($value.steps? | default null)
+        if $record_steps == null {
+            fail-command $"Invalid chain state at '($path)': expected a steps list."
+        }
+        $record_steps
+    } else {
+        $value
+    }
+    if (chain-base-type $steps) != "list" {
+        fail-command $"Invalid chain state at '($path)': expected steps to be a NUON list."
+    }
+
+    {
+        value: $value
+        base_type: $base_type
+        steps: $steps
     }
 }
 
@@ -56,7 +91,7 @@ export def "api chain run" [
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
     }
-    validate-chain-steps $steps
+    validate-chain-steps $steps "inline chain"
 
     mut context = {}  # Variables extracted from responses
     mut results = []
@@ -298,19 +333,28 @@ export def "api chain exec" [
         }
     }
 
-    let chain_def = (open $file_path)
-    let steps = ($chain_def.steps? | default $chain_def)
-    validate-chain-steps $steps
+    let chain = (normalize-chain-state (open-state-value $file_path "chain state") $file_path)
+    validate-chain-steps $chain.steps $file_path
 
     if not $quiet {
-        print $"(ansi blue)Running chain: ($chain_def.name? | default $file)(ansi reset)"
-        if ($chain_def.description? | default "") != "" {
-            print $"($chain_def.description)"
+        let display_name = if $chain.base_type == "record" {
+            $chain.value.name? | default $file
+        } else {
+            $file
+        }
+        let description = if $chain.base_type == "record" {
+            $chain.value.description? | default ""
+        } else {
+            ""
+        }
+        print $"(ansi blue)Running chain: ($display_name)(ansi reset)"
+        if $description != "" {
+            print $description
         }
         print ""
     }
 
-    api chain run $steps --stop-on-error=$stop_on_error --quiet=$quiet
+    api chain run $chain.steps --stop-on-error=$stop_on_error --quiet=$quiet
 }
 
 # Load saved request by name (returns just the request)
@@ -338,7 +382,7 @@ def load-saved-request-with-collection [name: string] {
             let request_file = (resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix --scope "<collection>/requests" --base-is-canonical)
             if ($request_file | path exists) {
                 return {
-                    request: (open $request_file)
+                    request: (open-state-record $request_file $"request '($name)' in collection '($collection)'")
                     collection: $collection
                 }
             }
@@ -365,7 +409,7 @@ export def "api chain create" [
         fail-command $"Chain '($name)' already exists"
     }
 
-    {
+    save-state-no-clobber ({
         name: $name
         description: $description
         created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
@@ -383,7 +427,7 @@ export def "api chain create" [
                 }
             }
         ]
-    } | to nuon | save $file_path
+    } | to nuon) $file_path $"Chain '($name)' already exists"
 
     print $"(ansi green)Chain '($name)' created at: ($file_path)(ansi reset)"
     print "Edit the file to define your request chain."
@@ -408,16 +452,12 @@ export def "api chain list" [] {
     $files | each {|file|
         let logical_name = ($file | path basename | str replace -r '\.nuon$' '')
         let resolved_file = (resolve-chain-file $chains_dir $logical_name)
-        let chain = try {
-            open $resolved_file
-        } catch {
-            { name: $logical_name, description: "", steps: [] }
-        }
+        let chain = (normalize-chain-state (open-state-value $resolved_file "chain state") $resolved_file)
 
         {
-            name: ($chain.name? | default $logical_name)
-            description: ($chain.description? | default "")
-            steps: ($chain.steps? | default [] | length)
+            name: (if $chain.base_type == "record" { $chain.value.name? | default $logical_name } else { $logical_name })
+            description: (if $chain.base_type == "record" { $chain.value.description? | default "" } else { "" })
+            steps: ($chain.steps | length)
         }
     }
 }
@@ -432,7 +472,8 @@ export def "api chain show" [name: string] {
         fail-command $"Chain '($name)' not found"
     }
 
-    open $file_path
+    let chain = (normalize-chain-state (open-state-value $file_path "chain state") $file_path)
+    $chain.value
 }
 
 # Delete a chain

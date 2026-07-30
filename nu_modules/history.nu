@@ -759,7 +759,7 @@ export def "api history save" [
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
     let current_env = if ($config_path | path exists) {
-        (open $config_path).default_environment? | default null
+        (api config get).default_environment? | default null
     } else {
         null
     }
@@ -1083,7 +1083,7 @@ export def "api history clear" [
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
     let retention_days = if ($config_path | path exists) {
-        (open $config_path).history_retention_days? | default 30
+        (api config get).history_retention_days? | default 30
     } else {
         30
     }

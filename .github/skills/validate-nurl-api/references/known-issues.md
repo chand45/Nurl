@@ -206,6 +206,7 @@ request, interpolates variables, or touches `.nuon` files.
   survive exceptional reconciliation. Full rebuild treated traversal or entry-read failures as
   empty/malformed data, replaced the index, and printed success after silently dropping existing
   unreadable entries.
+
 - **Fix:** clear captures validated canonical index hints and exact raw index bytes before mutation.
   Every delete or post-delete rebuild error reconciles those hints against contained surviving
   entry paths without opening locked files, persists an exact-schema unique canonical index, then
@@ -226,3 +227,36 @@ request, interpolates variables, or touches `.nuon` files.
   explicit combined failure, and byte-exact restoration when `--all` removes the index before
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
+
+## 22. Workspace NUON replacement could destroy prior state  (FIXED)
+- **Symptom:** interruption or I/O failure during `save -f` could truncate an existing config,
+  variables, secrets, collection, environment, request, or chain file. Corrupt state could also
+  expose raw parser cascades or be accepted with the wrong top-level shape.
+- **Root cause:** replacement writes targeted the destination directly, and readers delegated
+  parsing and shape handling to `open`.
+- **Fix:** scoped non-history workspace state uses a private native state store. Replacements stage
+  exact serialized bytes in a unique same-directory sibling and publish by native rename; readers
+  separate raw I/O from NUON parsing and reject invalid top-level shapes with a path-specific
+  command error. History entry/index persistence remains unchanged.
+- **Retained residuals:** a hard kill can leave a sibling temp, possibly containing credential
+  bytes. Cleanup is exact-prefix, same-destination, and opportunistic; fresh temps are untouched,
+  aged removable temps are deleted, and aged unremovable temps warn while the requested write
+  continues. Temp/final permissions come from the destination directory; custom Windows per-file
+  DACLs and POSIX extended ACL/owner/group are not preserved. There is no background sweeper.
+- **Re-check:** run `tests/run-state-durability.nu` on Nushell 0.89.0 and the current supported
+  runtime on Windows and non-root Linux.
+
+## 23. Concurrent same-name creates can report multiple successes
+- **Symptom:** synchronized `api ... create` callers for the same destination can both report
+  success; the final complete file belongs to one contender. Sequential duplicates remain
+  deterministic and preserve existing bytes.
+- **Root cause:** supported Nushell `save` versions check `path.exists()` and then call
+  `File::create` rather than an OS-exclusive `create_new`, leaving a pre-existing TOCTOU. Nurl
+  intentionally retains main's direct bare-save behavior in this batch; no lock, staging path,
+  or external helper is added.
+- **Status:** retained main-parity residual, non-blocking for replacement durability. A hard kill
+  during direct create may also leave a partial new file; fail-closed readers report it cleanly.
+  No separate tracking issue is filed in this batch.
+- **Re-check:** run the sequential collision and synchronized characterization cases in
+  `tests/run-state-durability.nu`. Gate on stable duplicate failures, complete parseable final
+  bytes from a successful contender, and zero artifacts—not an exact winner count.

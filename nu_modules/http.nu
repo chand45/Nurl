@@ -9,6 +9,7 @@ use resource-path.nu [path-type-safe validate-resource-name resolve-under-base l
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case]
+use state-store.nu [open-state-record save-state-if-absent save-state-no-clobber save-state-replace]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -36,29 +37,12 @@ def list-request-files [requests_dir: string] {
 
 # Get default headers from config
 def get-default-headers [] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let config_path = ($root | path join "config.nuon")
-
-    if ($config_path | path exists) {
-        (open $config_path).default_headers? | default {}
-    } else {
-        {
-            "Content-Type": "application/json"
-            "Accept": "application/json"
-        }
-    }
+    (api config get).default_headers? | default {}
 }
 
 # Get timeout from config
 def get-timeout [] {
-    let root = ($env.API_ROOT? | default (pwd))
-    let config_path = ($root | path join "config.nuon")
-
-    if ($config_path | path exists) {
-        (open $config_path).timeout_seconds? | default 30
-    } else {
-        30
-    }
+    (api config get).timeout_seconds? | default 30
 }
 
 def validate-output-mode [output: string] {
@@ -1681,7 +1665,7 @@ export def "api send" [
         }
 
         # Load request
-        let request = (open $request_path)
+        let request = (open-state-record $request_path $"request '($name)'")
         let headers = ($request.headers? | default {})
         let body = if $has_body_override {
             $resolved_body_override
@@ -1769,11 +1753,11 @@ export def "api request create" [
             mkdir $requests_dir
             mkdir $environments_dir
             let collection_file = (resolve-under-base $collection_path "collection.nuon" "collection metadata" --scope $"collection '($collection)'" --base-is-canonical)
-            {
+            save-state-if-absent ({
                 name: $collection
                 description: ""
                 created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-            } | to nuon --indent 4 | save $collection_file
+            } | to nuon --indent 4) $collection_file
         }
 
         let requests_path = (resolve-requests-dir $collection_path $collection)
@@ -1786,8 +1770,11 @@ export def "api request create" [
         if not ($request_parent | path exists) {
             mkdir $request_parent
         }
+        if ($request_file | path exists) {
+            fail-command $"Request '($name)' already exists in collection '($collection)'"
+        }
 
-        {
+        save-state-no-clobber ({
             name: $name
             collection: $collection
             method: $method
@@ -1799,7 +1786,7 @@ export def "api request create" [
             tests: null
             chain: null
             created_at: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
-        } | to nuon --indent 4 | save $request_file
+        } | to nuon --indent 4) $request_file $"Request '($name)' already exists in collection '($collection)'"
 
         print $"(ansi green)Request '($name)' created in collection '($collection)'(ansi reset)"
     }
@@ -1826,7 +1813,7 @@ export def "api request list" [
             let requests_dir = (resolve-requests-dir $collection_dir $collection)
             if ($requests_dir | path exists) {
                 list-request-files $requests_dir | each {|file|
-                    let req = (open $file.path)
+                    let req = (open-state-record $file.path $"request '($file.name)' in collection '($collection)'")
                     {
                         name: ($req.name? | default $file.name)
                         collection: $collection
@@ -1844,7 +1831,7 @@ export def "api request list" [
                 let requests_dir = (resolve-requests-dir $coll_path $coll_name)
                 if ($requests_dir | path exists) {
                     list-request-files $requests_dir | each {|file|
-                        let req = (open $file.path)
+                        let req = (open-state-record $file.path $"request '($file.name)' in collection '($coll_name)'")
                         {
                             name: ($req.name? | default $file.name)
                             collection: $coll_name
@@ -1899,7 +1886,7 @@ export def "api request show" [
         fail-command $"Request '($name)' not found in ($scope)"
     }
 
-    open $request_file
+    open-state-record $request_file $"request '($name)'"
 }
 
 # Update an existing saved request
@@ -1935,7 +1922,7 @@ export def "api request update" [
         null
     }
 
-    mut req = (open $request_file)
+    mut req = (open-state-record $request_file $"request '($name)' in collection '($collection)'")
 
     if $method != null {
         $req = ($req | upsert method $method)
@@ -1962,7 +1949,7 @@ export def "api request update" [
     }
 
     $req = ($req | upsert updated_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
-    $req | to nuon --indent 4 | save -f $request_file
+    save-state-replace ($req | to nuon --indent 4) $request_file
 
     print $"(ansi green)Request '($name)' updated in collection '($collection)'(ansi reset)"
 }

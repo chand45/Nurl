@@ -3,6 +3,7 @@
 
 use resource-path.nu [validate-resource-name resolve-under-base list-contained-resource-files run-tui-resource-action]
 use string-compat.nu [ascii-upcase]
+use state-store.nu [open-state-record]
 
 def get-collections-dir [] {
     let root = ($env.API_ROOT? | default (pwd))
@@ -109,7 +110,7 @@ def "api tui collection-requests" [collection: string] {
     let requests = (
         list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
         | each {|request_file|
-        let req = (open $request_file.path)
+        let req = (open-state-record $request_file.path $"request '($request_file.name)' in collection '($collection)'")
         {
             file: $request_file.path
             lookup: ($request_file.path | path relative-to $requests_dir | str replace --all "\\" "/")

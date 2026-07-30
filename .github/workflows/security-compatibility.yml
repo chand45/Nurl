@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   focused-security:
-    name: Security / ${{ matrix.os }} / Nushell ${{ matrix.nu_version }}
+    name: Security + durability / ${{ matrix.os }} / Nushell ${{ matrix.nu_version }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,6 +87,12 @@ jobs:
         shell: pwsh
         run: |
           & $env:NU_EXE --no-config-file "${{ matrix.runner }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run native state durability suite
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-state-durability.nu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run minimum-runtime status compatibility suite
