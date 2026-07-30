@@ -1060,10 +1060,12 @@ def test-sd-r5-io-failure-propagation [] {
 
 def test-sd-r5-reader-io-boundary-is-structural [] {
     let source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "state-store.nu") --raw)
+    let readers = ($source | split row "export def open-state-value" | last)
+    for forbidden in ['$error.msg' "debug" "FileNotFound"] {
+        assert (not ($readers | sd-lower | str contains ($forbidden | sd-lower))) $"state reader/default helper classifies native I/O via forbidden token: ($forbidden)"
+    }
     let strict = (
-        $source
-        | split row "export def open-state-value"
-        | last
+        $readers
         | split row "export def open-state-record ["
         | first
     )
@@ -1083,6 +1085,38 @@ def test-sd-r5-reader-io-boundary-is-structural [] {
     assert ($defaults | str contains 'open-state-record $path $description') "present defaulting path no longer delegates to the strict reader"
     assert (not ($defaults | str contains "try")) "present defaulting path catches strict-reader I/O"
     assert (not ($defaults | str contains "catch")) "present defaulting path catches strict-reader I/O"
+}
+
+def test-sd-r5-unreadable-present-never-defaults [] {
+    let tmp = (make-temp-dir "sd-r5-present-default")
+    sd-finally {
+        $env.API_ROOT = $tmp
+        api init | ignore
+        let config_path = ($tmp | path join "config.nuon")
+        let blocker = if $nu.os-info.name == "windows" {
+            sd-start-file-lock $tmp $config_path "None"
+        } else {
+            let uid = (^id -u | str trim)
+            if $uid == "0" {
+                error make {msg: "SKIP: running as root; POSIX permission checks are bypassed"}
+            }
+            chmod 000 $config_path
+            null
+        }
+        sd-finally {
+            let result = (run-command-process $tmp "api config get | to nuon | print")
+            assert ($result.exit_code != 0) "unreadable present config.nuon defaulted successfully"
+            assert equal ($result.stdout | str trim) "" "unreadable present config.nuon returned default bytes"
+            assert (not ($result.stderr | str contains "Could not parse")) "unreadable present config.nuon was normalized as invalid NUON"
+            assert (not ($result.stderr | str contains "must contain a record")) "unreadable present config.nuon was normalized as wrong shape"
+        } {
+            if $blocker != null {
+                sd-stop-file-lock $blocker
+            } else if $nu.os-info.name != "windows" {
+                chmod 644 $config_path
+            }
+        }
+    } { cleanup $tmp }
 }
 
 def test-sd-r5-history-config-read-fails-closed [] {
@@ -2329,6 +2363,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "SD-R5: missing state files retain current defaults" { test-sd-r5-missing-files-retain-defaults })
         (run-test "SD-R5: genuine I/O read failures propagate distinctly from parse failures" { test-sd-r5-io-failure-propagation })
         (run-test "SD-R5: reader I/O boundary is structurally fail-open to native errors" { test-sd-r5-reader-io-boundary-is-structural })
+        (run-test "SD-R5: unreadable present state never defaults" { test-sd-r5-unreadable-present-never-defaults })
         (run-test "SD-R5: public history config read fails closed without entry/index writes" { test-sd-r5-history-config-read-fails-closed })
         (run-test "SD-R6: read-only sweep across state surfaces is byte-stable" { test-sd-r6-read-only-byte-stability })
         (run-test "SD-R6: credential and secrets key order is preserved" { test-sd-r6-credential-key-order-preserved })
