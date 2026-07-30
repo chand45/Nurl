@@ -82,7 +82,7 @@
   { command: "api head",                 kind: command,  group: requests,        test: "api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history  # returns 200; no body/history write" }
   { command: "api options",              kind: command,  group: requests,        test: "api options https://jsonplaceholder.typicode.com/posts --raw --no-history  # status 204; no history write" }
   { command: "api request",              kind: command,  group: requests,        test: "api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r  # generic verb; string bodies pass through (no double-encode)" }
-  { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -c jsonplaceholder -r  # name positional, -c collection; interpolates {{base_url}}" }
+  { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -r; api send get-post -c jsonplaceholder -r  # auto-discovery and explicit collection; interpolate {{base_url}}" }
 
   # ---- saved requests (http.nu) --------------------------------------------
   { command: "api request create",       kind: command,  group: saved-requests,  test: "api request create tmp-req GET '{{base_url}}/posts/1' -c jsonplaceholder  # name/method/url positional, -c collection" }

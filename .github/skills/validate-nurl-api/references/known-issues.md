@@ -95,7 +95,19 @@ request, interpolates variables, or touches `.nuon` files.
   empty stdout, actionable non-ANSI stderr, and no mutation or network request.
 - **Re-check:** run the table-driven subprocess cases in `tests/test_command_errors.nu`.
 
-## 12. Curl transport failures exited successfully and binary retries were destructive  (FIXED)
+## 12. Omitted-collection saved requests failed at runtime on Nushell 0.114  (FIXED)
+- **Symptom:** `api send <name> --dry-run` could fail only at runtime when `--collection` was
+  omitted, while `api send <name> -c <collection> --dry-run` worked.
+- **Root cause:** auto-discovery initialized its request-path accumulator with `null`, then assigned
+  a string after finding a request. Nushell 0.114 enforces that mutable variable's inferred runtime
+  type and rejected the assignment.
+- **Fix:** the accumulator is explicitly typed as `string` and uses an empty-string sentinel. Search
+  order, first-match behavior, discovered collection environment selection, and the exact missing
+  request error remain unchanged. The supported Nushell floor remains 0.89.
+- **Re-check:** run `tests/run-send-compat.nu` on Nushell 0.89 and 0.114; both discover a request
+  after an earlier nonmatching collection and resolve `{{base_url}}` from the discovered collection.
+
+## 13. Curl transport failures exited successfully and binary retries were destructive  (FIXED)
 - **Symptom:** exhausted DNS/connect/TLS/timeout/truncated transfers printed ANSI errors on stdout,
   exited 0, and could create result-shaped fallbacks. `--binary-save` bypassed retries and wrote
   partial bytes directly over an existing destination.
@@ -106,7 +118,7 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run `tests/test_transport_failures.nu`; it covers direct, saved, resend, binary, and
   chain surfaces, negative preflight, exact attempts, redaction, and destination preservation.
 
-## 13. Auth previews leaked secrets and authenticated history resent without auth  (FIXED)
+## 14. Auth previews leaked secrets and authenticated history resent without auth  (FIXED)
 - **Symptom:** basic/API-key dry-run and request export rendered wire credentials. History omitted
   auth metadata, so default resend silently downgraded authenticated requests to unauthenticated.
 - **Fix:** auth preparation now has separate display, wire, and canonical replay projections.
@@ -116,7 +128,7 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run `tests/test_auth_replay.nu`; it covers rotation, override precedence, legacy
   history, invalid refs, no-side-effect failures, query fragments, and the preview/export matrix.
 
-## 14. Direct history saves could bypass credential sanitization  (FIXED)
+## 15. Direct history saves could bypass credential sanitization  (FIXED)
 - **Symptom:** a caller could pass inline auth or sensitive headers to `api history save`, then
   recover the values through history bytes, index, show/get, or export. Arbitrary top-level or
   nested credential-shaped metadata could also bypass field-specific sanitization.
@@ -128,7 +140,7 @@ request, interpolates variables, or touches `.nuon` files.
   in persisted bytes or any public history projection, legacy fixtures are not migrated, and
   invalid schemas/refs/auth cause no mutation.
 
-## 15. Query API keys could alter URL structure  (FIXED)
+## 16. Query API keys could alter URL structure  (FIXED)
 - **Symptom:** reserved characters in a query API-key name or value could create extra parameters,
   truncate the credential at `#`, or otherwise change request semantics.
 - **Fix:** query API-key names and wire values are RFC 3986 query-component encoded exactly once.
@@ -136,7 +148,7 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run `tests/test_auth_replay.nu`; its local server covers `&`, `=`, `#`, `%`, `+`,
   spaces, Unicode, existing/empty queries, fragments, rotation, override, saved requests, and chains.
 
-## 16. OAuth provider descriptions could echo credentials  (FIXED)
+## 17. OAuth provider descriptions could echo credentials  (FIXED)
 - **Symptom:** token or refresh failures emitted an untrusted provider `error_description`, which
   could contain a client secret, access token, or refresh token. Non-2xx responses with
   success-shaped JSON were also accepted, while malformed 2xx token records were insufficiently
@@ -149,7 +161,7 @@ request, interpolates variables, or touches `.nuon` files.
   cover 3xx/4xx/5xx success-shaped bodies and malformed 2xx shapes, asserting secret-free,
   non-ANSI stderr, exact endpoint counts, and no history/output/state mutation.
 
-## 17. Credential-bearing URLs could bypass safe history auth metadata  (FIXED)
+## 18. Credential-bearing URLs could bypass safe history auth metadata  (FIXED)
 - **Symptom:** URL userinfo or recognized credential query/fragment parameters were copied into
   history entries and the index, exposed by readers/exports, and reused by resend.
 - **Fix:** one shared classifier now rejects userinfo and exact sensitive parameter names after
@@ -162,7 +174,7 @@ request, interpolates variables, or touches `.nuon` files.
   save, direct/saved/chain execution, safe lookalike names, managed query auth, all history readers
   and exports, malformed encodings, and a byte-stable legacy resend rejection.
 
-## 18. Password aliases were absent from URL and header credential classification  (FIXED)
+## 19. Password aliases were absent from URL and header credential classification  (FIXED)
 - **Symptom:** exact `password` URL parameters and `X-Password` request headers could persist or
   appear in previews because token/key/client-secret names were classified but password aliases
   were not.
@@ -174,7 +186,7 @@ request, interpolates variables, or touches `.nuon` files.
   literal expectation tables cover URL variants, request/response headers, history/read/export
   boundaries, resend mask rejection, safe lookalikes, and managed query-key rotation.
 
-## 19. Live sensitive response headers could escape through typed outputs  (FIXED)
+## 20. Live sensitive response headers could escape through typed outputs  (FIXED)
 - **Symptom:** response-header values were sanitized for history and human rendering but remained
   available in `--raw`, `--output headers|json`, and `--select`.
 - **Fix:** recognized sensitive response headers are now masked before constructing the public
@@ -184,7 +196,7 @@ request, interpolates variables, or touches `.nuon` files.
   they exercise the live curl parser through typed/human/machine outputs, history/index/read/export,
   trailers, redirects, exact password-family names, and safe boundary lookalikes.
 
-## 20. Same-second history recency and partial IDs were nondeterministic  (FIXED)
+## 21. Same-second history recency and partial IDs were nondeterministic  (FIXED)
 - **Symptom:** rapid saves shared a second-only timestamp, so list/search/rebuild order depended on a
   random ID suffix, export used filename order, and an ambiguous partial ID silently selected one
   entry. Negative limits leaked a low-level Nushell error.
@@ -199,7 +211,7 @@ request, interpolates variables, or touches `.nuon` files.
   malformed timestamps, every export/limit surface, exact/unique/ambiguous IDs, and zero endpoint or
   OAuth events on ambiguity.
 
-## 21. Partial history clear and rebuild could silently desynchronize the index  (FIXED)
+## 22. Partial history clear and rebuild could silently desynchronize the index  (FIXED)
 - **Symptom:** recursive clear could delete files before a later delete error while leaving their
   index rows visible. A successful deletion followed by a strict rebuild failure had the same stale
   result, and partial `--all` failure bypassed recovery. Duplicate or injected hints could also
@@ -227,7 +239,7 @@ request, interpolates variables, or touches `.nuon` files.
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
 
-## 22. Concurrent same-name creates are not exclusive
+## 23. Concurrent same-name creates are not exclusive
 - **Symptom:** two processes creating the same new collection, environment, request, or chain can both
   report success, with one complete contender payload surviving.
 - **Root cause:** supported Nushell versions implement bare `save` as an existence check followed by
@@ -240,7 +252,7 @@ request, interpolates variables, or touches `.nuon` files.
   sequential byte preservation; Gate C records winner counts only as characterization while asserting
   complete parseable output, allowed outcomes, and no artifacts.
 
-## 23. Hard termination can leave a sibling state temporary file
+## 24. Hard termination can leave a sibling state temporary file
 - **Symptom:** forced termination or power loss between temporary-file creation and publication can
   leave `.<name>.nurl-<uuid>.tmp` beside a state file. A `secrets.nuon` sibling may contain credential
   bytes.
@@ -256,7 +268,7 @@ request, interpolates variables, or touches `.nuon` files.
 - **Re-check:** run the stale sibling policy and PATH-empty lifecycle cases in
   `tests/run-state-durability.nu`.
 
-## 24. Native replacement publication is best-effort on every supported platform
+## 25. Native replacement publication is best-effort on every supported platform
 
 **Persistence guarantee: best-effort.** Nurl does not guarantee atomic file replacement on
 any supported platform in this release. If a save fails or is interrupted, the previous file

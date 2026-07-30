@@ -6,7 +6,13 @@ use test-assert.nu [assert "assert equal" "assert not"]
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
 def test-temp-dir [] {
-    $nu.temp-dir? | default ($nu.temp-path? | default ".")
+    try { $nu.temp-dir } catch {
+        try { $nu.temp-path } catch {
+            try { $env.TEMP } catch {
+                try { $env.TMPDIR } catch { "/tmp" }
+            }
+        }
+    }
 }
 
 def test-complete-result [result: record] {

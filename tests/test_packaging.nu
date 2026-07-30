@@ -71,6 +71,33 @@ def source-install-payload [install_root: string, runner_root: string] {
     $result
 }
 
+def send-install-payload-probe [install_root: string, runner_root: string] {
+    let script = ($runner_root | path join $"send-install-(random uuid).nu")
+    let workspace = ($runner_root | path join $"workspace-(random uuid)")
+    mkdir $workspace
+    [
+        $"source (($install_root | path join 'api.nu') | to nuon)"
+        $"$env.API_ROOT = ($workspace | to nuon)"
+        "api init | ignore"
+        "api collection create a-nonmatching | ignore"
+        "api collection create b-target | ignore"
+        "api collection env create b-target default --activate | ignore"
+        "api collection env set b-target base_url https://payload.example | ignore"
+        "api request create payload-request GET '{{base_url}}/x' --collection b-target | ignore"
+        "api send payload-request --dry-run --no-history"
+    ] | str join "\n" | save -f $script
+
+    let result = (do {
+        cd $runner_root
+        with-env {NU_LIB_DIRS: ""} {
+            ^$nu.current-exe --no-config-file $script | complete
+        }
+    })
+    rm -f $script
+    cleanup $workspace
+    $result
+}
+
 def installer-version-cases [] {
     [
         {
@@ -567,6 +594,30 @@ def test-installer-module-payloads [] {
             let sourced = (source-install-payload $install_root $runner_root)
             assert equal $sourced.exit_code 0 $"isolated ($payload.name) installer payload did not source successfully"
             assert equal ($sourced.stderr | str trim) "" $"isolated ($payload.name) source wrote stderr"
+
+            let sent = (send-install-payload-probe $install_root $runner_root)
+            assert equal $sent.exit_code 0 $"isolated ($payload.name) installer payload could not auto-discover a saved request"
+            assert equal ($sent.stderr | str trim) "" $"isolated ($payload.name) saved-request probe wrote stderr"
+            let send_output = ($sent.stdout | str trim)
+            let curl_output = ($send_output | lines | where {|line| $line | str starts-with "curl " })
+            assert (not ($curl_output | is-empty)) $"isolated ($payload.name) saved-request probe did not produce curl output"
+            assert ($curl_output | str join "\n" | str contains "https://payload.example/x") $"isolated ($payload.name) saved-request probe did not interpolate its collection environment"
+            let payload_entries = (
+                ls $install_root
+                | append (ls ($install_root | path join "nu_modules"))
+            )
+            let fixture_dirs = (
+                $payload_entries
+                | where type == dir
+                | where {|entry| ($entry.name | path basename) != "nu_modules" }
+            )
+            let non_nu_files = (
+                $payload_entries
+                | where type == file
+                | where {|entry| not ($entry.name | str ends-with ".nu") }
+            )
+            assert ($fixture_dirs | is-empty) $"isolated ($payload.name) probe left a fixture directory in the installer payload"
+            assert ($non_nu_files | is-empty) $"isolated ($payload.name) probe left a non-.nu file in the installer payload"
 
             for required_module in ["resource-path.nu" "command-error.nu" "curl-capability.nu"] {
                 let module_path = ($install_root | path join "nu_modules" $required_module)

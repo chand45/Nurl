@@ -269,7 +269,7 @@ export def "api help" [] {
   api head <url>                   HEAD request — returns headers only, no body
   api options <url>                OPTIONS request
   api request -m <method> <url>    Generic request \(any HTTP method\)
-  api send <name> -c <coll>        Send saved request; runs response assertions if defined
+  api send <name> [-c <coll>]      Send saved request; omission searches collections
 
 (ansi yellow)Common Request Flags:(ansi reset)
   -H, --headers <record>        Extra request headers, e.g. {"X-Custom": "value"}

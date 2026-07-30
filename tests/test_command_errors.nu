@@ -16,7 +16,7 @@ def command-error-entries [root: string] {
 
 def command-error-snapshot [root: string] {
     command-error-entries $root | each {|path|
-        let path_type = ($path | path type)
+        let path_type = ($path | path type | default "")
         {
             path: ($path | path relative-to $root | str replace --all "\\" "/")
             type: $path_type
@@ -853,6 +853,7 @@ def test-public-command-error-contracts [] {
             {command: "api collection show missing-valid-name", expected: "Collection 'missing-valid-name' not found"}
             {command: "api collection env create jsonplaceholder default", expected: "Environment 'default' already exists in collection 'jsonplaceholder'"}
             {command: "api send missing-valid-name --collection jsonplaceholder --raw --no-history", expected: "Request 'missing-valid-name' not found"}
+            {command: "api send missing-auto-discovered --dry-run --no-history", expected: "Request 'missing-auto-discovered' not found"}
             {command: "api chain show missing-valid-name", expected: "Chain 'missing-valid-name' not found"}
             {command: "api history show missing-valid-name", expected: "History entry 'missing-valid-name' not found"}
             {command: "api history show history-ambiguous", expected: "History ID 'history-ambiguous' is ambiguous (2 matches)"}

@@ -581,6 +581,32 @@ def test-v13-select-scalar-no-crash [] {
     cleanup $tmp
 }
 
+def test-api-send-auto-discovers-collection [] {
+    let tmp = (make-temp-dir "send-auto-discovery")
+    $env.API_ROOT = $tmp
+    let failure = try {
+        api init | ignore
+        api collection create a-nonmatching | ignore
+        api collection create b-target | ignore
+        api collection env create b-target default --activate | ignore
+        api collection env set b-target base_url "https://discovered.example" | ignore
+        api request create discovered-request GET "{{base_url}}/x" --collection b-target | ignore
+
+        let result = (run-command-process $tmp "api send discovered-request --dry-run --no-history")
+        assert equal $result.exit_code 0 "auto-discovered saved request did not exit successfully"
+        assert equal ($result.stderr | str trim) "" "auto-discovered saved request wrote stderr"
+        let output = ($result.stdout | str trim)
+        assert ($output | str starts-with "curl ") $"auto-discovered request did not produce curl output: ($result.stdout)"
+        assert ($output | str contains "https://discovered.example/x") $"auto-discovered request did not use its collection environment: ($result.stdout)"
+        null
+    } catch {|error| $error }
+
+    cleanup $tmp
+    if $failure != null {
+        error make {msg: $failure.msg}
+    }
+}
+
 # ── Suite runner ──────────────────────────────────────────────────────────────
 
 def run-suite-features [net_ok: bool]: nothing -> list<record> {
@@ -591,6 +617,7 @@ def run-suite-features [net_ok: bool]: nothing -> list<record> {
         (run-test "C8: --retries on transient failure (local server)" { test-c8-retries-on-transient-failure })
         (run-test "C10: api options method flag (dry-run offline)" { test-c10-options-method-offline })
         (run-test "C11: api request export prints curl command"   { test-c11-export-prints-curl-command })
+        (run-test "api send auto-discovers collection (offline)"  { test-api-send-auto-discovers-collection })
         (run-test "V9: api auth show with oauth2 token no crash"  { test-v9-auth-show-oauth2-no-crash })
         (run-test "V12: api summary with record headers no crash"  { test-v12-summary-headers-length })
         (run-test "V2: HTML single-line giant body truncates"      { test-v2-html-single-line-truncation })

@@ -96,7 +96,7 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api head | `api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history` | Exit 0, typed status `200`, no body rendering, empty stderr, and no history entry. |
 | api options | `api options https://jsonplaceholder.typicode.com/posts --raw --no-history` | Exit 0 with structured status `204`, empty stderr, and no history write. |
 | api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
-| api send | `api send get-post -c jsonplaceholder -r` | `200`; `{{base_url}}` resolved from the active env. Try every saved request. |
+| api send | `api send get-post -r`; `api send get-post -c jsonplaceholder -r` | Both return `200` with `{{base_url}}` resolved from the discovered/explicit collection's active env. Omission searches collections in listed order; use `-c` when names collide. Try every saved request. |
 
 All HTTP `--output` values are case-sensitive and preflighted before body/auth/network/history
 work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--output raw` returns only
