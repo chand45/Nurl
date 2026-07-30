@@ -31,6 +31,7 @@ let expected_names = [
     "SD-R7: aged, removable same-destination siblings are swept silently"
     "SD-R7: aged, unremovable siblings warn but still commit the requested write"
     "SD-R8: recursive lifecycle (incl. collection copy) leaves zero private artifacts"
+    "SD-R8: collection copy preserves inert retired-name user data"
     "SD-R8: artifact scanner discriminates exact generated patterns"
     "SD-R8: read-only lifecycle against the bundled tracked workspace leaves git status unchanged"
     "SD-R9: Windows long path and case-alias lifecycle"

@@ -1336,32 +1336,56 @@ def test-sd-r8-recursive-lifecycle-no-artifacts [] {
         assert equal $target_def.description $source_def.description "copied collection.nuon description diverged from source"
         assert equal $target_def.version $source_def.version "copied collection.nuon version diverged from source"
         assert (not ($target_def.created_at == $source_def.created_at and $target_def.name == $source_def.name)) "copied collection.nuon did not update created_at/name at all"
+    } { cleanup $tmp }
+}
 
-        api collection create inert-file-source | ignore
-        let inert_file = ($tmp | path join "collections" "inert-file-source" ".nurl-state")
+def test-sd-r8-copy-preserves-inert-retired-names [] {
+    let tmp = (make-temp-dir "sd-r8-copy-parity")
+    sd-finally {
+        let file_root = ($tmp | path join "file-case")
+        mkdir $file_root
+        $env.API_ROOT = $file_root
+        api init | ignore
+        api collection create source | ignore
+        let inert_file = ($file_root | path join "collections" "source" ".nurl-state")
         let inert_file_bytes = 0x[10 20 30 80 fe ff]
         $inert_file_bytes | save $inert_file
-        api collection copy inert-file-source inert-file-copy | ignore
-        let inert_file_copy = ($tmp | path join "collections" "inert-file-copy" ".nurl-state")
+        api collection copy source copied | ignore
+        let inert_file_copy = ($file_root | path join "collections" "copied" ".nurl-state")
         assert equal (open $inert_file_copy --raw | encode base64) ($inert_file_bytes | encode base64) "collection copy filtered a user file named .nurl-state"
-        api collection env create inert-file-copy later | ignore
+        api collection env create copied later | ignore
         assert equal (open $inert_file_copy --raw | encode base64) ($inert_file_bytes | encode base64) "ordinary collection write consumed a user file named .nurl-state"
 
+        let dir_root = ($tmp | path join "directory-case")
+        mkdir $dir_root
+        $env.API_ROOT = $dir_root
+        api init | ignore
+        api collection create source | ignore
+        let source_dir = ($dir_root | path join "collections" "source")
         let inert_dir = ($source_dir | path join ".nurl-state")
+        let setup_dir = ($source_dir | path join ".nurl-state-setup-3f2a1b9c-4d5e-6f70-8a9b-0c1d2e3f4a5b")
+        let lock_file = ($source_dir | path join ".collection.nuon.create.lock")
         mkdir $inert_dir
+        mkdir $setup_dir
         let inert_bytes = 0x[00 01 7f 80 fe ff]
         $inert_bytes | save ($inert_dir | path join "user-payload.bin")
         "user marker bytes" | save ($inert_dir | path join ".secured-v1")
         "ordinary user temp" | save ($inert_dir | path join "user-note.tmp")
+        "inert setup bytes" | save ($setup_dir | path join "payload.txt")
+        "inert lock bytes" | save $lock_file
 
-        api collection copy source-coll inert-copy | ignore
-        let inert_copy = ($tmp | path join "collections" "inert-copy" ".nurl-state")
-        assert equal (open ($inert_copy | path join "user-payload.bin") --raw | encode base64) ($inert_bytes | encode base64) "collection copy filtered or changed inert user binary data"
-        assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "collection copy filtered inert user marker-named data"
+        api collection copy source copied | ignore
+        let copied_dir = ($dir_root | path join "collections" "copied")
+        let inert_copy = ($copied_dir | path join ".nurl-state")
+        assert equal (open ($inert_copy | path join "user-payload.bin") --raw | encode base64) ($inert_bytes | encode base64) "collection copy changed inert directory binary data"
+        assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "collection copy filtered inert marker-named data"
         assert equal (open ($inert_copy | path join "user-note.tmp") --raw) "ordinary user temp" "collection copy filtered an arbitrary user .tmp file"
-        api request update req1 --url "http://example.invalid/updated" --collection inert-copy | ignore
+        assert equal (open ($copied_dir | path join ($setup_dir | path basename) "payload.txt") --raw) "inert setup bytes" "collection copy filtered an inert setup-named directory"
+        assert equal (open ($copied_dir | path join ($lock_file | path basename)) --raw) "inert lock bytes" "collection copy filtered an inert lock-named file"
+        api request create post-copy GET "http://example.invalid/post-copy" --collection copied | ignore
         assert equal (open ($inert_copy | path join ".secured-v1") --raw) "user marker bytes" "ordinary request write interpreted inert marker-named data"
-        assert equal (sd-find-temp-artifacts ($tmp | path join "collections" "inert-copy")) [] "copy left a generated sibling temp"
+        assert equal (open ($copied_dir | path join ($setup_dir | path basename) "payload.txt") --raw) "inert setup bytes" "ordinary request write consumed inert setup-named data"
+        assert equal (open ($copied_dir | path join ($lock_file | path basename)) --raw) "inert lock bytes" "ordinary request write consumed inert lock-named data"
     } { cleanup $tmp }
 }
 
@@ -2309,6 +2333,7 @@ export def run-suite-state-durability []: nothing -> list<record> {
         (run-test "SD-R7: aged, removable same-destination siblings are swept silently" { test-sd-r7-aged-removable-swept-silently })
         (run-test "SD-R7: aged, unremovable siblings warn but still commit the requested write" { test-sd-r7-aged-unremovable-warns-but-commits })
         (run-test "SD-R8: recursive lifecycle (incl. collection copy) leaves zero private artifacts" { test-sd-r8-recursive-lifecycle-no-artifacts })
+        (run-test "SD-R8: collection copy preserves inert retired-name user data" { test-sd-r8-copy-preserves-inert-retired-names })
         (run-test "SD-R8: artifact scanner discriminates exact generated patterns" { test-sd-r8-artifact-scanner-discrimination })
         (run-test "SD-R8: read-only lifecycle against the bundled tracked workspace leaves git status unchanged" { test-sd-r8-readonly-lifecycle-preserves-git-status })
         (run-test "SD-R9: Windows long path and case-alias lifecycle" { test-sd-r9-windows-long-path-and-case-alias })
