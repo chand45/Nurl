@@ -36,6 +36,7 @@ source test_surface_contracts.nu
 source test_secure_header_capture.nu
 source test_transport_failures.nu
 source test_packaging.nu
+source test_state_durability.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ let all_results = (
         ...(run-suite-secure-header-capture)
         ...(run-suite-transport-failures)
         ...(run-suite-packaging)
+        ...(run-suite-state-durability)
     ]
 )
 

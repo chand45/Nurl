@@ -3,9 +3,10 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use resource-path.nu [path-type-safe resolve-under-base]
+use resource-path.nu [open-state-record path-type-safe resolve-under-base]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
+# History entries and indexes retain their existing persistence model.
 
 # Get history directory
 def get-history-dir [] {
@@ -759,7 +760,7 @@ export def "api history save" [
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
     let current_env = if ($config_path | path exists) {
-        (open $config_path).default_environment? | default null
+        (open-state-record $config_path "config.nuon").default_environment? | default null
     } else {
         null
     }
@@ -1083,7 +1084,7 @@ export def "api history clear" [
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
     let retention_days = if ($config_path | path exists) {
-        (open $config_path).history_retention_days? | default 30
+        (open-state-record $config_path "config.nuon").history_retention_days? | default 30
     } else {
         30
     }

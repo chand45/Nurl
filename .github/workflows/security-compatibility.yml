@@ -96,6 +96,40 @@ jobs:
           & $env:NU_EXE --no-config-file tests/run-status-compat.nu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Run durable state persistence suite
+        shell: pwsh
+        run: |
+          Write-Host "DURABILITY_SHA=$env:GITHUB_SHA"
+          $output = @(& $env:NU_EXE --no-config-file tests/run-state-durability.nu 2>&1 | Tee-Object -Variable captured)
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) { exit $exitCode }
+          $text = $captured -join "`n"
+          $runtimeMarker = if ("${{ matrix.nu_version }}" -eq "0.89.0") {
+            "STATE_STALE_RM_089=EXECUTED os=$("${{ runner.os }}".ToLowerInvariant())"
+          } else {
+            "STATE_STALE_STRUCTURED=EXECUTED os=$("${{ runner.os }}".ToLowerInvariant())"
+          }
+          if (-not $text.Contains($runtimeMarker)) { throw "Required durability evidence missing: $runtimeMarker" }
+          if ("${{ runner.os }}" -eq "Linux") {
+            $uid = (& id -u).Trim()
+            Write-Host "DURABILITY_LINUX_UID=$uid"
+            if ($uid -eq "0") { throw "Durability permission fixtures require a non-root Linux runner" }
+            foreach ($marker in @(
+              "STATE_TEST16_POSIX=EXECUTED uid=$uid",
+              "STATE_TEST17C_POSIX=EXECUTED uid=$uid",
+              "STATE_STALE_UNREMOVABLE=EXECUTED os=linux"
+            )) {
+              if (-not $text.Contains($marker)) { throw "Required durability evidence missing: $marker" }
+            }
+            if ("${{ matrix.nu_version }}" -eq "0.89.0") {
+              $fallbackMarker = "STATE_FB_POSIX_089=EXECUTED uid=$uid destination=empty source=retained"
+              if (-not $text.Contains($fallbackMarker)) { throw "Required durability evidence missing: $fallbackMarker" }
+            }
+          } else {
+            $fallbackMarker = "STATE_FB_WINDOWS=EXECUTED runtime=${{ matrix.nu_version }} fixtures=A1,A2,A2b,A3-source,A3-destination,A4 paired=A4-POSIX-destructive-counterexample"
+            if (-not $text.Contains($fallbackMarker)) { throw "Required durability evidence missing: $fallbackMarker" }
+          }
+
   current-suite:
     name: Full suite / Nushell 0.114.1
     runs-on: windows-latest
