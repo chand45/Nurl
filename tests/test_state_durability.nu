@@ -118,7 +118,7 @@ def sd-assert-clean-error [root: string, command: string, expected: string, forb
     assert (sd-stderr-has $result.stderr $expected) $"stderr did not contain '($expected)' for ($command); actual: ($result.stderr)"
     assert equal $result.stderr ($result.stderr | ansi strip) $"stderr contained ANSI escapes for: ($command)"
     for word in $forbidden {
-        assert (not ($result.stderr | str contains $word)) $"stderr leaked forbidden text '($word)' for: ($command)"
+        assert (not ($result.stderr | sd-lower | str contains ($word | sd-lower))) $"stderr leaked forbidden text '($word)' for: ($command)"
     }
     assert equal $after $before $"logical failure mutated the workspace: ($command)"
     $result
@@ -140,7 +140,7 @@ def sd-assert-clean-error-any [root: string, command: string, expected_any: list
     assert $matched $"stderr matched none of ($expected_any | to nuon) for ($command); actual: ($result.stderr)"
     assert equal $result.stderr ($result.stderr | ansi strip) $"stderr contained ANSI escapes for: ($command)"
     for word in $forbidden {
-        assert (not ($result.stderr | str contains $word)) $"stderr leaked forbidden text '($word)' for: ($command)"
+        assert (not ($result.stderr | sd-lower | str contains ($word | sd-lower))) $"stderr leaked forbidden text '($word)' for: ($command)"
     }
     assert equal $after $before $"logical failure mutated the workspace: ($command)"
     $result
@@ -150,6 +150,15 @@ const SD_FORBIDDEN_LEAKAGE = [
     "CLIENT-SECRET-SENTINEL"
     "ACCESS-TOKEN-SENTINEL"
     "SD-SECRET-SENTINEL"
+    "{{{ not : valid : nuon ::: [[["
+    "[1 2 3]"
+    "nu::parser"
+    "nu::shell::outsidespan"
+    "Unexpected end of code"
+    "error when parsing nuon text"
+    "error when loading nuon text"
+    "with `from nuon`"
+    "invalid utf-8 sequence"
     "panicked at"
     "RUST_BACKTRACE"
 ]
@@ -811,6 +820,16 @@ def test-sd-r4-barrier-race-main-parity [] {
         assert (not $duplicate.ok) "sequential duplicate create unexpectedly succeeded"
         assert equal $duplicate.msg "Chain 'sequential' already exists" "sequential duplicate message changed"
         assert equal (open $sequential_path --raw) $sequential_before "sequential duplicate changed existing bytes"
+        let duplicate_process = (run-command-process $tmp "api chain create sequential --description second")
+        assert ($duplicate_process.exit_code != 0) "sequential duplicate subprocess exited zero"
+        assert equal ($duplicate_process.stdout | str trim) "" "sequential duplicate subprocess wrote stdout"
+        assert (sd-stderr-has $duplicate_process.stderr "Chain 'sequential' already exists") "sequential duplicate subprocess lost the stable message"
+        assert equal $duplicate_process.stderr ($duplicate_process.stderr | ansi strip) "sequential duplicate subprocess stderr contained ANSI"
+        for leak in $SD_FORBIDDEN_LEAKAGE {
+            assert (not ($duplicate_process.stderr | sd-lower | str contains ($leak | sd-lower))) $"sequential duplicate subprocess leaked raw/parser content: ($leak)"
+        }
+        assert equal (open $sequential_path --raw) $sequential_before "sequential duplicate subprocess changed existing bytes"
+        assert equal (sd-find-temp-artifacts $tmp) [] "sequential duplicate subprocess left a generated temp artifact"
 
         let n = 8
         let rounds = 5
@@ -840,13 +859,13 @@ let outcome = (try {
             let ready_files = (0..<$n | each {|w| $tmp | path join $"sd-r4-ready-($iter)-($w).txt" })
             let result_files = (0..<$n | each {|w| $tmp | path join $"sd-r4-result-($iter)-($w).txt" })
 
-            mut round_pids = []
+            mut round_workers = []
             for w in 0..<$n {
                 let ready = ($ready_files | get $w)
                 let result = ($result_files | get $w)
                 let tag = $"worker-($w)"
                 let worker = (sd-launch-worker-script $tmp $script [$tmp $name $ready $go_file $result $tag] $"sd-r4-run-($iter)-($w)")
-                $round_pids = ($round_pids | append $worker.pid)
+                $round_workers = ($round_workers | append ($worker | insert worker $w))
                 sd-track-pid $pids_file $worker.pid
             }
 
@@ -856,7 +875,12 @@ let outcome = (try {
             let all_done = (sd-wait-until { $result_files | all {|f| $f | path exists } } 2400)
             assert $all_done $"iteration ($iter): not all ($n) workers finished in time"
 
-            for pid in $round_pids { sd-stop-process-tree $pid $tmp }
+            for worker in $round_workers {
+                sd-stop-process-tree $worker.pid $tmp
+                let child_stderr = if ($worker.stderr_file | path exists) { open $worker.stderr_file --raw } else { "" }
+                assert equal ($child_stderr | str trim) "" $"iteration ($iter) worker ($worker.worker): child emitted raw/underlying stderr"
+                assert equal $child_stderr ($child_stderr | ansi strip) $"iteration ($iter) worker ($worker.worker): child stderr contained ANSI"
+            }
 
             let outcomes = (0..<$n | each {|w|
                 let outcome = ((open ($result_files | get $w) --raw) | from nuon)

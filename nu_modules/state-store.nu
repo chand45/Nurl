@@ -138,11 +138,15 @@ def state-base-type [value: any] {
 
 export def open-state-value [path: string, description: string] {
     let raw = (open $path --raw)
-    try {
-        $raw | from nuon
-    } catch {
+    let parsed = try {
+        {value: ($raw | from nuon), error: null}
+    } catch {|error|
+        {value: null, error: $error}
+    }
+    if $parsed.error != null {
         fail-command $"Could not parse ($description) at '($path)' as NUON."
     }
+    $parsed.value
 }
 
 export def open-state-record [path: string, description: string] {
