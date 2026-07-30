@@ -137,6 +137,7 @@ def state-base-type [value: any] {
 }
 
 export def open-state-value [path: string, description: string] {
+    # Native read failures must propagate unchanged; only NUON parsing is normalized.
     let raw = (open $path --raw)
     let parsed = try {
         {value: ($raw | from nuon), error: null}
