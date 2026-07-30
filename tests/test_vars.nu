@@ -107,6 +107,12 @@ def test-vars-extract-array-index [] {
     assert equal $v 2
 }
 
+def test-vars-extract-heterogeneous-list [] {
+    let data = [{name: "a"} {other: 1}]
+    let v = (api vars extract $data "name")
+    assert equal $v ["a" null]
+}
+
 def test-vars-extract-missing-returns-null [] {
     let data = {response: {body: {id: 1}}}
     let v = (api vars extract $data "response.body.nonexistent")
@@ -134,6 +140,7 @@ def run-suite-vars []: nothing -> list<record> {
         (run-test "extract: top-level field"                          { test-vars-extract-simple-field })
         (run-test "extract: deeply nested field"                      { test-vars-extract-nested-field })
         (run-test "extract: array index access"                       { test-vars-extract-array-index })
+        (run-test "extract: heterogeneous list preserves missing rows" { test-vars-extract-heterogeneous-list })
         (run-test "extract: missing path returns null"                { test-vars-extract-missing-returns-null })
         (run-test "extract: shallow single key"                       { test-vars-extract-shallow })
     ]

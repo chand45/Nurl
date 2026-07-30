@@ -72,7 +72,7 @@ def list-workspace-entries [root: string] {
 
 def workspace-snapshot [root: string] {
     list-workspace-entries $root | each {|path|
-        let path_type = ($path | path type)
+        let path_type = ($path | path type | default "")
         {
             path: ($path | path relative-to $root | str replace --all "\\" "/")
             type: $path_type

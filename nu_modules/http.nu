@@ -655,10 +655,11 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
     }
     let final_args = ($transfer_args | append ["--write-out" $write_out])
     let output = (do { curl ...$final_args $url } | complete)
-    if (($output.stderr | describe) | str starts-with "binary") {
+    let output_stderr = try { $output.stderr } catch { "" }
+    if (($output_stderr | describe) | str starts-with "binary") {
         if $output.exit_code != 0 {
             return {
-                output: ($output | update stderr "")
+                output: ($output | upsert stderr "")
                 metadata: null
             }
         }
@@ -666,7 +667,7 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
     }
     let parsed_result = try {
         {
-            value: (parse-fileless-curl-stderr $output.stderr $token $output.exit_code)
+            value: (parse-fileless-curl-stderr $output_stderr $token $output.exit_code)
             error: null
         }
     } catch {|error|
@@ -675,7 +676,7 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
     if $parsed_result.error != null {
         if $output.exit_code != 0 {
             return {
-                output: ($output | update stderr (unframed-curl-diagnostics $output.stderr))
+                output: ($output | upsert stderr (unframed-curl-diagnostics $output_stderr))
                 metadata: null
             }
         }
@@ -683,7 +684,7 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
     }
     let parsed = $parsed_result.value
     {
-        output: ($output | update stderr $parsed.diagnostics)
+        output: ($output | upsert stderr $parsed.diagnostics)
         metadata: $parsed.metadata
     }
 }
@@ -1646,7 +1647,7 @@ export def "api send" [
         } else {
             # Search in all collections
             let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-            mut found_file = null
+            mut found_file: string = ""
             for discovered_path in $colls {
                 let discovered_name = ($discovered_path | path basename)
                 let coll_path = (resolve-collection-dir $collections_dir $discovered_name)
@@ -1659,7 +1660,7 @@ export def "api send" [
                 }
             }
 
-            if $found_file == null {
+            if ($found_file | is-empty) {
                 fail-command $"Request '($name)' not found"
             }
 

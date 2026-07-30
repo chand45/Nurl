@@ -36,9 +36,11 @@ export def ascii-equal-ignore-case [left: string, right: string]: nothing -> boo
 
 export def optional-get [key: any] {
     let value = $in
-    try {
-        $value | get $key
-    } catch {
-        null
+    let shape = ($value | describe)
+    let is_list = (($shape | str starts-with "list") or ($shape | str starts-with "table"))
+    if $is_list and (($key | describe) == "string") {
+        $value | each --keep-empty {|row| try { $row | get $key } catch { null } }
+    } else {
+        try { $value | get $key } catch { null }
     }
 }

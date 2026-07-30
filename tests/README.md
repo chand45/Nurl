@@ -68,6 +68,7 @@ cleaned up after each test.
 | `run-security.nu` | Current-runtime focused security runner |
 | `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
 | `run-state-durability.nu` | Cross-runtime durability runner with auditable OS-specific executed/skipped evidence |
+| `run-send-compat.nu` | Minimum/current-runtime hermetic `api send` discovery and byte-exact transport runner |
 | `run.nu` | Main runner — sources all suites, prints summary, exits non-zero on failure |
 
 ## Adding a new test
@@ -95,3 +96,6 @@ broader focused security gate on the current runtime, and the durability runner 
 Windows/Ubuntu runtime cells. Linux logs include the non-root uid and explicit execution markers
 for the permission-denied reader fixtures and the Nu 0.89 sticky-directory destructive-fallback
 counterfixture. The full suite and command discovery remain separate current-runtime jobs.
+
+`.github/workflows/send-compatibility.yml` pins verified Nushell 0.89.0 and 0.114.1 artifacts
+for Windows and Linux and runs the hermetic saved-request and byte-exact transport gate.

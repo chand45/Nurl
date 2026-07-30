@@ -103,8 +103,8 @@ api collection env set my-api base_url "http://localhost:3000"
 # Save a request
 api request create get-users GET "{{base_url}}/users" -c my-api
 
-# Send it
-api send get-users -c my-api
+# Send it (the collection is auto-discovered)
+api send get-users
 ```
 
 ---
@@ -516,7 +516,10 @@ api request create create-user POST "{{base_url}}/users" -b { name: "{{name}}" }
 # List requests in a collection
 api request list -c my-api
 
-# Send a saved request
+# Send a saved request (searches collections when -c is omitted)
+api send get-users
+
+# Select the collection explicitly when request names collide
 api send get-users -c my-api
 
 # Send with request-level variable override
@@ -535,6 +538,10 @@ api send RegisterFaultPlan -c my-api --vars { id: 42, name: "primary" }
 api request create auth/login POST "{{base_url}}/auth/login" -c my-api
 api send auth/login -c my-api
 ```
+
+When `-c`/`--collection` is omitted, `api send` searches collections in their listed order and
+uses the first matching request. Specify the collection when the same request name exists in
+more than one collection.
 
 Collection, environment, and saved-chain names must each be one non-empty relative path segment. Spaces, embedded dots, hyphens, case, and Unicode are preserved, but rooted names, dot-only navigation names (`.`, `..`, `...`, and so on), trailing dots or spaces, `:` stream syntax, and `/` or `\` separators are rejected. Saved-request names may use nested relative paths such as `auth/login`; every segment must be non-empty and cannot be dot-only, end in a dot or space, or contain `:`. Request lookups that already accept a `.nuon` suffix continue to do so.
 
