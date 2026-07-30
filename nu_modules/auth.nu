@@ -3,6 +3,7 @@
 
 use command-error.nu [fail-command]
 use string-compat.nu [ascii-upcase optional-get]
+use state-store.nu [open-state-record save-state-replace]
 
 export const SAML_AUTH_SCHEME = "http://schemas.microsoft.com/dsts/saml2-bearer"
 
@@ -37,7 +38,7 @@ def default-secrets [] {
 def load-secrets [] {
     let path = (get-secrets-path)
     if ($path | path exists) {
-        (default-secrets | reject saml_tokens) | merge (open $path)
+        (default-secrets | reject saml_tokens) | merge (open-state-record $path "secrets.nuon")
     } else {
         default-secrets
     }
@@ -46,7 +47,7 @@ def load-secrets [] {
 # Save secrets
 def save-secrets [secrets: record] {
     let path = (get-secrets-path)
-    $secrets | to nuon | save -f $path
+    save-state-replace ($secrets | to nuon) $path
 }
 
 # --- Bearer Token Authentication ---

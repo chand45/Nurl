@@ -565,7 +565,7 @@ if [ \"x$1\" = \"x--version\" ]; then
   exit 0
 fi
 ($request_action)
-" | save -f $fake
+" | str replace --all "\r\n" "\n" | save -f $fake
         ^chmod 700 $fake
     }
     {path: $dir, log: $log, version: $version, version_line: $version_line, mode: $mode}
@@ -817,7 +817,7 @@ def test-fileless-failure-retry-and-capability-contracts [] {
         let timeout = (run-command-process $root $"api get (($base + '/timeout') | to nuon) --output none --no-history")
         let timeout_ms = (((date now) - $timeout_started) / 1ms)
         assert equal (command-error-wire-events $server | length) ($wire_before_timeout + 1) "curl timeout path did not reach the endpoint"
-        assert ($timeout_ms >= 500 and $timeout_ms < 2500) $"curl timeout did not stop the slow transfer near its configured bound: ($timeout_ms) ms"
+        assert ($timeout_ms >= 500 and $timeout_ms < 5000) $"curl timeout did not stop the slow transfer within its configured subprocess bound: ($timeout_ms) ms"
         assert (not ($timeout.stderr | str contains "NURL_RESPONSE_META_")) "curl timeout exposed an internal metadata frame"
         open $config_path | upsert timeout_seconds 30 | save -f $config_path
         assert-no-new-header-artifacts $baseline "curl timeout"

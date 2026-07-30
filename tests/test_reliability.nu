@@ -305,7 +305,7 @@ def test-v1-status-configured-context [] {
     assert equal $serialized.active_collection "jsonplaceholder"
     assert equal $serialized.active_environment "default"
 
-    let human_result = (run-status-command-process $tmp "api status")
+    let human_result = (run-status-command-process $tmp "api status | table -w 120")
     assert equal $human_result.exit_code 0 "human status failed"
     assert equal ($human_result.stderr | str trim) "" "human status wrote stderr"
     assert ($human_result.stdout | str contains "active_collection") "human status omitted active_collection"
@@ -340,7 +340,7 @@ def test-v1-status-invalid-context [] {
     assert equal ($child_version.stdout | str trim) (version | get version) "status tests used a different child runtime"
 
     [] | to nuon | save -f $config_path
-    assert-v1-status-failure $tmp "config.nuon must contain a record"
+    assert-v1-status-failure $tmp "expected a NUON"
 
     {default_collection: 42} | to nuon | save -f $config_path
     assert-v1-status-failure $tmp "default_collection must be a non-empty string or null"
@@ -360,7 +360,7 @@ def test-v1-status-invalid-context [] {
 
     let environment_path = ($tmp | path join "collections" "configured" "environments" "missing.nuon")
     [] | to nuon | save $environment_path
-    assert-v1-status-failure $tmp "must contain a record"
+    assert-v1-status-failure $tmp "expected a NUON"
     cleanup $tmp
 }
 

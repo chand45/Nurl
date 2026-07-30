@@ -5,7 +5,7 @@ use log.nu *
 use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
-use resource-path.nu [path-type-safe validate-resource-name resolve-under-base list-contained-resource-files]
+use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-replacement-temp-path validate-resource-name]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case]
@@ -40,7 +40,7 @@ def get-default-headers [] {
     let config_path = ($root | path join "config.nuon")
 
     if ($config_path | path exists) {
-        (open $config_path).default_headers? | default {}
+        (open-state-record $config_path "config.nuon").default_headers? | default {}
     } else {
         {
             "Content-Type": "application/json"
@@ -55,7 +55,7 @@ def get-timeout [] {
     let config_path = ($root | path join "config.nuon")
 
     if ($config_path | path exists) {
-        (open $config_path).timeout_seconds? | default 30
+        (open-state-record $config_path "config.nuon").timeout_seconds? | default 30
     } else {
         30
     }
@@ -986,9 +986,7 @@ def fail-transport [
 
 def binary-attempt-path [destination: string] {
     let expanded = ($destination | path expand --no-symlink)
-    let parent = ($expanded | path dirname)
-    let name = ($expanded | path basename)
-    $parent | path join $".($name).nurl-(random uuid).tmp"
+    state-replacement-temp-path $expanded
 }
 
 def remove-binary-attempt [path: string] {
@@ -1032,16 +1030,8 @@ def parse-binary-response [metadata: record, attempt_path: string, destination: 
 
 def commit-binary-response [attempt_path: string, destination: string] {
     let destination_path = ($destination | path expand --no-symlink)
-    let commit_error = try {
-        mv -f $attempt_path $destination_path
-        null
-    } catch {|error|
-        $error
-    }
-    if $commit_error != null {
-        remove-binary-attempt $attempt_path
-        fail-command $"Could not replace binary destination '($destination)'"
-    }
+    let intended = (open $attempt_path --raw)
+    commit-state-replace $intended $attempt_path $destination_path
 }
 
 # Execute HTTP request
@@ -1059,7 +1049,7 @@ def execute-request [
     --follow-redirects (-L)          # Follow HTTP redirects (curl -L)
     --retries: int = 0               # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0           # Seconds to wait between attempts
-    --binary-save (-B): string = ""  # Transactionally save binary response bytes
+    --binary-save (-B): string = ""  # Save binary response bytes to a file
     --quiet-binary-status             # Suppress download status in data output modes
 ] {
     # Merge default headers with provided headers
@@ -1394,7 +1384,7 @@ export def "api get" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1425,7 +1415,7 @@ export def "api post" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1470,7 +1460,7 @@ export def "api put" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1513,7 +1503,7 @@ export def "api patch" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1584,7 +1574,7 @@ export def "api request" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1627,7 +1617,7 @@ export def "api send" [
     --include (-I)                       # Include response headers above body
     --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
-    --binary-save (-B): string = ""      # Transactionally save binary response bytes
+    --binary-save (-B): string = ""      # Save binary response bytes to a file
     --retries: int = 0                   # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0               # Seconds between attempts
 ] {
@@ -1681,7 +1671,7 @@ export def "api send" [
         }
 
         # Load request
-        let request = (open $request_path)
+        let request = (open-state-record $request_path $"request '($name)'")
         let headers = ($request.headers? | default {})
         let body = if $has_body_override {
             $resolved_body_override
@@ -1826,7 +1816,7 @@ export def "api request list" [
             let requests_dir = (resolve-requests-dir $collection_dir $collection)
             if ($requests_dir | path exists) {
                 list-request-files $requests_dir | each {|file|
-                    let req = (open $file.path)
+                    let req = (open-state-record $file.path $"request '($file.name)' in collection '($collection)'")
                     {
                         name: ($req.name? | default $file.name)
                         collection: $collection
@@ -1844,7 +1834,7 @@ export def "api request list" [
                 let requests_dir = (resolve-requests-dir $coll_path $coll_name)
                 if ($requests_dir | path exists) {
                     list-request-files $requests_dir | each {|file|
-                        let req = (open $file.path)
+                        let req = (open-state-record $file.path $"request '($file.name)' in collection '($coll_name)'")
                         {
                             name: ($req.name? | default $file.name)
                             collection: $coll_name
@@ -1899,7 +1889,7 @@ export def "api request show" [
         fail-command $"Request '($name)' not found in ($scope)"
     }
 
-    open $request_file
+    open-state-record $request_file $"request '($name)'"
 }
 
 # Update an existing saved request
@@ -1935,7 +1925,7 @@ export def "api request update" [
         null
     }
 
-    mut req = (open $request_file)
+    mut req = (open-state-record $request_file $"request '($name)' in collection '($collection)'")
 
     if $method != null {
         $req = ($req | upsert method $method)
@@ -1962,7 +1952,7 @@ export def "api request update" [
     }
 
     $req = ($req | upsert updated_at (date now | format date "%Y-%m-%dT%H:%M:%SZ"))
-    $req | to nuon --indent 4 | save -f $request_file
+    save-state-replace ($req | to nuon --indent 4) $request_file
 
     print $"(ansi green)Request '($name)' updated in collection '($collection)'(ansi reset)"
 }

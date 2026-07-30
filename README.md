@@ -287,7 +287,7 @@ Requests: 3 successful, 0 failed
 - **Redirect Handling** — `--follow-redirects` to follow HTTP 3xx responses
 - **Retry Logic** — nonnegative `--retries N` makes at most `N+1` attempts, with `--retry-delay` between attempts
 - **HEAD & OPTIONS** — `api head` and `api options` commands
-- **File Saving** — `--save` for text, transactional `--binary-save` for binary downloads
+- **File Saving** — `--save` for text, `--binary-save` for binary downloads
 
 ---
 
@@ -653,6 +653,47 @@ by Nurl managed auth are constructed only after this check, so named query API k
 even with a sensitive parameter name, and history stores the safe caller URL plus auth reference.
 Pre-existing history remains readable without migration, but an old entry with an unsafe URL cannot
 be resent.
+
+### State durability and limits
+
+**Persistence guarantee: best-effort.** Nurl does not guarantee atomic file replacement on
+any supported platform in this release. If a save fails or is interrupted, the previous file
+may be missing, empty, or partially replaced even when Nushell returns success. This applies
+to configuration, variables, secrets, collections, requests, environments, chains,
+history/index files, and downloaded response bodies. Back up `~/.nurl` before upgrades or
+bulk changes.
+
+Nurl stages replacement bytes in a uniquely named sibling temporary file before invoking native
+Nushell publication. A failure proven to occur before publication is attempted cannot target the
+destination, so any previous file is preserved. After publication is attempted, Nurl makes no
+preservation claim. It reads the destination as raw bytes and reports when the observed bytes do not
+match the intended bytes, along with whether the temporary file remains. This final-state check is a
+damage detector, not an atomicity verifier: a fully successful in-place fallback copy can expose
+partial or torn bytes to concurrent readers and still pass, while a legitimate external writer can
+cause a mismatch. Verification-read I/O failures remain native errors.
+
+Invalid NUON and wrong-shaped state fail with an actionable path-specific error; genuine file I/O
+failures remain native errors rather than silently becoming defaults. History entry and index
+persistence are not part of the sibling-temp replacement code in this batch, but remain covered by
+the best-effort disclosure above.
+
+On non-Windows updates to an existing destination, the temporary file copies that file's basic mode
+bits before overwrite. On Windows and for new destinations, it receives the destination directory's
+default create permissions. Nurl does not claim owner-only permissions or preserve per-file Windows
+principals, POSIX extended ACLs, owner, or group. A hard termination can leave
+`.<name>.nurl-<uuid>.tmp` beside the destination, potentially containing credential bytes for
+`secrets.nuon`. Cleanup is opportunistic only on a later write to that exact destination: fresh files
+remain untouched and aged removable files are deleted silently. On runtimes with structured removal
+results, an aged unremovable file produces one plain-text path and manual-removal warning on stderr.
+Nushell 0.89 instead emits its single native removal diagnostic (path, OS detail, and Nurl source
+span; ANSI only on a TTY) with no duplicate Nurl warning. Neither form includes state-file or
+credential content, and the current write continues. The same runtime-qualified stream behavior
+applies if Nurl cannot remove its own temporary file after a failed write or publication. There is no
+background sweeper.
+
+Creating a new same-named resource concurrently retains Nushell `save` behavior from `main`: its
+existence check and file creation are separate, so multiple contenders can report success and the last
+complete payload wins. Nurl does not provide atomic or exclusive create semantics.
 
 ### Request Chaining
 

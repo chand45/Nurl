@@ -226,3 +226,61 @@ request, interpolates variables, or touches `.nuon` files.
   explicit combined failure, and byte-exact restoration when `--all` removes the index before
   reconciliation is rejected. Rebuild fixtures prove valid and invalid prior index bytes remain
   unchanged on unreadable-entry failures.
+
+## 22. Concurrent same-name creates are not exclusive
+- **Symptom:** two processes creating the same new collection, environment, request, or chain can both
+  report success, with one complete contender payload surviving.
+- **Root cause:** supported Nushell versions implement bare `save` as an existence check followed by
+  create-plus-truncate, not atomic create-new (`O_EXCL`/`CREATE_NEW`). This is the same pre-existing
+  TOCTOU behavior as Nurl `main`.
+- **Status:** retained limitation. Nurl preserves the existing advisory duplicate messages for
+  sequential use but does not claim atomic, exclusive, or exactly-one-winner create semantics. Locks,
+  markers, sidecars, retries, and external synchronization are intentionally not added.
+- **Re-check:** run `tests/run-state-durability.nu`. Gates A and B pin the direct bare-save shape and
+  sequential byte preservation; Gate C records winner counts only as characterization while asserting
+  complete parseable output, allowed outcomes, and no artifacts.
+
+## 23. Hard termination can leave a sibling state temporary file
+- **Symptom:** forced termination or power loss between temporary-file creation and publication can
+  leave `.<name>.nurl-<uuid>.tmp` beside a state file. A `secrets.nuon` sibling may contain credential
+  bytes.
+- **Status:** retained limitation. On non-Windows updates to an existing destination, a sibling copies
+  that file's basic mode bits; on Windows and for new destinations, it receives the directory's
+  default create permissions. No owner-only permission is claimed. Cleanup runs only before a later
+  write to the exact destination: fresh files remain untouched and aged removable files are deleted
+  silently. Structured-removal runtimes produce one plain-text path and manual-removal warning for an
+  unremovable file. Nushell 0.89 emits its single native removal diagnostic instead (path, OS detail,
+  Nurl source span, and ANSI only on a TTY), without a duplicate Nurl warning. Neither stream includes
+  state-file or credential content, and the current write continues. There is no global background
+  sweeper, so an orphan may require manual removal.
+- **Re-check:** run the stale sibling policy and PATH-empty lifecycle cases in
+  `tests/run-state-durability.nu`.
+
+## 24. Native replacement publication is best-effort on every supported platform
+
+**Persistence guarantee: best-effort.** Nurl does not guarantee atomic file replacement on
+any supported platform in this release. If a save fails or is interrupted, the previous file
+may be missing, empty, or partially replaced even when Nushell returns success. This applies
+to configuration, variables, secrets, collections, requests, environments, chains,
+history/index files, and downloaded response bodies. Back up `~/.nurl` before upgrades or
+bulk changes.
+
+- **Root cause:** supported Nushell `mv -f` implementations can fall back from rename to copying
+  or removing the destination. Even when the fallback fully succeeds, publication was an
+  in-place overwrite, not an atomic swap. A concurrent reader can observe partial or torn bytes
+  mid-copy even though the final bytes are correct and Nurl reports success — no error, no
+  diagnostic, and the postcondition check passes. Additionally, Nu 0.89 self-renders `mv`
+  failures and returns process exit 0, so a failed publication is not detectable from exit
+  status.
+- **Detection limit:** replacement paths compare the destination's raw bytes with the intended
+  bytes after native publication. This is a final-byte damage detector, not an atomicity
+  verifier. It can miss a completed in-place fallback that exposed torn reads, and it can report
+  a mismatch after a legitimate external writer wins a race. A mismatch therefore states only
+  the observed final-byte outcome and temporary-file cleanup state; it does not identify
+  corruption, atomicity, or what happened to prior bytes. Verification-read I/O errors propagate
+  unchanged.
+- **Message boundary:** a strong previous-file preservation message is used only when failure is
+  proven before native publication starts. Once `mv` is invoked, no platform or runtime is
+  treated as a safe publication path and no preservation claim is made.
+- **Re-check:** run the capability, persistence-inventory, forced-fallback, final-state detector,
+  and non-root POSIX cases in `tests/run-state-durability.nu`.

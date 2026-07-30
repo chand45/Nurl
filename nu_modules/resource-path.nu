@@ -1,5 +1,7 @@
 # Internal resource identifier validation and path containment.
 
+export use state-store.nu [commit-state-replace open-state-record open-state-record-or-default open-state-value save-state-replace state-base-type state-persistence-contract state-replacement-temp-path verify-state-publication]
+
 export def path-type-safe [path: string]: nothing -> string {
     [$path] | path type | first | default ""
 }
