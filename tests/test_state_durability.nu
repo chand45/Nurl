@@ -1393,6 +1393,7 @@ def test-sd-r8-artifact-scanner-discrimination [] {
     let tmp = (make-temp-dir "sd-r8-scanner")
     sd-finally {
         let uuid = "3f2a1b9c-4d5e-6f70-8a9b-0c1d2e3f4a5b"
+        let absent_destination = ($tmp | path join "mychain.nuon")
         let exact_lock = ($tmp | path join ".mychain.nuon.create.lock")
         let unrelated_lock = ($tmp | path join ".build.create.lock")
         let canonical_temp = ($tmp | path join $".secrets.nuon.nurl-($uuid).tmp")
@@ -1414,8 +1415,10 @@ def test-sd-r8-artifact-scanner-discrimination [] {
         }
         "inside" | save ($retired_dir | path join ".secured-v1")
 
+        assert (not ($absent_destination | path exists)) "scanner self-test destination must remain unpublished"
         let expected = [{dir: $tmp, basenames: ["mychain.nuon"]}]
         let found = (sd-find-retired-artifacts $tmp $expected)
+        assert (not ($absent_destination | path exists)) "scanner coupled lock detection to physical destination presence"
         for expected_path in [$exact_lock $canonical_temp $setup $retired_dir ($retired_dir | path join ".secured-v1")] {
             assert ($expected_path in $found) $"artifact scanner missed exact fixture: ($expected_path)"
         }
