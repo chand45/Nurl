@@ -83,7 +83,7 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api auth oauth2 delete | `api auth oauth2 delete tmpcred` | Removed. |
 | api auth show | `api auth bearer set tmpcred abc; api auth show --full; api auth bearer delete tmpcred` | Shows credential type/status and the isolated `tmpcred` value; never run `--full` against real secrets in captured logs. |
 | api auth list | `api auth list` | Lists configured credentials by type. |
-| **Applied auth** | add named bearer/basic/API-key/OAuth2 refs to `api get`/`api send`; repeat with `--dry-run` | Real requests carry resolved wire auth. Caller URLs with userinfo or exact sensitive query/fragment names fail after interpolation but before auth/network work; exact `password`/`passwd`/`pwd` names are included without substring matching. Query API-key names and values added by managed auth are RFC 3986 query-component encoded exactly once, including an explicitly configured sensitive name. Preview masks every credential and password-boundary header, preserves the encoded API-key name, and does not acquire OAuth tokens. OAuth rejects every non-2xx response and malformed 2xx token record before use/persistence; failures expose only a safe code/status, never provider body fields. |
+| **Applied auth** | add named bearer/basic/API-key/OAuth2 refs to `api get`/`api send`; repeat with `--dry-run`; try `-a {type: bearer, token_ref: tmpcred} -H {authorization: Custom}` | Real requests carry resolved wire auth. An explicit header that ASCII-case-insensitively collides with managed `Authorization` or a header-mode API key fails before token acquisition, network, history, or output-file work; query API keys do not conflict. Caller URLs with userinfo or exact sensitive query/fragment names fail after interpolation but before auth/network work; exact `password`/`passwd`/`pwd` names are included without substring matching. Query API-key names and values added by managed auth are RFC 3986 query-component encoded exactly once, including an explicitly configured sensitive name. Preview masks every credential and password-boundary header, preserves the encoded API-key name, and does not acquire OAuth tokens. OAuth rejects every non-2xx response and malformed 2xx token record before use/persistence; failures expose only a safe code/status, never provider body fields. |
 
 ## requests
 | Command | Invocation | Expected |
@@ -97,6 +97,14 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api options | `api options https://jsonplaceholder.typicode.com/posts --raw --no-history` | Exit 0 with structured status `204`, empty stderr, and no history write. |
 | api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
 | api send | `api send get-post -r`; `api send get-post -c jsonplaceholder -r` | Both return `200` with `{{base_url}}` resolved from the discovered/explicit collection's active env. Omission searches collections in listed order; use `-c` when names collide. Try every saved request. |
+
+Request header names are ASCII-case-insensitive on every transferring surface. A later layer
+overrides a same-named earlier layer with its spelling/value while retaining first-appearance
+position: defaults, stored request/history/chain, caller `-H`, form `Content-Type`, managed auth.
+No wire request, `--raw` request record, history entry, or preview may contain two folded-equal
+names. A single ambiguous record fails cleanly; legacy duplicate-case history remains readable,
+but resend requires `--headers`. Form requests always carry exactly one
+`Content-Type: application/x-www-form-urlencoded`.
 
 All HTTP `--output` values are case-sensitive and preflighted before body/auth/network/history
 work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--output raw` returns only
@@ -119,7 +127,7 @@ Full lifecycle on a temp request, cleaned up at the end.
 | api request show | `api request show tmp-req -c jsonplaceholder` | Prints method/url/headers. |
 | api request update | `api request update tmp-req --method POST -c jsonplaceholder` | Method now `POST`. |
 | api request delete | `api request delete tmp-req -c jsonplaceholder --force` | Removed. |
-| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is one interpolated, credential-masked curl line, stderr is empty, and neither network, OAuth, history, nor saved state is touched. |
+| api request export | `api request export get-post -c jsonplaceholder` | Exit 0; stdout is one interpolated, credential-masked curl line whose deduplicated headers and body bytes match execution, stderr is empty, and neither network, OAuth, history, nor saved state is touched. |
 
 ## history
 | Command | Invocation | Expected |

@@ -272,8 +272,8 @@ export def "api help" [] {
   api send <name> [-c <coll>]      Send saved request; omission searches collections
 
 (ansi yellow)Common Request Flags:(ansi reset)
-  -H, --headers <record>        Extra request headers, e.g. {"X-Custom": "value"}
-  -a, --auth <record>           Inline auth spec \(see Authentication section above\)
+  -H, --headers <record>        Extra headers; override same-named defaults case-insensitively
+  -a, --auth <record>           Inline auth spec; conflicting auth headers are rejected
   -o, --output <mode>           Output mode \(default: pretty\)
                                   pretty    print colored status+body, return null  [interactive]
                                   status    return HTTP status int, no print        [scripting]
@@ -293,7 +293,7 @@ export def "api help" [] {
   --retries <n>                 Retry count on 5xx/connection failure \(default: 0\)
   --retry-delay <s>             Seconds between retries \(default: 0\)
   --no-history                  Skip saving this request to history
-  -d, --dry-run                 Print the curl command without executing it
+  -d, --dry-run                 Print masked curl; resolved headers/body match execution
   --debug                       Show full curl verbose output for debugging
 
 (ansi yellow)Body Flags \(POST / PUT / PATCH / request\):(ansi reset)

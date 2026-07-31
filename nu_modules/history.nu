@@ -19,6 +19,17 @@ def get-history-index-path [] {
     (get-history-dir) | path join "index.nuon"
 }
 
+def assert-resend-header-names [id: string, headers: record] {
+    mut observed = []
+    for name in ($headers | columns) {
+        let folded = ($name | ascii-upcase)
+        if $folded in $observed {
+            fail-command $"History entry '($id)' contains ambiguous request headers; pass --headers to replace them before resending."
+        }
+        $observed = ($observed | append $folded)
+    }
+}
+
 # Parse legacy second-only and fractional RFC3339 timestamps to nanoseconds.
 # Invalid timestamps sort last but remain available to history readers.
 def history-timestamp-instant [timestamp: any] {
@@ -938,6 +949,9 @@ export def "api history resend" [
         fail-command $"History entry '($id)' contains redacted sensitive headers; pass --headers to resend it"
     }
     let effective_headers = if $explicit_headers { $headers } else { $entry.request.headers }
+    if not $explicit_headers {
+        assert-resend-header-names $id $effective_headers
+    }
 
     require-curl-capability --dry-run=$dry_run
 

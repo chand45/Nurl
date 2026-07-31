@@ -761,6 +761,18 @@ Global settings are stored in `config.nuon`:
 collection's `active_environment`; both fields are `null` when no default collection is configured.
 Configured collection or environment references must exist.
 
+Request header names follow RFC 9110's ASCII case-insensitive identity rule. Layers are applied in
+this order: configuration defaults, stored request/history/chain headers, caller `-H`, form
+`Content-Type`, then managed `-a` authentication. A later layer keeps its spelling and value while
+the header retains its first position. A record containing case variants such as `Accept` and
+`accept` is rejected as ambiguous.
+
+Managed bearer, SAML, OAuth2, and Basic authentication reserve `Authorization`; header-mode API
+keys reserve their configured header. Supplying the same header through `-H` is an error rather
+than silently dropping either value. Query-mode API keys do not conflict with request headers.
+`--dry-run` and `api request export` print the deduplicated headers and resolved body exactly as
+execution sends them, with credentials still masked.
+
 ---
 
 ## Project Structure

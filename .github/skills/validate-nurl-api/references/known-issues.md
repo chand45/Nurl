@@ -296,3 +296,25 @@ bulk changes.
   treated as a safe publication path and no preservation claim is made.
 - **Re-check:** run the capability, persistence-inventory, forced-fallback, final-state detector,
   and non-root POSIX cases in `tests/run-state-durability.nu`.
+
+## 26. FIXED: Request header names were merged case-sensitively
+- **Old symptom:** a caller could supply `content-type` or `authorization` alongside a differently
+  cased default or managed-auth header. Curl sent both variants, and common servers kept, joined, or
+  discarded the wrong value. Basic auth could disappear entirely.
+- **Fix:** request layers now compare names using ASCII case folding. The later layer supplies
+  spelling/value while first-appearance position is retained. Ambiguous names within one record
+  fail cleanly. Managed-auth collisions fail before OAuth, network, history, files, or state
+  mutation. Form encoding replaces every `Content-Type` case variant.
+- **Compatibility:** legacy duplicate-case history files are not migrated and remain readable.
+  Resend fails with the existing `--headers` replacement path.
+- **Re-check:** run `tests/test_request_headers.nu` through `tests/run.nu`, plus
+  `tests/run-header-compat.nu` on Nushell 0.89.
+
+## 27. FIXED: Dry-run and saved-request export re-encoded non-JSON bodies
+- **Old symptom:** display generation parsed the already-resolved body with lenient `from json` and
+  serialized it again, so form, XML, plain-text, and other scalar bodies gained JSON quotes.
+- **Fix:** display generation now passes the resolved body directly to the curl renderer. Shell
+  quoting and credential masking are unchanged.
+- **Re-check:** `tests/test_request_headers.nu` executes each emitted curl command and compares its
+  headers/body with the corresponding Nurl execution, including form, XML, plain text, body files,
+  records, pre-serialized JSON, single quotes, and `api request export`.
