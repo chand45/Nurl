@@ -55,8 +55,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'opaque_url': 'T{{late}}/Q{{c}}',
                 'number': 2,
                 'flag': True,
+                'none': None,
                 'items': [1, 'L{{late}}'],
                 'record': {'inner': 'R{{c}}'},
+                'sentinel': '__NURL_CHAIN_OPAQUE_fake__',
+                'duplicate_a': 'D{{late}}',
+                'duplicate_b': 'D{{late}}',
             })
         else:
             self.emit({'ok': True})
@@ -714,9 +718,14 @@ def test-request-body-chain-single-pass [] {
                     opaque_url: "body.opaque_url"
                     opaque_number: "body.number"
                     opaque_flag: "body.flag"
+                    opaque_none: "body.none"
                     opaque_items: "body.items"
                     opaque_record: "body.record"
+                    opaque_sentinel: "body.sentinel"
+                    opaque_duplicate_a: "body.duplicate_a"
+                    opaque_duplicate_b: "body.duplicate_b"
                     unused_record: "body"
+                    missing_extract: "body.does_not_exist"
                 }
             }
             {
@@ -763,8 +772,12 @@ def test-request-body-chain-single-pass [] {
                     content: {
                         number: "{{opaque_number}}"
                         flag: "{{opaque_flag}}"
+                        none: "{{opaque_none}}"
                         items: "{{opaque_items}}"
                         record: "{{opaque_record}}"
+                        sentinel: "{{opaque_sentinel}}"
+                        duplicate_a: "{{opaque_duplicate_a}}"
+                        duplicate_b: "{{opaque_duplicate_b}}"
                         trusted: "{{a}}/{{b}}"
                     }
                 }
@@ -791,9 +804,17 @@ def test-request-body-chain-single-pass [] {
         let typed_body = (request-body-event $server "/chain-typed").body | from json
         assert equal $typed_body.number 2 "Opaque numeric extract became a string"
         assert equal $typed_body.flag true "Opaque boolean extract lost its type"
+        assert ("none" in ($typed_body | columns)) "Opaque null extract was dropped"
+        assert ($typed_body.none == null) "Opaque null extract did not remain null"
         assert equal $typed_body.items [1 "L{{late}}"] "Opaque list extract lost type or expanded nested braces"
         assert equal $typed_body.record {inner: "R{{c}}"} "Opaque record extract lost type or expanded nested braces"
+        assert equal $typed_body.sentinel "__NURL_CHAIN_OPAQUE_fake__" "Sentinel-like attacker text aliased an internal token"
+        assert equal $typed_body.duplicate_a "D{{late}}"
+        assert equal $typed_body.duplicate_b "D{{late}}" "Identical extracted values confused token restoration"
         assert equal $typed_body.trusted "C/B" "Trusted placeholders beside opaque nodes did not resolve"
+        assert ("opaque_none" in ($chain.context | columns)) "Null extract was not retained in chain context"
+        assert ($chain.context.opaque_none == null)
+        assert ("missing_extract" not-in ($chain.context | columns)) "Missing extract was incorrectly stored as null"
 
         let chain_path = ($root | path join "chains" "use-binding.nuon")
         if not (($root | path join "chains") | path exists) {
@@ -816,6 +837,8 @@ def test-request-body-chain-single-pass [] {
         assert equal $typed_exec_body.items [1 "L{{late}}"]
         assert equal $typed_exec_body.record {inner: "R{{c}}"}
         assert equal $typed_exec_body.number 2
+        assert ($typed_exec_body.none == null)
+        assert equal $typed_exec_body.sentinel "__NURL_CHAIN_OPAQUE_fake__"
 
         let invalid_steps = [
             {

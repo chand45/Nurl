@@ -88,6 +88,63 @@ def protect-chain-context [context: record] {
     }
 }
 
+def extract-path-step [current: any, part: any] {
+    if $current == null {
+        return {found: false, value: null}
+    }
+    let current_type = (state-base-type $current)
+    if $current_type == "record" {
+        let key = ($part | into string)
+        if $key not-in ($current | columns) {
+            return {found: false, value: null}
+        }
+        return {found: true, value: ($current | get $key)}
+    }
+    if $current_type in ["list" "table"] {
+        if ($part | describe) == "int" {
+            if $part < 0 or $part >= ($current | length) {
+                return {found: false, value: null}
+            }
+            return {found: true, value: ($current | get $part)}
+        }
+        let key = ($part | into string)
+        let present = ($current | any {|row|
+            ((state-base-type $row) == "record") and ($key in ($row | columns))
+        })
+        if not $present {
+            return {found: false, value: null}
+        }
+        return {found: true, value: ($current | optional-get $key)}
+    }
+    {found: false, value: null}
+}
+
+def extract-path-result [data: any, path: string] {
+    mut current = $data
+    for part in ($path | split row ".") {
+        let bracket = ($part | parse -r '^([^\[]+)\[(\d+)\]$')
+        if not ($bracket | is-empty) {
+            let field_result = (extract-path-step $current $bracket.0.capture0)
+            if not $field_result.found {
+                return $field_result
+            }
+            let index_result = (extract-path-step $field_result.value ($bracket.0.capture1 | into int))
+            if not $index_result.found {
+                return $index_result
+            }
+            $current = $index_result.value
+        } else {
+            let key = if $part =~ '^\d+$' { $part | into int } else { $part }
+            let result = (extract-path-step $current $key)
+            if not $result.found {
+                return $result
+            }
+            $current = $result.value
+        }
+    }
+    {found: true, value: $current}
+}
+
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
@@ -267,11 +324,11 @@ export def "api chain run" [
 
         if $extract_config != null {
             for item in ($extract_config | transpose key path) {
-                let value = (api vars extract $result.response $item.path)
-                if $value != null {
-                    $context = ($context | upsert $item.key $value)
+                let extracted = (extract-path-result $result.response $item.path)
+                if $extracted.found {
+                    $context = ($context | upsert $item.key $extracted.value)
                     if not $quiet {
-                        print $"  (ansi dark_gray)Extracted: ($item.key) = ($value | to nuon)(ansi reset)"
+                        print $"  (ansi dark_gray)Extracted: ($item.key) = ($extracted.value | to nuon)(ansi reset)"
                     }
                 }
             }
