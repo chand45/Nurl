@@ -758,6 +758,53 @@ def test-request-body-chain-single-pass [] {
             request-body-events $server | where path == "/chain-raw-large" | get body | each {|body| $body | str length }
         ) [40000 40000] "api chain run/exec did not preserve large scalar bodies"
 
+        let host = $"127.0.0.1:($server.port)"
+        let trusted_use = {
+            base: "http://{{host}}"
+            host: $host
+            id: "{{c}}"
+            a: "{{c}}"
+            b: "B"
+            c: "C"
+        }
+        open $config_path
+        | update default_headers {"X-Default-Trusted": "{{a}}/{{b}}"}
+        | to nuon --indent 4
+        | save -f $config_path
+        let trusted_steps = [
+            {
+                method: POST
+                url: "{{base}}/trusted-text/{{id}}"
+                use: $trusted_use
+                headers: {"X-Provenance": "{{a}}/{{b}}"}
+                body: "{{a}}/{{b}}"
+            }
+            {
+                method: POST
+                url: "{{base}}/trusted-structured/{{id}}"
+                use: $trusted_use
+                headers: {"X-Provenance": "{{a}}/{{b}}"}
+                body: {type: "json", content: {value: "{{a}}/{{b}}"}}
+            }
+        ]
+        let trusted_run = (api chain run $trusted_steps --quiet)
+        assert equal ($trusted_run.results | get status) [200 200] "Trusted layered chain run did not return [200, 200]"
+        let trusted_text_event = (request-body-event $server "/trusted-text/C")
+        assert equal ($trusted_text_event.headers | where name == "X-Provenance" | first | get value) "C/B"
+        assert equal ($trusted_text_event.headers | where name == "X-Default-Trusted" | first | get value) "C/B"
+        assert equal $trusted_text_event.body "C/B"
+        let trusted_structured_event = (request-body-event $server "/trusted-structured/C")
+        assert equal ($trusted_structured_event.headers | where name == "X-Provenance" | first | get value) "C/B"
+        assert equal ($trusted_structured_event.headers | where name == "X-Default-Trusted" | first | get value) "C/B"
+        assert equal (($trusted_structured_event.body | from json).value) "C/B"
+
+        let trusted_chain_path = ($root | path join "chains" "trusted-validation.nuon")
+        {name: "trusted-validation", steps: $trusted_steps} | to nuon --indent 4 | save -f $trusted_chain_path
+        let trusted_exec = (api chain exec trusted-validation --quiet)
+        assert equal ($trusted_exec.results | get status) [200 200] "Trusted layered chain exec did not return [200, 200]"
+        assert equal (request-body-events $server | where path == "/trusted-text/C" | length) 2
+        assert equal (request-body-events $server | where path == "/trusted-structured/C" | length) 2
+
         api post $"($base)/direct-header" -H {"X-Direct": "{{late}}"} -b {ok: true} --raw --no-history | ignore
         assert equal ((request-body-event $server "/direct-header").headers | where name == "X-Direct" | first | get value) "GLOBALLEAK" "Ordinary request header interpolation changed"
         assert equal (api vars interpolate "{{late}}/{{late}}") "GLOBALLEAK/GLOBALLEAK" "Repeated placeholders were not all restored"
