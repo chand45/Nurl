@@ -29,6 +29,9 @@ nu --no-config-file tests/run-security-compat.nu
 # Deterministic Nushell 0.89 request-header identity and preview subset
 nu --no-config-file tests/run-header-compat.nu
 
+# Structured request-body serialization, replay, chain, and injection regressions
+nu --no-config-file tests/run-body-compat.nu
+
 # Best-effort native state replacement, final-state detector, reader, lifecycle, and compatibility gates
 nu --no-config-file tests/run-state-durability.nu
 ```
@@ -69,9 +72,11 @@ cleaned up after each test.
 | `test_secure_header_capture.nu` | Fileless curl response parsing, sensitive live response masking, trailers, redirects, and transport artifacts |
 | `test_state_durability.nu` | Best-effort sibling-temp replacement, raw-byte final-state detection, Windows sharing/byte-lock and POSIX sticky-directory fallback characterization, observational concurrent-reader evidence, persistence inventory, main-parity creates, fail-closed readers, runtime-qualified stale cleanup streams, copy fidelity, path aliases, and chain shapes |
 | `test_request_headers.nu` | ASCII case-insensitive request-header identity, stable precedence/order, form replacement, managed-auth and ambiguous-record preflights, legacy history, and preview/export wire fidelity |
+| `test_request_body.nu` | Structured JSON/form interpolation boundaries, null preservation, body-file injection safety, table replay/chains, single-pass headers, preview/export fidelity, and credential masking |
 | `run-security.nu` | Current-runtime focused security runner |
 | `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
 | `run-header-compat.nu` | Minimum-runtime deterministic request-header dedup, form, auth-collision, and preview subset |
+| `run-body-compat.nu` | Minimum/current-runtime structured body, replay, chain, and injection regression runner |
 | `run-state-durability.nu` | Cross-runtime durability runner with auditable OS-specific executed/skipped evidence |
 | `run-send-compat.nu` | Minimum/current-runtime hermetic `api send` discovery and byte-exact transport runner |
 | `run.nu` | Main runner — sources all suites, prints summary, exits non-zero on failure |
@@ -96,7 +101,7 @@ if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
 ```
 
 `.github/workflows/security-compatibility.yml` pins official Nushell release artifacts and
-checksums for Windows and Linux. It runs the minimum-compatible security and request-header gates
+checksums for Windows and Linux. It runs the minimum-compatible security, request-header, and request-body gates
 on 0.89.0, the broader focused security gate on the current runtime, and the durability runner on
 all four Windows/Ubuntu runtime cells. Linux logs include the non-root uid and explicit execution
 markers for the permission-denied reader fixtures and the Nu 0.89 sticky-directory

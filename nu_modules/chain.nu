@@ -1,7 +1,7 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured]
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured-json]
 use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
@@ -122,9 +122,10 @@ export def "api chain run" [
         let step_vars = ($step | optional-get "use" | default {})
         let all_vars = ($context | merge $step_vars)
 
-        # Interpolate URL with collection context
+        # Resolve the step context once so extracted values are interpolated exactly once.
+        let resolved_vars = (api vars get-merged -c $step_collection -v $all_vars)
         let request_url = ($request_config | get "url")
-        let url = (api vars interpolate $request_url -v $all_vars -c $step_collection)
+        let url = (api vars interpolate $request_url -e $resolved_vars --resolved --single-pass)
         validate-secret-safe-url $url | ignore
 
         if not $quiet {
@@ -135,23 +136,33 @@ export def "api chain run" [
         # Interpolate headers with collection context
         let request_headers = ($request_config | optional-get "headers")
         let headers = if $request_headers != null {
-            api vars interpolate-record $request_headers -v $all_vars -c $step_collection
+            api vars interpolate-record $request_headers -e $resolved_vars --resolved --single-pass
         } else {
             {}
         }
 
         # Resolve structured values before compact serialization, then send the encoded bytes once.
         let request_body = ($request_config | optional-get "body")
-        let body_content = if $request_body == null { null } else { $request_body | optional-get "content" }
-        let body = if $body_content != null {
+        let has_body_content = $request_body != null and ("content" in ($request_body | columns))
+        let body_content = if $has_body_content { $request_body | get "content" } else { null }
+        let body_type_hint = if $request_body == null { null } else { $request_body | optional-get "type" }
+        let body_resolution = if $has_body_content {
             let body_type = (state-base-type $body_content)
-            if $body_type in ["record" "list"] {
-                interpolate-structured $body_content -v $all_vars -c $step_collection | to json --raw
+            if $body_type_hint == "json" or $body_type in ["record" "list" "table"] {
+                let resolved_body = (interpolate-structured-json $body_content -e $resolved_vars --resolved)
+                let resolved_type = (state-base-type $resolved_body)
+                {
+                    content: (if $resolved_type == "string" { $resolved_body | to json } else { $resolved_body | to json --raw })
+                    structured_string: ($resolved_type == "string")
+                }
             } else {
-                api vars interpolate ($body_content | into string) -v $all_vars -c $step_collection
+                {
+                    content: (api vars interpolate ($body_content | into string) -e $resolved_vars --resolved --single-pass)
+                    structured_string: false
+                }
             }
         } else {
-            ""
+            {content: "", structured_string: false}
         }
 
         # Get auth config
@@ -166,13 +177,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (execute-encoded-request $method $url $body $headers $auth)
+                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, single_pass: true} --structured-string=$body_resolution.structured_string)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (execute-encoded-request $method $url $body $headers $auth)
+                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, single_pass: true} --structured-string=$body_resolution.structured_string)
                     error: null
                 }
             } catch {|error|

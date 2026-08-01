@@ -968,8 +968,8 @@ export def "api history resend" [
         {}
     }
 
-    # Execute request — pass body as record (api request handles to-json internally)
-    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --raw=$raw --dry-run=$dry_run
+    # Persisted URL, headers, and body are already resolved request values.
+    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --no-interpolate --raw=$raw --dry-run=$dry_run
 }
 
 # Search history — uses index for URL/method; falls back to files for body search

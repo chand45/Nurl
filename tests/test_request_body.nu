@@ -48,6 +48,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/ready':
             self.emit({'ready': True})
+        elif self.path == '/chain-source':
+            self.emit({'next': 'ZZ{{late}}ZZ'})
         else:
             self.emit({'ok': True})
 
@@ -283,6 +285,69 @@ def test-request-body-json-boundary [] {
         assert equal ((request-body-event $server "/file").body | from json | get value) "string-body"
         assert equal $file_result.request.body.value "string-body"
 
+        api vars set inj 'x","admin":true,"other":"y' | ignore
+        let malicious_file = ($root | path join "malicious.json")
+        '{"v":"{{inj}}"}' | save -f $malicious_file
+        let malicious_result = (api post $"($base)/file-injection" --body-file $malicious_file --raw --no-history)
+        let malicious_wire = ((request-body-event $server "/file-injection").body | from json)
+        assert equal ($malicious_wire | columns) ["v"] "JSON body-file interpolation injected a field"
+        assert equal $malicious_wire.v 'x","admin":true,"other":"y'
+        assert equal $malicious_result.request.body $malicious_wire
+
+        api vars set payload file-text | ignore
+        let text_file = ($root | path join "body.txt")
+        'raw={{payload}}&x=1' | save -f $text_file
+        let text_file_result = (api post $"($base)/file-text" --body-file $text_file --raw --no-history)
+        assert equal (request-body-event $server "/file-text").body "raw=file-text&x=1"
+        assert equal $text_file_result.request.body "raw=file-text&x=1"
+
+        let json_string_file = ($root | path join "body-string.json")
+        '"{{payload}}"' | save -f $json_string_file
+        api post $"($base)/file-json-string" --body-file $json_string_file --raw --no-history | ignore
+        assert equal (request-body-event $server "/file-json-string").body '"file-text"'
+
+        let json_null_file = ($root | path join "body-null.json")
+        "null" | save -f $json_null_file
+        let before_null_history = (request-body-history-ids $root)
+        api post $"($base)/file-json-null" --body-file $json_null_file --raw | ignore
+        let null_history_id = (request-body-new-history-id $root $before_null_history)
+        assert equal (request-body-event $server "/file-json-null").body "null"
+        assert equal (api history get $null_history_id).request.body "null" "JSON null was indistinguishable from an absent history body"
+        api history resend $null_history_id --raw | ignore
+        assert equal (request-body-events $server | where path == "/file-json-null" | get body) ["null" "null"] "JSON null history replay lost its body"
+
+        for case in [
+            {name: "object", content: "{}"}
+            {name: "array", content: "[]"}
+        ] {
+            let empty_file = ($root | path join $"body-empty-($case.name).json")
+            $case.content | save -f $empty_file
+            let before_empty_history = (request-body-history-ids $root)
+            api post $"($base)/file-json-empty-($case.name)" --body-file $empty_file --raw | ignore
+            let empty_history_id = (request-body-new-history-id $root $before_empty_history)
+            api history resend $empty_history_id --raw | ignore
+            assert equal (
+                request-body-events $server
+                | where path == $"/file-json-empty-($case.name)"
+                | get body
+            ) [$case.content $case.content] $"Empty JSON ($case.name) history replay lost its body"
+        }
+
+        let nested_nulls = {items: [1, null, 3], keep: null}
+        let nested_null_result = (api post $"($base)/null-nested" -b $nested_nulls --raw --no-history)
+        let nested_null_wire = ((request-body-event $server "/null-nested").body | from json)
+        assert equal ($nested_null_wire.items | length) 3 "Nested list lost a null element"
+        assert ($nested_null_wire.items.1 == null) "Nested list changed its null element"
+        assert ("keep" in ($nested_null_wire | columns)) "Record lost its null field"
+        assert ($nested_null_wire.keep == null) "Record null field changed"
+        assert equal $nested_null_result.request.body $nested_null_wire
+
+        let top_null_result = (api post $"($base)/null-top" -b [1, null, 3] --raw --no-history)
+        let top_null_wire = ((request-body-event $server "/null-top").body | from json)
+        assert equal ($top_null_wire | length) 3 "Top-level list lost a null element"
+        assert ($top_null_wire.1 == null) "Top-level list changed its null element"
+        assert equal $top_null_result.request.body $top_null_wire
+
         api vars set payload surface-value | ignore
         api put $"($base)/put" -b {value: "{{payload}}"} --raw --no-history | ignore
         api patch $"($base)/patch" -b {value: "{{payload}}"} --raw --no-history | ignore
@@ -305,6 +370,42 @@ def test-request-body-json-boundary [] {
             assert equal ($events | length) 2 $"($case.path): history resend did not reach the endpoint"
             assert equal ($events | first | get body) ($events | last | get body) $"($case.path): history resend changed body bytes"
         }
+
+        let before_literal_history = (request-body-history-ids $root)
+        api post $"($base)/history-literal" -b "literal={{late}}" --raw | ignore
+        let literal_history_id = (request-body-new-history-id $root $before_literal_history)
+        api vars set late SHOULD-NOT-APPEAR | ignore
+        api history resend $literal_history_id --raw | ignore
+        let literal_events = (request-body-events $server | where path == "/history-literal")
+        assert equal ($literal_events | length) 2
+        assert equal ($literal_events | get body) ["literal={{late}}" "literal={{late}}"] "History replay re-interpolated exact stored text"
+
+        let long_body = (0..39999 | each { "x" } | str join)
+        let long_history_id = (api history save {
+            method: "POST"
+            url: $"($base)/history-large"
+            headers: {"Content-Type": "text/plain"}
+            body: $long_body
+        } {
+            status: 200
+            status_text: "OK"
+            headers: {}
+            body: null
+            time_ms: 0
+            size_bytes: 0
+        })
+        api history resend $long_history_id --raw | ignore
+        assert equal ((request-body-event $server "/history-large").body | str length) 40000 "Large exact replay did not use stdin transport"
+
+        let config_path = ($root | path join "config.nuon")
+        open $config_path
+        | update default_headers {"Authorization": "NEW-DEFAULT-CREDENTIAL"}
+        | to nuon --indent 4
+        | save -f $config_path
+        let replay = (api history resend $literal_history_id --raw)
+        let replay_event = (request-body-events $server | where path == "/history-literal" | last)
+        assert equal ($replay_event.headers | where name == "Authorization" | length) 0 "Exact history replay added a new default credential"
+        assert (not (($replay | to nuon) | str contains "NEW-DEFAULT-CREDENTIAL")) "Exact history replay exposed a new default credential"
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}
@@ -363,6 +464,14 @@ def test-request-body-table-flows [] {
         assert equal $nested.heterogeneous.0.name "table-value"
         assert equal $nested.heterogeneous.1.other "table-value"
 
+        let null_body = {items: [1, null, "{{payload}}"], keep: null}
+        let interpolated_nulls = (api vars interpolate-record $null_body)
+        assert equal ($interpolated_nulls.items | length) 3 "interpolate-record dropped a null list element"
+        assert ($interpolated_nulls.items.1 == null)
+        assert equal $interpolated_nulls.items.2 "table-value"
+        assert ("keep" in ($interpolated_nulls | columns))
+        assert ($interpolated_nulls.keep == null)
+
         let before_history = (request-body-history-ids $root)
         let direct = (api post $"($base)/history-table" -b $uniform --raw)
         let history_id = (request-body-new-history-id $root $before_history)
@@ -386,6 +495,30 @@ def test-request-body-table-flows [] {
         assert equal ($hetero_history_events | length) 2 "History resend did not replay the heterogeneous table body"
         assert equal (($hetero_history_events | first | get body | from json)) (($hetero_history_events | last | get body | from json))
 
+        api collection create body-null | ignore
+        let saved_path = ($root | path join "collections" "body-null" "requests" "nulls.nuon")
+        {
+            name: "nulls"
+            collection: "body-null"
+            method: "POST"
+            url: $"($base)/saved-nulls"
+            headers: {}
+            body: {type: "json", content: $null_body}
+            auth: null
+        } | to nuon --indent 4 | save -f $saved_path
+        let saved_result = (api send nulls -c body-null --raw)
+        let saved_wire = ((request-body-event $server "/saved-nulls").body | from json)
+        assert equal ($saved_wire.items | length) 3 "Saved request dropped a null list element"
+        assert ($saved_wire.items.1 == null)
+        assert ("keep" in ($saved_wire | columns))
+        assert ($saved_wire.keep == null)
+        assert equal $saved_result.request.body $saved_wire
+        let saved_history_id = (request-body-history-ids $root | first)
+        api history resend $saved_history_id --raw | ignore
+        let saved_events = (request-body-events $server | where path == "/saved-nulls")
+        assert equal ($saved_events | length) 2 "Saved-request history replay did not reach the endpoint"
+        assert equal (($saved_events | first | get body | from json)) (($saved_events | last | get body | from json))
+
         let chain = (api chain run ([
             {
                 method: POST
@@ -399,6 +532,12 @@ def test-request-body-table-flows [] {
                 use: {payload: "chain-value"}
                 body: {content: $heterogeneous}
             }
+            {
+                method: POST
+                url: $"($base)/chain-nulls"
+                use: {payload: "chain-value"}
+                body: {content: $null_body}
+            }
         ]) --quiet)
         assert equal $chain.success true "Chain table request failed"
         let chain_uniform_wire = (request-body-event $server "/chain-uniform").body | from json
@@ -407,6 +546,12 @@ def test-request-body-table-flows [] {
         let chain_heterogeneous_wire = (request-body-event $server "/chain-heterogeneous").body | from json
         assert equal $chain_heterogeneous_wire.0.name "chain-value"
         assert equal $chain_heterogeneous_wire.1.other "chain-value"
+        let chain_null_wire = (request-body-event $server "/chain-nulls").body | from json
+        assert equal ($chain_null_wire.items | length) 3 "Chain dropped a null list element"
+        assert ($chain_null_wire.items.1 == null)
+        assert equal $chain_null_wire.items.2 "chain-value"
+        assert ("keep" in ($chain_null_wire | columns))
+        assert ($chain_null_wire.keep == null)
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}
@@ -465,11 +610,144 @@ def test-request-body-preview-history-and-masking [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def test-request-body-chain-single-pass [] {
+    let root = (make-temp-dir "request-body-chain-pass")
+    let infra = (make-temp-dir "request-body-chain-pass-server")
+    let server = (start-request-body-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        api vars set late GLOBALLEAK | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let secret = "CHAIN-BODY-CREDENTIAL-SENTINEL"
+        let config_path = ($root | path join "config.nuon")
+        open $config_path
+        | update default_headers {"X-Default-Chain": "{{captured}}"}
+        | to nuon --indent 4
+        | save -f $config_path
+        let chain = (api chain run ([
+            {
+                method: GET
+                url: $"($base)/chain-source"
+                extract: {captured: "body.next"}
+            }
+            {
+                method: POST
+                url: $"($base)/chain-target"
+                headers: {"X-Chain-Value": "{{captured}}"}
+                auth: {type: bearer, token: $secret}
+                body: {content: {value: "{{captured}}"}}
+            }
+            {
+                method: POST
+                url: $"($base)/chain-json-string"
+                body: {type: "json", content: "{{captured}}"}
+            }
+            {
+                method: POST
+                url: $"($base)/chain-json-null"
+                body: {type: "json", content: null}
+            }
+        ]) --quiet)
+        assert equal $chain.success true "Single-pass chain failed"
+        assert (not (($chain | to nuon) | str contains $secret)) "Chain result exposed its credential"
+        let event = (request-body-event $server "/chain-target")
+        assert equal ($event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "Chain header was interpolated more than once"
+        assert equal ($event.headers | where name == "X-Default-Chain" | first | get value) "ZZ{{late}}ZZ" "Chain default header was interpolated more than once"
+        assert equal (($event.body | from json).value) "ZZ{{late}}ZZ" "Chain body was interpolated more than once"
+        assert equal ($event.headers | where name == "Authorization" | length) 1 "Chain credential header was not sent exactly once"
+        assert equal (request-body-event $server "/chain-json-string").body '"ZZ{{late}}ZZ"' "Chain JSON string scalar was not serialized as JSON"
+        assert equal (request-body-event $server "/chain-json-null").body "null" "Chain JSON null was treated as an absent body"
+
+        api post $"($base)/direct-header" -H {"X-Direct": "{{late}}"} -b {ok: true} --raw --no-history | ignore
+        assert equal ((request-body-event $server "/direct-header").headers | where name == "X-Direct" | first | get value) "GLOBALLEAK" "Ordinary request header interpolation changed"
+        assert equal (api vars interpolate "{{late}}/{{late}}") "GLOBALLEAK/GLOBALLEAK" "Repeated placeholders were not all restored"
+        assert equal (
+            api vars interpolate "{{outer}}" -e {outer: "{{inner}}", inner: resolved}
+        ) "resolved" "Ordinary recursive interpolation changed"
+        let cycle = try {
+            api vars interpolate "{{a}}" -e {a: "{{a}}x"} | ignore
+            null
+        } catch {|error| $error}
+        assert ($cycle != null) "Self-referential interpolation unexpectedly succeeded"
+        assert ($cycle.msg | str contains "exceeded 32 expansion steps") "Self-referential interpolation error was not actionable"
+        null
+    } catch {|error| $error}
+    try { stop-request-body-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-request-body-interpolated-header-safety [] {
+    let root = (make-temp-dir "request-body-header-safety")
+    let infra = (make-temp-dir "request-body-header-safety-server")
+    let server = (start-request-body-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        api vars set bad_header "X-Good\r\nX-Evil" | ignore
+        let before_invalid = (request-body-events $server | length)
+        let invalid = try {
+            api post $"($base)/invalid-header" -H {"{{bad_header}}": value} -b {ok: true} --raw --no-history | ignore
+            null
+        } catch {|error| $error}
+        assert ($invalid != null) "Interpolated CR/LF header name unexpectedly succeeded"
+        assert ($invalid.msg | str contains "must not contain carriage returns or newlines") "Interpolated header-name error was not actionable"
+        assert equal (request-body-events $server | length) $before_invalid "Invalid interpolated header name reached the endpoint"
+
+        api vars set bad_value "safe\r\nX-Evil: injected" | ignore
+        let before_value = (request-body-events $server | length)
+        let invalid_value = try {
+            api post $"($base)/invalid-header-value" -H {"X-Good": "{{bad_value}}"} -b {ok: true} --raw --no-history | ignore
+            null
+        } catch {|error| $error}
+        assert ($invalid_value != null) "Interpolated CR/LF header value unexpectedly succeeded"
+        assert ($invalid_value.msg | str contains "Request header 'X-Good' must not contain carriage returns or newlines") "Interpolated header-value error was not actionable"
+        assert equal (request-body-events $server | length) $before_value "Invalid interpolated header value reached the endpoint"
+
+        let before_auth = (request-body-events $server | length)
+        let invalid_auth = try {
+            api post $"($base)/invalid-auth-value" -a {type: bearer, token: "safe\r\nX-Evil: injected"} -b {ok: true} --raw --no-history | ignore
+            null
+        } catch {|error| $error}
+        assert ($invalid_auth != null) "CR/LF auth-generated header unexpectedly succeeded"
+        assert ($invalid_auth.msg | str contains "Request header 'Authorization' must not contain carriage returns or newlines") "Auth-generated header error was not actionable"
+        assert equal (request-body-events $server | length) $before_auth "Invalid auth-generated header reached the endpoint"
+
+        let invalid_preview_auth = try {
+            api post $"($base)/invalid-preview-auth" -a {type: api_key, key: secret, header: "X-Good\r\nX-Evil"} -b {ok: true} --dry-run | ignore
+            null
+        } catch {|error| $error}
+        assert ($invalid_preview_auth != null) "Dry-run CR/LF auth header name unexpectedly succeeded"
+        assert ($invalid_preview_auth.msg | str contains "Request header names must not contain carriage returns or newlines") "Dry-run auth header error was not actionable"
+
+        api vars set header_one "X-Same" | ignore
+        api vars set header_two "x-same" | ignore
+        let before_collision = (request-body-events $server | length)
+        let collision = try {
+            api post $"($base)/header-collision" -H {"{{header_one}}": first, "{{header_two}}": second} -b {ok: true} --raw --no-history | ignore
+            null
+        } catch {|error| $error}
+        assert ($collision != null) "Interpolated header-name collision unexpectedly succeeded"
+        assert ($collision.msg | str contains "contains both 'X-Same' and 'x-same'") "Interpolated header collision error was not actionable"
+        assert equal (request-body-events $server | length) $before_collision "Interpolated header collision reached the endpoint"
+        null
+    } catch {|error| $error}
+    try { stop-request-body-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def run-suite-request-body []: nothing -> list<record> {
     [
         (run-test "request body: JSON interpolation precedes serialization" { test-request-body-json-boundary })
         (run-test "request body: form interpolation precedes URL encoding" { test-request-body-form-boundary })
         (run-test "request body: tables survive vars, history, and chain flows" { test-request-body-table-flows })
+        (run-test "request body: chain headers and bodies interpolate once" { test-request-body-chain-single-pass })
+        (run-test "request body: interpolated header names fail safely" { test-request-body-interpolated-header-safety })
         (run-test "request body: preview, history, and masking stay coherent" { test-request-body-preview-history-and-masking })
     ]
 }

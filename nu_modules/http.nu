@@ -2,7 +2,7 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured]
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured, interpolate-structured-json]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
@@ -56,6 +56,13 @@ def normalize-header-name [name: string] {
 def assert-unique-header-names [headers: record] {
     mut observed = []
     for name in ($headers | columns) {
+        if ($name | str contains "\r") or ($name | str contains "\n") {
+            fail-command "Request header names must not contain carriage returns or newlines."
+        }
+        let value = (try { $headers | get $name | into string } catch { "" })
+        if ($value | str contains "\r") or ($value | str contains "\n") {
+            fail-command $"Request header '($name)' must not contain carriage returns or newlines."
+        }
         let folded = (normalize-header-name $name)
         let prior = ($observed | where folded == $folded)
         if not ($prior | is-empty) {
@@ -190,6 +197,20 @@ def append-query-auth [url: string, name: string, value: string, --masked] {
 # Resolve body from multiple input sources (inline record/string, file)
 # Priority: body-file > inline body
 # Returns tagged content so interpolation happens before serialization.
+def looks-like-json [content: string] {
+    let trimmed = ($content | str trim)
+    if ($trimmed | is-empty) {
+        return false
+    }
+    [
+        ($trimmed | str starts-with "{")
+        ($trimmed | str starts-with "[")
+        ($trimmed | str starts-with '"')
+        ($trimmed in ["true" "false" "null"])
+        ($trimmed =~ '^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$')
+    ] | any {|matches| $matches }
+}
+
 def resolve-body [
     --body (-b): any = {}          # Inline body as record, list, or pre-serialized JSON string
     --body-file (-f): string = ""  # Path to file containing body
@@ -198,13 +219,20 @@ def resolve-body [
     if $body_file != "" {
         let file_content = (read-body-file $body_file)
 
-        # Try to validate as JSON, but allow raw content
-        let content = try {
-            $file_content | from json | to json --raw
-        } catch {
-            $file_content
+        let parsed = if (looks-like-json $file_content) {
+            try {
+                {ok: true, content: ($file_content | from json)}
+            } catch {
+                {ok: false, content: $file_content}
+            }
+        } else {
+            {ok: false, content: $file_content}
         }
-        {kind: "text", content: $content}
+        if $parsed.ok {
+            {kind: "structured", content: $parsed.content}
+        } else {
+            {kind: "text", content: $parsed.content}
+        }
     } else {
         if ($body | describe) == "string" {
             {kind: "text", content: $body}
@@ -216,10 +244,18 @@ def resolve-body [
     }
 }
 
+def serialize-structured-body [content: any] {
+    if (state-base-type $content) == "string" {
+        $content | to json
+    } else {
+        $content | to json --raw
+    }
+}
+
 def resolve-form-body [form: record] {
     {
         kind: "encoded"
-        content: (encode-form-data (interpolate-structured $form))
+        content: (encode-form-data (interpolate-structured $form --single-pass))
     }
 }
 
@@ -261,6 +297,35 @@ def append-authorization-args [
             $args | append ["-H" $"Authorization: ($header_value)"]
         }
         _ => $args
+    }
+}
+
+def assert-safe-auth-headers [auth: any] {
+    if $auth == null {
+        return
+    }
+    match ($auth.type? | default "none") {
+        "bearer" => {
+            let token = ($auth.token? | default "" | into string)
+            if ($token | str contains "\r") or ($token | str contains "\n") {
+                fail-command "Request header 'Authorization' must not contain carriage returns or newlines."
+            }
+            let value = if $token =~ '(?i)^Bearer\s+' { $token } else { $"******" }
+            assert-unique-header-names {Authorization: $value}
+        }
+        "saml" => {
+            let token = ($auth.token? | default "" | into string)
+            if ($token | str contains "\r") or ($token | str contains "\n") {
+                fail-command "Request header 'Authorization' must not contain carriage returns or newlines."
+            }
+            assert-unique-header-names {Authorization: $"($SAML_AUTH_SCHEME) ($token)"}
+        }
+        "apikey_header" => {
+            let name = ($auth.header_name? | default "" | into string)
+            let value = ($auth.key? | default "" | into string)
+            assert-unique-header-names { $name: $value }
+        }
+        _ => {}
     }
 }
 
@@ -688,7 +753,12 @@ def unframed-curl-diagnostics [stderr: string] {
     | str trim
 }
 
-def curl-with-fileless-metadata [curl_args: list, url: string, --include-response] {
+def curl-with-fileless-metadata [
+    curl_args: list
+    url: string
+    --include-response
+    --stdin-body: any = null
+] {
     let token = (random uuid | str replace --all "-" "")
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
     let ending = $"NURL_RESPONSE_META_($token)_END"
@@ -705,7 +775,11 @@ def curl-with-fileless-metadata [curl_args: list, url: string, --include-respons
         $curl_args
     }
     let final_args = ($transfer_args | append ["--write-out" $write_out])
-    let output = (do { curl ...$final_args $url } | complete)
+    let output = if $stdin_body == null {
+        do { curl ...$final_args $url } | complete
+    } else {
+        do { $stdin_body | curl ...$final_args $url } | complete
+    }
     let output_stderr = try { $output.stderr } catch { "" }
     if (($output_stderr | describe) | str starts-with "binary") {
         if $output.exit_code != 0 {
@@ -1094,6 +1168,9 @@ def execute-request [
     --body (-b): record = {kind: "none", content: null}
     --auth-spec: record = {}
     --no-interpolate   # Skip variable interpolation
+    --url-resolved     # URL was already interpolated with --resolved-context
+    --headers-resolved # Caller headers were already interpolated with --resolved-context
+    --resolved-context: record = {} # Wrapper containing an authoritative `vars` record
     --no-history       # Don't save to history
     --dry-run (-d)     # Output curl command instead of executing
     --collection (-c): string = ""   # Collection context for variable resolution
@@ -1104,25 +1181,39 @@ def execute-request [
     --binary-save (-B): string = ""  # Save binary response bytes to a file
     --quiet-binary-status             # Suppress download status in data output modes
 ] {
-    let all_headers = (merge-request-headers (get-default-headers) $headers)
+    let default_headers = (get-default-headers)
+    let resolved_vars = if $no_interpolate {
+        {}
+    } else if "vars" in ($resolved_context | columns) {
+        $resolved_context.vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    let single_pass = ($resolved_context.single_pass? | default false)
 
     # Interpolate variables with collection context
-    let final_url = if $no_interpolate {
+    let final_url = if $no_interpolate or $url_resolved {
         $url
     } else {
-        api vars interpolate $url -c $collection -v $extra_vars
+        api vars interpolate $url -e $resolved_vars --resolved
     }
     validate-secret-safe-url $final_url | ignore
 
     let final_headers = if $no_interpolate {
-        $all_headers
+        $headers
+    } else if $headers_resolved {
+        let resolved_defaults = (api vars interpolate-record $default_headers -e $resolved_vars --resolved --single-pass=$single_pass)
+        merge-request-headers $resolved_defaults $headers
     } else {
-        api vars interpolate-record $all_headers -c $collection -v $extra_vars
+        let all_headers = (merge-request-headers $default_headers $headers)
+        api vars interpolate-record $all_headers -e $resolved_vars --resolved
     }
     assert-unique-header-names $final_headers
 
     let display_auth_context = (prepare-auth-context $auth_spec --display-only)
     let display_auth = ($display_auth_context.display? | default {})
+    assert-safe-auth-headers $auth_spec
+    assert-safe-auth-headers $display_auth
     let managed_header = (managed-auth-header-name $display_auth)
     if $managed_header != null and (header-name-present $final_headers $managed_header) {
         fail-command $"Request supplies both --auth and an '($managed_header)' header; remove one."
@@ -1134,6 +1225,7 @@ def execute-request [
     }
     let wire_auth = ($auth_context.wire? | default null)
     let history_auth = ($auth_context.history? | default null)
+    assert-safe-auth-headers $wire_auth
 
     let has_sensitive_request_headers = (
         $final_headers
@@ -1144,20 +1236,21 @@ def execute-request [
     let final_body = match $body.kind {
         "none" => ""
         "encoded" => $body.content
+        "structured-encoded" => $body.content
         "text" => {
             if $no_interpolate or $body.content == "" {
                 $body.content
             } else {
-                api vars interpolate $body.content -c $collection -v $extra_vars
+                api vars interpolate $body.content -e $resolved_vars --resolved
             }
         }
         "structured" => {
             let content = if $no_interpolate {
                 $body.content
             } else {
-                interpolate-structured $body.content -c $collection -v $extra_vars
+                interpolate-structured-json $body.content -e $resolved_vars --resolved
             }
-            $content | to json --raw
+            serialize-structured-body $content
         }
         _ => (fail-command $"Unknown request body kind '($body.kind)'")
     }
@@ -1180,6 +1273,11 @@ def execute-request [
     } else {
         $final_url
     }
+    let body_via_stdin = (
+        (($body.kind in ["structured" "structured-encoded"]) or ($no_interpolate and (($final_body | str length) > 8000)))
+        and (state-base-type $body.content) == "string"
+        and $final_body != ""
+    )
 
     # Normal and binary requests share one retry policy. Binary attempts are isolated until commit.
     let start_time = (date now)
@@ -1189,15 +1287,21 @@ def execute-request [
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
         let attempt_path = if $binary_save == "" { "" } else { binary-attempt-path $binary_save }
+        let argument_body = if $body_via_stdin { "" } else { $final_body }
         let base_args = if $binary_save == "" {
-            build-curl-args $method $request_url $final_headers $final_body $wire_auth
+            build-curl-args $method $request_url $final_headers $argument_body $wire_auth
         } else {
-            build-curl-args-binary $method $request_url $final_headers $attempt_path $final_body $wire_auth
+            build-curl-args-binary $method $request_url $final_headers $attempt_path $argument_body $wire_auth
         }
-        let curl_args = if $follow_redirects { $base_args | append "-L" } else { $base_args }
+        let body_args = if $body_via_stdin {
+            $base_args | append ["--data-binary" "@-"]
+        } else {
+            $base_args
+        }
+        let curl_args = if $follow_redirects { $body_args | append "-L" } else { $body_args }
         let capture = try {
             {
-                value: (curl-with-fileless-metadata $curl_args $request_url --include-response=($binary_save == ""))
+                value: (curl-with-fileless-metadata $curl_args $request_url --include-response=($binary_save == "") --stdin-body=(if $body_via_stdin { $final_body } else { null }))
                 error: null
             }
         } catch {|error|
@@ -1258,7 +1362,7 @@ def execute-request [
         }
         let history_body = if $binary_save != "" or $final_body == "" {
             null
-        } else if $body.kind == "structured" and (state-base-type $body.content) != "string" {
+        } else if ($body.kind == "structured") and ((state-base-type $body.content) in ["record" "list"]) and (not ($public_request_record.body | is-empty)) {
             $public_request_record.body
         } else {
             $final_body
@@ -1308,8 +1412,11 @@ export def execute-encoded-request [
     body: string
     headers: record
     auth: record
+    --resolved-context: record = {}
+    --structured-string
 ] {
-    let result = (execute-request $method $url -H $headers -b {kind: "encoded", content: $body} --auth-spec $auth)
+    let body_kind = if $structured_string { "structured-encoded" } else { "encoded" }
+    let result = (execute-request $method $url -H $headers -b {kind: $body_kind, content: $body} --auth-spec $auth --url-resolved --headers-resolved --resolved-context $resolved_context)
     if "_raw_body" in ($result | columns) {
         $result | reject _raw_body
     } else {
@@ -1665,6 +1772,7 @@ export def "api request" [
     --auth (-a): record = {}             # Authentication config
     --raw (-r)                           # Return raw result without display
     --no-history                         # Don't save to history
+    --no-interpolate                     # Replay already-resolved URL, headers, and body values exactly
     --dry-run (-d)                       # Output curl command instead of executing
     --debug                              # Show verbose debug output
     --form (-F): record = {}             # Form-encoded body (application/x-www-form-urlencoded)
@@ -1693,7 +1801,7 @@ export def "api request" [
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
-        let result = (execute-request $method $url -H $req_headers -b $final_body --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
+        let result = (execute-request $method $url -H $req_headers -b $final_body --auth-spec $auth --no-interpolate=$no_interpolate --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects --retries=$retries --retry-delay=$retry_delay --binary-save=$binary_save --quiet-binary-status=$data_output)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }
