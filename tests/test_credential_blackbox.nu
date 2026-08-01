@@ -120,9 +120,9 @@ def test-blackbox-masking-and-rotation [] {
             {
                 label: "basic dry-run"
                 command: $"api get (($base + '/basic-preview') | to nuon) --auth ({type: basic, ref: bb-basic} | to nuon) --dry-run"
-                expected: ["-u ******:******"]
+                expected: ["-u '******:******'"]
             }
-            {label: "basic export", command: "api request export basic --collection bb", expected: ["-u ******:******"]}
+            {label: "basic export", command: "api request export basic --collection bb", expected: ["-u '******:******'"]}
             {
                 label: "API-key dry-run"
                 command: $"api get (($base + '/key-preview') | to nuon) --auth ({type: api_key, ref: bb-key} | to nuon) --dry-run"

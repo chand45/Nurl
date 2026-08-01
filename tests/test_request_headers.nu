@@ -612,10 +612,19 @@ def test-request-header-ambiguous-records-and-legacy-history [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
-def request-header-preview-args [server: record, line: string, tmp: string] {
+def request-header-preview-rendering [server: record, line: string, tmp: string] {
     let line_path = ($tmp | path join $"preview-(random uuid).txt")
     $line | save -f $line_path
-    let code = "import json, shlex, sys; print(json.dumps(shlex.split(open(sys.argv[1], encoding='utf-8').read().strip())[1:]))"
+    let code = "import json, re, shlex, sys
+text = open(sys.argv[1], encoding='utf-8').read().strip()
+tokens = shlex.split(text)
+safe = re.compile(r'^[A-Za-z0-9_@%+:,./-]+$')
+def render(value):
+    if safe.fullmatch(value):
+        return value
+    escaped = value.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))
+    return chr(39) + escaped + chr(39)
+print(json.dumps({'args': tokens[1:], 'canonical': ' '.join(render(value) for value in tokens)}))"
     let parsed = (test-complete-result (do { ^$server.python -c $code $line_path } | complete))
     rm -f $line_path
     assert equal $parsed.exit_code 0 $"Preview shell parsing failed: ($parsed.stderr)"
@@ -635,8 +644,16 @@ def assert-request-header-preview-case [
     assert equal ($preview.stderr | str trim) ""
     let line = ($preview.stdout | str trim)
     assert ($line | str starts-with "curl ") $"($label) did not emit curl"
-    let args = (request-header-preview-args $server $line $tmp)
-    let replay = (test-complete-result (do { ^curl ...$args } | complete))
+    let rendering = (request-header-preview-rendering $server $line $tmp)
+    assert equal $line $rendering.canonical $"($label) used non-canonical or unsafe shell rendering"
+    let replay = if $nu.os-info.name == "windows" {
+        test-complete-result (do { ^curl ...$rendering.args } | complete)
+    } else {
+        test-complete-result (do {
+            cd $tmp
+            ^sh -c $line
+        } | complete)
+    }
     assert equal $replay.exit_code 0 $"($label) preview curl failed: ($replay.stderr)"
     let execution = (run-command-process $root $command)
     assert equal $execution.exit_code 0 $"($label) execution failed: ($execution.stderr)"
@@ -661,13 +678,21 @@ def test-request-header-preview-fidelity [] {
         let base = $"http://127.0.0.1:($server.port)"
         let common = " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
         let body_file = ($root | path join "body.txt")
-        "body-file=exact&value=1" | save -f $body_file
+        "body-file=exact&value=1\nsecond line" | save -f $body_file
+        "" | save -f ($scratch | path join "xMATCHy")
         let cases = [
             {label: "record", command: ("api post " + (($base + "/preview-record") | to nuon) + " -b {title: t, n: 1}" + $common)}
             {label: "serialized-json", command: ("api post " + (($base + "/preview-json") | to nuon) + " -b " + ('{"title":"t","n":1}' | to nuon) + $common)}
             {label: "plain", command: ("api post " + (($base + "/preview-plain") | to nuon) + " -b " + ("hello world" | to nuon) + $common)}
             {label: "xml", command: ("api post " + (($base + "/preview-xml") | to nuon) + " -b " + ("<a>1</a>" | to nuon) + $common)}
+            {label: "operators", command: ("api post " + (($base + "/preview-operators") | to nuon) + " -b " + ("a|b>c" | to nuon) + $common)}
+            {label: "substitution", command: ("api post " + (($base + "/preview-substitution") | to nuon) + " -b " + ('$(printf shell-substitution)' | to nuon) + $common)}
+            {label: "glob", command: ("api post " + (($base + "/preview-glob") | to nuon) + " -b " + ("x*y" | to nuon) + $common)}
+            {label: "backslash", command: ("api post " + (($base + "/preview-backslash") | to nuon) + " -b " + ('a\b' | to nuon) + $common)}
+            {label: "punctuation", command: ("api post " + (($base + "/preview-punctuation") | to nuon) + " -b " + ("#hash !bang [brackets]" | to nuon) + $common)}
             {label: "quote", command: ("api post " + (($base + "/preview-quote") | to nuon) + " -b " + ("it's exact" | to nuon) + $common)}
+            {label: "empty", command: ("api post " + (($base + "/preview-empty") | to nuon) + " -b ''" + $common)}
+            {label: "multiline", command: ("api post " + (($base + "/preview-multiline") | to nuon) + " -b " + ("line one\nline two" | to nuon) + $common)}
             {label: "form", command: ("api post " + (($base + "/preview-form") | to nuon) + " -F {a: '1', b: '2'} -H {'content-type': text/plain, 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history")}
             {label: "body-file", command: ("api post " + (($base + "/preview-file") | to nuon) + " --body-file " + ($body_file | to nuon) + $common)}
         ]
@@ -677,11 +702,25 @@ def test-request-header-preview-fidelity [] {
 
         api collection create preview-export | ignore
         api request create exported POST $"($base)/preview-export" -c preview-export -H {"content-type": "application/xml", "accept": "text/csv", "X-Keep": "exact"} -b {title: t, n: 1} | ignore
+        let export_path = ($root | path join "collections" "preview-export" "requests" "exported.nuon")
+        open $export_path
+        | update body {type: "text", content: "it's | redirected > $(printf export-substitution) x*y\nnext line"}
+        | to nuon --indent 4
+        | save -f $export_path
         let before = (request-header-events $server | length)
         let exported = (run-command-process $root "api request export exported -c preview-export")
         assert equal $exported.exit_code 0 $"Export preview failed: ($exported.stderr)"
-        let args = (request-header-preview-args $server ($exported.stdout | str trim) $scratch)
-        let replay = (test-complete-result (do { ^curl ...$args } | complete))
+        let export_line = ($exported.stdout | str trim)
+        let rendering = (request-header-preview-rendering $server $export_line $scratch)
+        assert equal $export_line $rendering.canonical "Export used non-canonical or unsafe shell rendering"
+        let replay = if $nu.os-info.name == "windows" {
+            test-complete-result (do { ^curl ...$rendering.args } | complete)
+        } else {
+            test-complete-result (do {
+                cd $scratch
+                ^sh -c $export_line
+            } | complete)
+        }
         assert equal $replay.exit_code 0 $"Exported curl failed: ($replay.stderr)"
         let execution = (run-command-process $root "api send exported -c preview-export --raw --no-history")
         assert equal $execution.exit_code 0 $"Export source execution failed: ($execution.stderr)"

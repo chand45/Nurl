@@ -359,7 +359,16 @@ def build-curl-args-for-display [
     $args
 }
 
-# Convert curl arguments to a copyable shell command string
+def quote-posix-shell-arg [arg: string] {
+    if $arg =~ '^[A-Za-z0-9_@%+:,./-]+$' {
+        $arg
+    } else {
+        let escaped = ($arg | str replace --all "'" "'\\''")
+        $"'($escaped)'"
+    }
+}
+
+# Convert curl arguments to a copyable POSIX shell command string.
 def curl-args-to-string [
     args: list      # The curl arguments list
     url: string     # The URL to request
@@ -367,29 +376,10 @@ def curl-args-to-string [
     mut parts = ["curl"]
 
     for arg in $args {
-        # Check if argument needs quoting
-        let needs_quote = ($arg | str contains "'") or ($arg | str contains '"') or ($arg | str contains " ") or ($arg | str contains "$") or ($arg | str contains "&") or ($arg | str contains "?") or ($arg | str contains "=") or ($arg | str contains ";") or ($arg | str contains "(") or ($arg | str contains ")") or ($arg | str contains "{") or ($arg | str contains "}")
-
-        if $needs_quote {
-            if ($arg | str contains "'") {
-                # Escape single quotes using '\'' pattern
-                let escaped = ($arg | str replace --all "'" "'\\''")
-                $parts = ($parts | append $"'($escaped)'")
-            } else {
-                $parts = ($parts | append $"'($arg)'")
-            }
-        } else {
-            $parts = ($parts | append $arg)
-        }
+        $parts = ($parts | append (quote-posix-shell-arg ($arg | into string)))
     }
 
-    # Add URL at the end (always quote it for safety)
-    if ($url | str contains "'") {
-        let escaped_url = ($url | str replace --all "'" "'\\''")
-        $parts = ($parts | append $"'($escaped_url)'")
-    } else {
-        $parts = ($parts | append $"'($url)'")
-    }
+    $parts = ($parts | append (quote-posix-shell-arg $url))
 
     $parts | str join " "
 }
