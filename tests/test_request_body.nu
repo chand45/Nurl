@@ -49,7 +49,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/ready':
             self.emit({'ready': True})
         elif self.path == '/chain-source':
-            self.emit({'next': 'ZZ{{late}}ZZ', 'id': '101'})
+            self.emit({
+                'next': 'ZZ{{late}}ZZ',
+                'id': '101',
+                'opaque_url': 'T{{late}}/Q{{c}}',
+                'number': 2,
+                'flag': True,
+                'items': [1, 'L{{late}}'],
+                'record': {'inner': 'R{{c}}'},
+            })
         else:
             self.emit({'ok': True})
 
@@ -364,6 +372,8 @@ def test-request-body-json-boundary [] {
         assert equal (
             api vars interpolate "before {{ missing }} after {{ other }}" -e {} --resolved --single-pass
         ) "before {{ missing }} after {{ other }}" "Foreign template placeholders were rewritten"
+        api post $"($base)/literal-url/{{foreign}}" -b {ok: true} --raw --no-history | ignore
+        assert equal (request-body-event $server "/literal-url/{{foreign}}").path "/literal-url/{{foreign}}" "Literal URL braces were treated as curl glob syntax"
 
         api vars set payload surface-value | ignore
         api put $"($base)/put" -b {value: "{{payload}}"} --raw --no-history | ignore
@@ -621,6 +631,11 @@ def test-request-body-preview-history-and-masking [] {
         api vars set saved_prefix trusted | ignore
         api vars set saved_title "{{saved_prefix}}" | ignore
         api vars set saved_suffix body | ignore
+        assert-request-body-preview-case $root $server $scratch (
+            "api post " + (($base + "/preview-literal/{{foreign}}") | to nuon)
+            + " -b {ok: true} --raw --no-history"
+        )
+        assert equal (request-body-events $server | where path == "/preview-literal/{{foreign}}" | length) 2 "Dry-run and execution did not preserve literal URL braces"
         api collection create body-preview | ignore
         let request_path = ($root | path join "collections" "body-preview" "requests" "saved.nuon")
         {
@@ -693,7 +708,16 @@ def test-request-body-chain-single-pass [] {
             {
                 method: GET
                 url: $"($base)/chain-source"
-                extract: {captured: "body.next", source_id: "body.id", unused_record: "body"}
+                extract: {
+                    captured: "body.next"
+                    source_id: "body.id"
+                    opaque_url: "body.opaque_url"
+                    opaque_number: "body.number"
+                    opaque_flag: "body.flag"
+                    opaque_items: "body.items"
+                    opaque_record: "body.record"
+                    unused_record: "body"
+                }
             }
             {
                 method: POST
@@ -724,6 +748,27 @@ def test-request-body-chain-single-pass [] {
                 url: $"($base)/chain-raw-large"
                 body: $large_scalar
             }
+            {
+                method: POST
+                url: $"($base)/opaque-url/{{opaque_path}}/{{static_header}}"
+                use: {opaque_path: "{{opaque_url}}"}
+                body: "opaque-url"
+            }
+            {
+                method: POST
+                url: $"($base)/chain-typed"
+                use: {a: "{{c}}", b: "B", c: "C"}
+                body: {
+                    type: "json"
+                    content: {
+                        number: "{{opaque_number}}"
+                        flag: "{{opaque_flag}}"
+                        items: "{{opaque_items}}"
+                        record: "{{opaque_record}}"
+                        trusted: "{{a}}/{{b}}"
+                    }
+                }
+            }
         ]
         let chain = (api chain run $steps --quiet)
         assert equal $chain.success true "Single-pass chain failed"
@@ -740,6 +785,15 @@ def test-request-body-chain-single-pass [] {
         assert equal (request-body-event $server "/chain-json-null").body "null" "Chain JSON null was treated as an absent body"
         assert equal (request-body-event $server "/chain-raw").body "raw text" "Chain scalar body did not retain raw text"
         assert equal ((request-body-event $server "/chain-raw-large").body | str length) 40000 "Large chain scalar did not use stdin transport"
+        assert equal (
+            request-body-event $server "/opaque-url/T{{late}}/Q{{c}}/STATIC-resolved" | get path
+        ) "/opaque-url/T{{late}}/Q{{c}}/STATIC-resolved" "Opaque URL braces did not reach the endpoint literally"
+        let typed_body = (request-body-event $server "/chain-typed").body | from json
+        assert equal $typed_body.number 2 "Opaque numeric extract became a string"
+        assert equal $typed_body.flag true "Opaque boolean extract lost its type"
+        assert equal $typed_body.items [1 "L{{late}}"] "Opaque list extract lost type or expanded nested braces"
+        assert equal $typed_body.record {inner: "R{{c}}"} "Opaque record extract lost type or expanded nested braces"
+        assert equal $typed_body.trusted "C/B" "Trusted placeholders beside opaque nodes did not resolve"
 
         let chain_path = ($root | path join "chains" "use-binding.nuon")
         if not (($root | path join "chains") | path exists) {
@@ -757,6 +811,52 @@ def test-request-body-chain-single-pass [] {
         assert equal (
             request-body-events $server | where path == "/chain-raw-large" | get body | each {|body| $body | str length }
         ) [40000 40000] "api chain run/exec did not preserve large scalar bodies"
+        assert equal (request-body-events $server | where path == "/opaque-url/T{{late}}/Q{{c}}/STATIC-resolved" | length) 2
+        let typed_exec_body = (request-body-events $server | where path == "/chain-typed" | last | get body | from json)
+        assert equal $typed_exec_body.items [1 "L{{late}}"]
+        assert equal $typed_exec_body.record {inner: "R{{c}}"}
+        assert equal $typed_exec_body.number 2
+
+        let invalid_steps = [
+            {
+                method: GET
+                url: $"($base)/chain-source"
+                extract: {opaque_items: "body.items"}
+            }
+            {
+                method: POST
+                url: $"($base)/must-not-send-embedded-record"
+                body: "items={{opaque_items}}"
+            }
+        ]
+        let invalid = try {
+            api chain run $invalid_steps --quiet | ignore
+            null
+        } catch {|error| $error}
+        assert ($invalid != null) "Embedded structured opaque value unexpectedly succeeded"
+        assert (
+            $invalid.msg | str contains "Extracted chain value 'opaque_items' cannot be interpolated into text"
+        ) $"Embedded structured opaque error was not actionable: ($invalid.msg)"
+        assert equal (request-body-events $server | where path == "/must-not-send-embedded-record" | length) 0 "Embedded structured opaque value reached the endpoint"
+        let exact_invalid_steps = [
+            {
+                method: GET
+                url: $"($base)/chain-source"
+                extract: {opaque_record: "body.record"}
+            }
+            {
+                method: POST
+                url: $"($base)/must-not-send-exact-record"
+                body: "{{opaque_record}}"
+            }
+        ]
+        let exact_invalid = try {
+            api chain run $exact_invalid_steps --quiet | ignore
+            null
+        } catch {|error| $error}
+        assert ($exact_invalid != null) "Exact structured opaque value unexpectedly entered a text body"
+        assert ($exact_invalid.msg | str contains "Extracted chain value 'opaque_record' cannot be interpolated into text")
+        assert equal (request-body-events $server | where path == "/must-not-send-exact-record" | length) 0
 
         let host = $"127.0.0.1:($server.port)"
         let trusted_use = {

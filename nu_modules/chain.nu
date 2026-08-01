@@ -177,7 +177,7 @@ export def "api chain run" [
             let body_type = (state-base-type $body_content)
             if $body_type_hint == "json" or $body_type in ["record" "list" "table"] {
                 let protected_body = (interpolate-structured-json $body_content -e $resolved_vars --resolved)
-                let resolved_body = (restore-opaque-values $protected_body $opaque_values --keys)
+                let resolved_body = (restore-opaque-values $protected_body $opaque_values --keys --typed)
                 let resolved_type = (state-base-type $resolved_body)
                 {
                     content: (if $resolved_type == "string" { $resolved_body | to json } else { $resolved_body | to json --raw })

@@ -340,6 +340,7 @@ def build-curl-args [
     mut args = [
         "-s"                    # Silent mode
         "-S"                    # Show errors
+        "--globoff"             # Treat literal braces/brackets in URLs as data
         "--max-time" (get-timeout | into string)
     ]
 
@@ -393,6 +394,7 @@ def build-curl-args-for-display [
     auth?: record
 ] {
     mut args = [
+        "--globoff"
         "-X" $method
     ]
 
@@ -487,6 +489,7 @@ def build-curl-args-binary [
     mut args = [
         "-s"
         "-S"
+        "--globoff"
         "-X" $method
         "--max-time" (get-timeout | into string)
         "-o" $output_path

@@ -481,24 +481,35 @@ def restore-opaque-text [text: string, replacements: list] {
         if not ($result | str contains $replacement.token) {
             $result
         } else {
-            let value = try {
-                $replacement.value | into string
-            } catch {
-                fail-command $"Extracted chain value '($replacement.name? | default 'unknown')' cannot be interpolated into text."
+            let value_type = (structured-base-type $replacement.value)
+            let value = if $value_type in ["record" "list" "table"] {
+                fail-command $"Extracted chain value '($replacement.name)' cannot be interpolated into text."
+            } else {
+                try {
+                    $replacement.value | into string
+                } catch {
+                    fail-command $"Extracted chain value '($replacement.name)' cannot be interpolated into text."
+                }
             }
             $result | str replace --all $replacement.token $value
         }
     }
 }
 
-def restore-opaque-value [data: any, replacements: list, restore_keys: bool] {
+def restore-opaque-value [data: any, replacements: list, restore_keys: bool, typed_values: bool] {
     let base_type = (structured-base-type $data)
     if $base_type == "string" {
+        if $typed_values {
+            let exact = ($replacements | where token == $data)
+            if not ($exact | is-empty) {
+                return ($exact | first | get value)
+            }
+        }
         return (restore-opaque-text $data $replacements)
     }
     if $base_type in ["list" "table"] {
         return ($data | reduce -f [] {|item, acc|
-            $acc | append [(restore-opaque-value $item $replacements $restore_keys)]
+            $acc | append [(restore-opaque-value $item $replacements $restore_keys $typed_values)]
         })
     }
     if $base_type != "record" {
@@ -516,7 +527,7 @@ def restore-opaque-value [data: any, replacements: list, restore_keys: bool] {
         if $key in ($acc | columns) {
             fail-command $"Structured interpolation produced duplicate key '($key)'"
         }
-        let value = (restore-opaque-value $row.value $replacements $restore_keys)
+        let value = (restore-opaque-value $row.value $replacements $restore_keys $typed_values)
         $acc | merge { $key: $value }
     }
 }
@@ -525,11 +536,12 @@ export def restore-opaque-values [
     data: any
     replacements: list
     --keys
+    --typed
 ] {
     if ($replacements | is-empty) {
         $data
     } else {
-        restore-opaque-value $data $replacements $keys
+        restore-opaque-value $data $replacements $keys $typed
     }
 }
 
