@@ -679,7 +679,7 @@ def test-request-header-preview-fidelity [] {
         let common = " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
         let body_file = ($root | path join "body.txt")
         "body-file=exact&value=1\nsecond line" | save -f $body_file
-        "" | save -f ($scratch | path join "xMATCHy")
+        "" | save -f ($scratch | path join "match.nurlshell")
         let cases = [
             {label: "record", command: ("api post " + (($base + "/preview-record") | to nuon) + " -b {title: t, n: 1}" + $common)}
             {label: "serialized-json", command: ("api post " + (($base + "/preview-json") | to nuon) + " -b " + ('{"title":"t","n":1}' | to nuon) + $common)}
@@ -687,7 +687,7 @@ def test-request-header-preview-fidelity [] {
             {label: "xml", command: ("api post " + (($base + "/preview-xml") | to nuon) + " -b " + ("<a>1</a>" | to nuon) + $common)}
             {label: "operators", command: ("api post " + (($base + "/preview-operators") | to nuon) + " -b " + ("a|b>c" | to nuon) + $common)}
             {label: "substitution", command: ("api post " + (($base + "/preview-substitution") | to nuon) + " -b " + ('$(printf shell-substitution)' | to nuon) + $common)}
-            {label: "glob", command: ("api post " + (($base + "/preview-glob") | to nuon) + " -b " + ("x*y" | to nuon) + $common)}
+            {label: "glob", command: ("api post " + (($base + "/preview-glob") | to nuon) + " -b " + ("*.nurlshell" | to nuon) + $common)}
             {label: "backslash", command: ("api post " + (($base + "/preview-backslash") | to nuon) + " -b " + ('a\b' | to nuon) + $common)}
             {label: "punctuation", command: ("api post " + (($base + "/preview-punctuation") | to nuon) + " -b " + ("#hash !bang [brackets]" | to nuon) + $common)}
             {label: "quote", command: ("api post " + (($base + "/preview-quote") | to nuon) + " -b " + ("it's exact" | to nuon) + $common)}
@@ -701,34 +701,49 @@ def test-request-header-preview-fidelity [] {
         }
 
         api collection create preview-export | ignore
-        api request create exported POST $"($base)/preview-export" -c preview-export -H {"content-type": "application/xml", "accept": "text/csv", "X-Keep": "exact"} -b {title: t, n: 1} | ignore
-        let export_path = ($root | path join "collections" "preview-export" "requests" "exported.nuon")
-        open $export_path
-        | update body {type: "text", content: "it's | redirected > $(printf export-substitution) x*y\nnext line"}
-        | to nuon --indent 4
-        | save -f $export_path
-        let before = (request-header-events $server | length)
-        let exported = (run-command-process $root "api request export exported -c preview-export")
-        assert equal $exported.exit_code 0 $"Export preview failed: ($exported.stderr)"
-        let export_line = ($exported.stdout | str trim)
-        let rendering = (request-header-preview-rendering $server $export_line $scratch)
-        assert equal $export_line $rendering.canonical "Export used non-canonical or unsafe shell rendering"
-        let replay = if $nu.os-info.name == "windows" {
-            test-complete-result (do { ^curl ...$rendering.args } | complete)
-        } else {
-            test-complete-result (do {
-                cd $scratch
-                ^sh -c $export_line
-            } | complete)
-        }
-        assert equal $replay.exit_code 0 $"Exported curl failed: ($replay.stderr)"
-        let execution = (run-command-process $root "api send exported -c preview-export --raw --no-history")
-        assert equal $execution.exit_code 0 $"Export source execution failed: ($execution.stderr)"
-        let events = (request-header-events $server | skip $before)
-        assert equal ($events | length) 2
-        assert equal ($events | first | get body) ($events | last | get body) "Export body differed from execution"
-        for folded in ["CONTENT-TYPE" "ACCEPT" "X-KEEP"] {
-            assert equal (request-header-values ($events | first) $folded) (request-header-values ($events | last) $folded)
+        let export_cases = [
+            {label: "compact-json", body: '{"title":"t","n":1}'}
+            {label: "xml", body: "<a>1</a>"}
+            {label: "operators", body: "a|b>c $(printf export-substitution)"}
+            {label: "glob", body: "*.nurlshell"}
+            {label: "quote", body: "it's exact"}
+            {label: "multiline", body: "line one\nline two"}
+        ]
+        for case in $export_cases {
+            let name = "export-" + $case.label
+            let url = $base + "/preview-export-" + $case.label
+            api request create $name POST $url -c preview-export -H {"content-type": "application/xml", "accept": "text/csv", "X-Keep": "exact"} | ignore
+            let export_path = ($root | path join "collections" "preview-export" "requests" $"($name).nuon")
+            open $export_path
+            | update body {type: "text", content: $case.body}
+            | to nuon --indent 4
+            | save -f $export_path
+
+            let before = (request-header-events $server | length)
+            let exported = (run-command-process $root $"api request export ($name) -c preview-export")
+            assert equal $exported.exit_code 0 $"($case.label) export preview failed: ($exported.stderr)"
+            let export_line = ($exported.stdout | str trim)
+            let rendering = (request-header-preview-rendering $server $export_line $scratch)
+            assert equal $export_line $rendering.canonical $"($case.label) export used unsafe shell rendering"
+            let replay = if $nu.os-info.name == "windows" {
+                test-complete-result (do { ^curl ...$rendering.args } | complete)
+            } else {
+                test-complete-result (do {
+                    cd $scratch
+                    ^sh -c $export_line
+                } | complete)
+            }
+            assert equal $replay.exit_code 0 $"($case.label) exported curl failed: ($replay.stderr)"
+            let execution = (run-command-process $root $"api send ($name) -c preview-export --raw --no-history")
+            assert equal $execution.exit_code 0 $"($case.label) export source execution failed: ($execution.stderr)"
+            let events = (request-header-events $server | skip $before)
+            assert equal ($events | length) 2
+            let expected_body = ($case.body | to json --raw)
+            assert equal ($events | first | get body) $expected_body $"($case.label) export did not preserve api send string serialization"
+            assert equal ($events | last | get body) $expected_body $"($case.label) api send string serialization changed"
+            for folded in ["CONTENT-TYPE" "ACCEPT" "X-KEEP"] {
+                assert equal (request-header-values ($events | first) $folded) (request-header-values ($events | last) $folded)
+            }
         }
         null
     } catch {|error| $error}
