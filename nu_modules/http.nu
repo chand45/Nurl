@@ -2,7 +2,7 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
-use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json, restore-opaque-values]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json, resolve-trusted-vars, restore-opaque-values]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
@@ -252,15 +252,10 @@ def serialize-structured-body [content: any] {
     }
 }
 
-def resolve-form-body [form: record, --no-interpolate] {
-    let content = if $no_interpolate {
-        $form
-    } else {
-        interpolate-structured $form --single-pass
-    }
+def resolve-form-body [form: record] {
     {
-        kind: "encoded"
-        content: (encode-form-data $content)
+        kind: "form"
+        content: $form
     }
 }
 
@@ -1192,7 +1187,7 @@ def execute-request [
     } else if "vars" in ($resolved_context | columns) {
         $resolved_context.vars
     } else {
-        api vars get-merged -c $collection -v $extra_vars
+        resolve-trusted-vars (api vars get-merged -c $collection -v $extra_vars)
     }
     let single_pass = ($resolved_context.single_pass? | default false)
 
@@ -1244,6 +1239,14 @@ def execute-request [
         "none" => ""
         "encoded" => $body.content
         "structured-encoded" => $body.content
+        "form" => {
+            let content = if $no_interpolate {
+                $body.content
+            } else {
+                interpolate-structured $body.content -e $resolved_vars --resolved --single-pass
+            }
+            encode-form-data $content
+        }
         "text" => {
             if $no_interpolate or $body.content == "" {
                 $body.content
@@ -1282,7 +1285,6 @@ def execute-request [
     }
     let body_via_stdin = (
         (($body.kind in ["structured" "structured-encoded"]) or (($final_body | str length) > 8000))
-        and (state-base-type $body.content) == "string"
         and $final_body != ""
     )
 
@@ -1799,7 +1801,7 @@ export def "api request" [
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
-            resolve-form-body $form --no-interpolate=$no_interpolate
+            resolve-form-body $form
         } else {
             resolve-body -b $body -f $body_file
         }

@@ -259,6 +259,13 @@ def test-request-body-json-boundary [] {
             assert equal $result.request.body.numeric_text "5" $"($case.name): result.request.body type changed"
         }
 
+        api vars set a "{{c}}" | ignore
+        api vars set b B | ignore
+        api vars set c C | ignore
+        let trusted_result = (api post $"($base)/trusted-layer" -b {value: "{{a}}/{{b}}"} --raw --no-history)
+        assert equal $trusted_result.request.body.value "C/B" "Direct structured body did not pre-resolve trusted variables"
+        assert equal ((request-body-event $server "/trusted-layer").body | from json | get value) "C/B"
+
         api vars set k realkey | ignore
         api vars set v realval | ignore
         let keyed = (api post $"($base)/key" -b {"{{k}}": "{{v}}"} --raw --no-history)
@@ -433,6 +440,9 @@ def test-request-body-form-boundary [] {
         api init | ignore
         api vars set payload "alpha&admin=true" | ignore
         api vars set form_key note | ignore
+        api vars set a "{{c}}" | ignore
+        api vars set b B | ignore
+        api vars set c C | ignore
         let result = (api post $"http://127.0.0.1:($server.port)/form" -F {"{{form_key}}": "{{payload}}", empty: ""} --raw --no-history)
         let event = (request-body-event $server "/form")
         assert equal $event.body "note=alpha%26admin%3Dtrue&empty=" "Form value injected an extra parameter"
@@ -444,6 +454,24 @@ def test-request-body-form-boundary [] {
         for path in ["/form-put" "/form-patch" "/form-request"] {
             assert equal (request-body-event $server $path).body "note=alpha%26admin%3Dtrue" $"($path): form body was not encoded safely"
         }
+        api post $"($base)/form-trusted" -F {value: "{{a}}/{{b}}"} --raw --no-history | ignore
+        let trusted_form_body = (request-body-event $server "/form-trusted").body
+        assert equal $trusted_form_body "value=C/B" $"Direct form did not pre-resolve trusted variables: ($trusted_form_body)"
+        api vars set dynamic_id "{{$uuid}}" | ignore
+        api vars set layered_dynamic "{{dynamic_id}}" | ignore
+        api request -m POST $"($base)/form-dynamic/{{dynamic_id}}" -F {id: "{{dynamic_id}}"} --raw --no-history | ignore
+        let dynamic_event = (request-body-events $server | where {|event| $event.path | str starts-with "/form-dynamic/" } | last)
+        assert equal (
+            $dynamic_event.path | str replace "/form-dynamic/" ""
+        ) ($dynamic_event.body | str replace "id=" "") "Form body and URL did not share one trusted variable map"
+        api request -m POST $"($base)/form-dynamic-layered/{{dynamic_id}}" -F {id: "{{layered_dynamic}}"} --raw --no-history | ignore
+        let layered_dynamic_event = (request-body-events $server | where {|event| $event.path | str starts-with "/form-dynamic-layered/" } | last)
+        assert equal (
+            $layered_dynamic_event.path | str replace "/form-dynamic-layered/" ""
+        ) ($layered_dynamic_event.body | str replace "id=" "") "Layered dynamic alias was evaluated more than once"
+        let large_form_value = (0..39999 | each { "x" } | str join)
+        api request -m POST $"($base)/form-large" -F {value: $large_form_value} --raw --no-history | ignore
+        assert equal ((request-body-event $server "/form-large").body | str length) 40006 "Large form did not use stdin transport"
         api request -m POST $"($base)/form-literal" -F {"{{form_key}}": "{{payload}}"} --no-interpolate --raw --no-history | ignore
         let literal_form_body = (request-body-event $server "/form-literal" | get body)
         assert equal (
@@ -588,15 +616,20 @@ def test-request-body-preview-history-and-masking [] {
         api vars set saved_header X-Saved-Expanded | ignore
         api vars set saved_header_value saved-value | ignore
         let base = $"http://127.0.0.1:($server.port)"
+        api vars set saved_host $base | ignore
+        api vars set saved_url "{{saved_host}}/preview" | ignore
+        api vars set saved_prefix trusted | ignore
+        api vars set saved_title "{{saved_prefix}}" | ignore
+        api vars set saved_suffix body | ignore
         api collection create body-preview | ignore
         let request_path = ($root | path join "collections" "body-preview" "requests" "saved.nuon")
         {
             name: "saved"
             collection: "body-preview"
             method: "POST"
-            url: $"($base)/preview"
+            url: "{{saved_url}}"
             headers: {"{{saved_header}}": "{{saved_header_value}}"}
-            body: {type: "json", content: {value: "{{payload}}"}}
+            body: {type: "json", content: {value: "{{payload}}", layered: "{{saved_title}}/{{saved_suffix}}"}}
             auth: null
         } | to nuon --indent 4 | save -f $request_path
         let send_command = "api send saved -c body-preview --raw --no-history"
@@ -606,6 +639,7 @@ def test-request-body-preview-history-and-masking [] {
         assert equal $exported.exit_code 0 $"Request export failed: ($exported.stderr)"
         assert equal ($exported.stdout | str trim) ($preview.stdout | str trim) "Request export differed from send preview"
         let saved_event = (request-body-event $server "/preview")
+        assert equal (($saved_event.body | from json).layered) "trusted/body" "Saved request body did not pre-resolve trusted variables"
         let literal_saved_headers = ($saved_event.headers | where name == "{{saved_header}}")
         assert equal ($literal_saved_headers | length) 1 $"Saved-request literal header missing: ($saved_event.headers | to nuon)"
         assert equal ($literal_saved_headers | first | get value) "saved-value" "Saved-request header value did not interpolate"

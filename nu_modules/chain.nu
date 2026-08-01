@@ -1,7 +1,7 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, restore-opaque-values]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, resolve-trusted-vars, restore-opaque-values]
 use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
@@ -140,15 +140,15 @@ export def "api chain run" [
         }
 
         # Resolve static templates recursively while extracted values remain opaque tokens.
-        let static_vars = (api vars get-merged -c $step_collection)
+        let static_vars = (resolve-trusted-vars (api vars get-merged -c $step_collection))
         let protected_context = (protect-chain-context $context)
         let context_vars = ($static_vars | merge $protected_context.vars)
         let raw_step_vars = ($step | optional-get "use" | default {})
-        let step_vars = (interpolate-record-values $raw_step_vars -e $context_vars --resolved)
+        let step_vars = (interpolate-record-values $raw_step_vars -e ($context_vars | merge $raw_step_vars) --resolved)
         let resolved_vars = ($context_vars | merge $step_vars)
         let opaque_values = $protected_context.replacements
         let request_url = ($request_config | get "url")
-        let protected_url = (api vars interpolate $request_url -e $resolved_vars --resolved)
+        let protected_url = (api vars interpolate $request_url -e $resolved_vars --resolved --single-pass)
         let url = (restore-opaque-values $protected_url $opaque_values)
         validate-secret-safe-url $url | ignore
 
@@ -160,7 +160,7 @@ export def "api chain run" [
         # Interpolate headers with collection context
         let request_headers = ($request_config | optional-get "headers")
         let headers = if $request_headers != null {
-            let protected_headers = (interpolate-record-values $request_headers -e $resolved_vars --resolved)
+            let protected_headers = (interpolate-record-values $request_headers -e $resolved_vars --resolved --single-pass)
             restore-opaque-values $protected_headers $opaque_values
         } else {
             {}
@@ -176,7 +176,7 @@ export def "api chain run" [
         let body_resolution = if $has_body_content {
             let body_type = (state-base-type $body_content)
             if $body_type_hint == "json" or $body_type in ["record" "list" "table"] {
-                let protected_body = (interpolate-structured-json $body_content -e $resolved_vars --resolved --recursive)
+                let protected_body = (interpolate-structured-json $body_content -e $resolved_vars --resolved)
                 let resolved_body = (restore-opaque-values $protected_body $opaque_values --keys)
                 let resolved_type = (state-base-type $resolved_body)
                 {
@@ -184,7 +184,7 @@ export def "api chain run" [
                     structured_string: ($resolved_type == "string")
                 }
             } else {
-                let protected_body = (api vars interpolate ($body_content | into string) -e $resolved_vars --resolved)
+                let protected_body = (api vars interpolate ($body_content | into string) -e $resolved_vars --resolved --single-pass)
                 {
                     content: (restore-opaque-values $protected_body $opaque_values)
                     structured_string: false
@@ -206,13 +206,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values} --structured-string=$body_resolution.structured_string)
+                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values} --structured-string=$body_resolution.structured_string)
+                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                     error: null
                 }
             } catch {|error|

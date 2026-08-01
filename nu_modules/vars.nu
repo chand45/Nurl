@@ -431,6 +431,51 @@ export def interpolate-record-values [
     interpolate-values-only-value $data $merged_vars $single_pass
 }
 
+def resolve-trusted-var [
+    name: string
+    vars: record
+    state: record
+] {
+    if $name in ($state.resolved | columns) {
+        return {state: $state, value: ($state.resolved | get $name)}
+    }
+    if $name in $state.resolving {
+        fail-command $"Variable interpolation cycle detected at '($name)'."
+    }
+
+    let raw = ($vars | get $name)
+    mut next_state = ($state | update resolving ($state.resolving | append $name))
+    if ((structured-base-type $raw) == "string") and ($raw | str contains "{{") {
+        for match in ($raw | parse -r '\{\{([^}]+)\}\}') {
+            let dependency = ($match.capture0 | str trim)
+            if (not ($dependency | str starts-with "$")) and ($dependency in ($vars | columns)) {
+                let resolved_dependency = (resolve-trusted-var $dependency $vars $next_state)
+                $next_state = $resolved_dependency.state
+            }
+        }
+    }
+
+    let value = if (structured-base-type $raw) == "string" {
+        interpolate-resolved-recursive-text $raw $next_state.resolved
+    } else {
+        $raw
+    }
+    let final_state = (
+        $next_state
+        | update resolved ($next_state.resolved | merge { $name: $value })
+        | update resolving ($next_state.resolving | where {|candidate| $candidate != $name })
+    )
+    {state: $final_state, value: $value}
+}
+
+export def resolve-trusted-vars [vars: record] {
+    mut state = {resolved: {}, resolving: []}
+    for name in ($vars | columns) {
+        $state = (resolve-trusted-var $name $vars $state).state
+    }
+    $state.resolved
+}
+
 def restore-opaque-text [text: string, replacements: list] {
     $replacements | reduce -f $text {|replacement, result|
         if not ($result | str contains $replacement.token) {
