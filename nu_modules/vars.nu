@@ -268,15 +268,36 @@ def interpolate-json-template [text: string, all_vars: record] {
     [($segments | first) ...$chunks] | str join
 }
 
+def interpolate-json-recursive-template [text: string, all_vars: record] {
+    mut result = $text
+    mut seen = []
+    mut depth = 0
+    loop {
+        if $depth >= 32 {
+            fail-command "Structured interpolation exceeded 32 expansion steps; check for cyclic variable references."
+        }
+        let next = (interpolate-json-template $result $all_vars)
+        if $next == $result {
+            return $result
+        }
+        if $next in $seen {
+            return $result
+        }
+        $seen = ($seen | append $result)
+        $result = $next
+        $depth = $depth + 1
+    }
+}
+
 def structured-base-type [data: any] {
     $data | describe | str replace -r '<.*' ''
 }
 
-def validate-interpolated-key-collisions [data: any, merged_vars: record] {
+def validate-interpolated-key-collisions [data: any, merged_vars: record, recursive: bool] {
     let base_type = (structured-base-type $data)
     if $base_type in ["list" "table"] {
         for item in $data {
-            validate-interpolated-key-collisions $item $merged_vars
+            validate-interpolated-key-collisions $item $merged_vars $recursive
         }
         return
     }
@@ -286,12 +307,16 @@ def validate-interpolated-key-collisions [data: any, merged_vars: record] {
 
     mut observed = []
     for row in ($data | transpose key value) {
-        let new_key = (interpolate-resolved-text $row.key $merged_vars)
+        let new_key = if $recursive {
+            interpolate-resolved-recursive-text $row.key $merged_vars
+        } else {
+            interpolate-resolved-text $row.key $merged_vars
+        }
         if $new_key in $observed {
             fail-command $"Structured interpolation produced duplicate key '($new_key)'"
         }
         $observed = ($observed | append $new_key)
-        validate-interpolated-key-collisions $row.value $merged_vars
+        validate-interpolated-key-collisions $row.value $merged_vars $recursive
     }
 }
 
@@ -406,12 +431,70 @@ export def interpolate-record-values [
     interpolate-values-only-value $data $merged_vars $single_pass
 }
 
+def restore-opaque-text [text: string, replacements: list] {
+    $replacements | reduce -f $text {|replacement, result|
+        if not ($result | str contains $replacement.token) {
+            $result
+        } else {
+            let value = try {
+                $replacement.value | into string
+            } catch {
+                fail-command $"Extracted chain value '($replacement.name? | default 'unknown')' cannot be interpolated into text."
+            }
+            $result | str replace --all $replacement.token $value
+        }
+    }
+}
+
+def restore-opaque-value [data: any, replacements: list, restore_keys: bool] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (restore-opaque-text $data $replacements)
+    }
+    if $base_type in ["list" "table"] {
+        return ($data | reduce -f [] {|item, acc|
+            $acc | append [(restore-opaque-value $item $replacements $restore_keys)]
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let key = if $restore_keys {
+            restore-opaque-text $row.key $replacements
+        } else {
+            $row.key
+        }
+        if $key in ($acc | columns) {
+            fail-command $"Structured interpolation produced duplicate key '($key)'"
+        }
+        let value = (restore-opaque-value $row.value $replacements $restore_keys)
+        $acc | merge { $key: $value }
+    }
+}
+
+export def restore-opaque-values [
+    data: any
+    replacements: list
+    --keys
+] {
+    if ($replacements | is-empty) {
+        $data
+    } else {
+        restore-opaque-value $data $replacements $keys
+    }
+}
+
 export def interpolate-structured-json [
     data: any
     --extra-vars (-v): record = {}
     --collection (-c): string = ""
     --env-vars (-e): record = {}
     --resolved
+    --recursive
 ] {
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
@@ -433,9 +516,14 @@ export def interpolate-structured-json [
     }
     let dynamic_key_pattern = '"([^"\\]|\\.)*\{\{[^}]+\}\}([^"\\]|\\.)*"\s*:'
     if not (($template | parse -r $dynamic_key_pattern) | is-empty) {
-        validate-interpolated-key-collisions $data $merged_vars
+        validate-interpolated-key-collisions $data $merged_vars $recursive
     }
-    interpolate-json-template $template $merged_vars | from json
+    let interpolated = if $recursive {
+        interpolate-json-recursive-template $template $merged_vars
+    } else {
+        interpolate-json-template $template $merged_vars
+    }
+    $interpolated | from json
 }
 
 # Backward-compatible record entry point.

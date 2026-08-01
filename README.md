@@ -431,10 +431,11 @@ Nurl supports three levels of variables, resolved in order (narrowest wins):
 3. **Global** — Workspace-wide in `variables.nuon`
 4. **Built-in** — Dynamic values like `{{$uuid}}`, `{{$timestamp}}`
 
-URL and ordinary header-value interpolation retain recursive variable resolution. Structured JSON
-bodies, forms, and chain values use a single pass so replacement values containing `{{...}}` cannot
-expand again. HTTP header names always remain literal. Structured body and form keys do interpolate;
-if two interpolated keys collide, the request fails before network I/O.
+URL and ordinary header-value interpolation retain recursive variable resolution. Direct structured
+JSON bodies and forms use a single pass. Chains recursively resolve static/global/default/use
+templates, but extracted response values are treated as opaque atoms so embedded `{{...}}` text
+cannot expand again. HTTP header names always remain literal. Structured body and form keys do
+interpolate; if two interpolated keys collide, the request fails before network I/O.
 
 ```nushell
 # Global variables (available to all requests)

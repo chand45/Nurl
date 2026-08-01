@@ -2,7 +2,7 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
-use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json, restore-opaque-values]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
@@ -1208,7 +1208,9 @@ def execute-request [
         $headers
     } else if $headers_resolved {
         let resolved_defaults = (interpolate-record-values $default_headers -e $resolved_vars --resolved --single-pass=$single_pass)
-        merge-request-headers $resolved_defaults $headers
+        let opaque_values = ($resolved_context.opaque_values? | default [])
+        let restored_defaults = (restore-opaque-values $resolved_defaults $opaque_values)
+        merge-request-headers $restored_defaults $headers
     } else {
         let all_headers = (merge-request-headers $default_headers $headers)
         interpolate-record-values $all_headers -e $resolved_vars --resolved

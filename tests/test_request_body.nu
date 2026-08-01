@@ -643,10 +643,15 @@ def test-request-body-chain-single-pass [] {
         api vars set late GLOBALLEAK | ignore
         api vars set chain_header_name X-Expanded | ignore
         let base = $"http://127.0.0.1:($server.port)"
+        api vars set chain_server $base | ignore
+        api vars set chain_base "{{chain_server}}/chain-use" | ignore
+        api vars set static_prefix STATIC | ignore
+        api vars set static_header "{{static_prefix}}-resolved" | ignore
+        api vars set static_suffix tail | ignore
         let secret = "CHAIN-BODY-CREDENTIAL-SENTINEL"
         let config_path = ($root | path join "config.nuon")
         open $config_path
-        | update default_headers {"X-Default-Chain": "{{captured}}"}
+        | update default_headers {"X-Default-Chain": "{{bound}}/{{static_header}}"}
         | to nuon --indent 4
         | save -f $config_path
         let large_scalar = (0..39999 | each { "x" } | str join)
@@ -654,21 +659,21 @@ def test-request-body-chain-single-pass [] {
             {
                 method: GET
                 url: $"($base)/chain-source"
-                extract: {captured: "body.next", source_id: "body.id"}
+                extract: {captured: "body.next", source_id: "body.id", unused_record: "body"}
             }
             {
                 method: POST
-                url: $"($base)/chain-use-{{route}}"
+                url: "{{chain_base}}/{{route}}/{{static_suffix}}"
                 use: {route: "{{source_id}}", bound: "{{captured}}"}
-                headers: {"{{chain_header_name}}": "literal-key", "X-Chain-Value": "{{bound}}"}
+                headers: {"{{chain_header_name}}": "literal-key", "X-Chain-Value": "{{bound}}/{{static_header}}"}
                 auth: {type: bearer, token: $secret}
-                body: {content: {value: "{{bound}}"}}
+                body: {content: {value: "{{bound}}/{{static_header}}", static: "{{chain_base}}/{{static_suffix}}"}}
             }
             {
                 method: POST
                 url: $"($base)/chain-json-string"
                 use: {bound: "{{captured}}"}
-                body: {type: "json", content: "{{bound}}"}
+                body: {type: "json", content: "{{bound}}/{{static_suffix}}"}
             }
             {
                 method: POST
@@ -689,14 +694,15 @@ def test-request-body-chain-single-pass [] {
         let chain = (api chain run $steps --quiet)
         assert equal $chain.success true "Single-pass chain failed"
         assert (not (($chain | to nuon) | str contains $secret)) "Chain result exposed its credential"
-        let event = (request-body-event $server "/chain-use-101")
-        assert equal ($event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "Chain header was interpolated more than once"
+        let event = (request-body-event $server "/chain-use/101/tail")
+        assert equal ($event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ/STATIC-resolved" "Chain header did not resolve static templates around an opaque extract"
         assert equal ($event.headers | where name == "{{chain_header_name}}" | first | get value) "literal-key" "Chain header name was unexpectedly interpolated"
         assert equal ($event.headers | where name == "X-Expanded" | length) 0 "Chain header variable changed the header name"
-        assert equal ($event.headers | where name == "X-Default-Chain" | first | get value) "ZZ{{late}}ZZ" "Chain default header was interpolated more than once"
-        assert equal (($event.body | from json).value) "ZZ{{late}}ZZ" "Chain body was interpolated more than once"
+        assert equal ($event.headers | where name == "X-Default-Chain" | first | get value) "ZZ{{late}}ZZ/STATIC-resolved" "Chain default header did not preserve opaque extracts while resolving static variables"
+        assert equal (($event.body | from json).value) "ZZ{{late}}ZZ/STATIC-resolved" "Chain body did not resolve static templates around an opaque extract"
+        assert equal (($event.body | from json).static) $"($base)/chain-use/tail" "Chain structured body did not recursively resolve static variables"
         assert equal ($event.headers | where name == "Authorization" | length) 1 "Chain credential header was not sent exactly once"
-        assert equal (request-body-event $server "/chain-json-string").body '"ZZ{{late}}ZZ"' "Chain JSON string scalar was not serialized as JSON"
+        assert equal (request-body-event $server "/chain-json-string").body '"ZZ{{late}}ZZ/tail"' "Chain JSON string did not combine opaque and recursively resolved static values"
         assert equal (request-body-event $server "/chain-json-null").body "null" "Chain JSON null was treated as an absent body"
         assert equal (request-body-event $server "/chain-raw").body "raw text" "Chain scalar body did not retain raw text"
         assert equal ((request-body-event $server "/chain-raw-large").body | str length) 40000 "Large chain scalar did not use stdin transport"
@@ -708,11 +714,11 @@ def test-request-body-chain-single-pass [] {
         {name: "use-binding", steps: $steps} | to nuon --indent 4 | save -f $chain_path
         let exec_result = (api chain exec use-binding --quiet)
         assert equal $exec_result.success true "api chain exec did not resolve step.use"
-        let exec_events = (request-body-events $server | where path == "/chain-use-101")
+        let exec_events = (request-body-events $server | where path == "/chain-use/101/tail")
         assert equal ($exec_events | length) 2 "api chain run and exec did not both resolve the use-bound URL"
         let exec_event = ($exec_events | last)
-        assert equal ($exec_event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "api chain exec expanded a response-controlled value twice"
-        assert equal (($exec_event.body | from json).value) "ZZ{{late}}ZZ"
+        assert equal ($exec_event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ/STATIC-resolved" "api chain exec did not preserve opaque extracts around static values"
+        assert equal (($exec_event.body | from json).value) "ZZ{{late}}ZZ/STATIC-resolved"
         assert equal (request-body-events $server | where path == "/chain-raw" | get body) ["raw text" "raw text"] "api chain run/exec changed scalar raw bodies"
         assert equal (
             request-body-events $server | where path == "/chain-raw-large" | get body | each {|body| $body | str length }
