@@ -348,6 +348,16 @@ def test-request-body-json-boundary [] {
         assert ($top_null_wire.1 == null) "Top-level list changed its null element"
         assert equal $top_null_result.request.body $top_null_wire
 
+        let unresolved = (api post $"($base)/unresolved-spacing" -b {
+            first: "{{ missing }}"
+            second: "before {{ other }} after {{ third }}"
+        } --raw --no-history)
+        assert equal $unresolved.request.body.first "{{ missing }}"
+        assert equal $unresolved.request.body.second "before {{ other }} after {{ third }}" "Unresolved placeholders lost their original spacing"
+        assert equal (
+            api vars interpolate "before {{ missing }} after {{ other }}" -e {} --resolved --single-pass
+        ) "before {{ missing }} after {{ other }}" "Foreign template placeholders were rewritten"
+
         api vars set payload surface-value | ignore
         api put $"($base)/put" -b {value: "{{payload}}"} --raw --no-history | ignore
         api patch $"($base)/patch" -b {value: "{{payload}}"} --raw --no-history | ignore
@@ -422,7 +432,8 @@ def test-request-body-form-boundary [] {
         $env.API_ROOT = $root
         api init | ignore
         api vars set payload "alpha&admin=true" | ignore
-        let result = (api post $"http://127.0.0.1:($server.port)/form" -F {note: "{{payload}}", empty: ""} --raw --no-history)
+        api vars set form_key note | ignore
+        let result = (api post $"http://127.0.0.1:($server.port)/form" -F {"{{form_key}}": "{{payload}}", empty: ""} --raw --no-history)
         let event = (request-body-event $server "/form")
         assert equal $event.body "note=alpha%26admin%3Dtrue&empty=" "Form value injected an extra parameter"
         assert equal $result.request.body $event.body "Form result.request.body differed from wire bytes"
@@ -433,6 +444,11 @@ def test-request-body-form-boundary [] {
         for path in ["/form-put" "/form-patch" "/form-request"] {
             assert equal (request-body-event $server $path).body "note=alpha%26admin%3Dtrue" $"($path): form body was not encoded safely"
         }
+        api request -m POST $"($base)/form-literal" -F {"{{form_key}}": "{{payload}}"} --no-interpolate --raw --no-history | ignore
+        let literal_form_body = (request-body-event $server "/form-literal" | get body)
+        assert equal (
+            $literal_form_body
+        ) "{{form_key}}={{payload}}" $"--no-interpolate changed literal form content: ($literal_form_body)"
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}
@@ -633,6 +649,7 @@ def test-request-body-chain-single-pass [] {
         | update default_headers {"X-Default-Chain": "{{captured}}"}
         | to nuon --indent 4
         | save -f $config_path
+        let large_scalar = (0..39999 | each { "x" } | str join)
         let steps = [
             {
                 method: GET
@@ -658,6 +675,16 @@ def test-request-body-chain-single-pass [] {
                 url: $"($base)/chain-json-null"
                 body: {type: "json", content: null}
             }
+            {
+                method: POST
+                url: $"($base)/chain-raw"
+                body: "raw text"
+            }
+            {
+                method: POST
+                url: $"($base)/chain-raw-large"
+                body: $large_scalar
+            }
         ]
         let chain = (api chain run $steps --quiet)
         assert equal $chain.success true "Single-pass chain failed"
@@ -671,6 +698,8 @@ def test-request-body-chain-single-pass [] {
         assert equal ($event.headers | where name == "Authorization" | length) 1 "Chain credential header was not sent exactly once"
         assert equal (request-body-event $server "/chain-json-string").body '"ZZ{{late}}ZZ"' "Chain JSON string scalar was not serialized as JSON"
         assert equal (request-body-event $server "/chain-json-null").body "null" "Chain JSON null was treated as an absent body"
+        assert equal (request-body-event $server "/chain-raw").body "raw text" "Chain scalar body did not retain raw text"
+        assert equal ((request-body-event $server "/chain-raw-large").body | str length) 40000 "Large chain scalar did not use stdin transport"
 
         let chain_path = ($root | path join "chains" "use-binding.nuon")
         if not (($root | path join "chains") | path exists) {
@@ -684,6 +713,10 @@ def test-request-body-chain-single-pass [] {
         let exec_event = ($exec_events | last)
         assert equal ($exec_event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "api chain exec expanded a response-controlled value twice"
         assert equal (($exec_event.body | from json).value) "ZZ{{late}}ZZ"
+        assert equal (request-body-events $server | where path == "/chain-raw" | get body) ["raw text" "raw text"] "api chain run/exec changed scalar raw bodies"
+        assert equal (
+            request-body-events $server | where path == "/chain-raw-large" | get body | each {|body| $body | str length }
+        ) [40000 40000] "api chain run/exec did not preserve large scalar bodies"
 
         api post $"($base)/direct-header" -H {"X-Direct": "{{late}}"} -b {ok: true} --raw --no-history | ignore
         assert equal ((request-body-event $server "/direct-header").headers | where name == "X-Direct" | first | get value) "GLOBALLEAK" "Ordinary request header interpolation changed"

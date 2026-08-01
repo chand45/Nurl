@@ -142,9 +142,11 @@ export def "api chain run" [
 
         # Resolve structured values before compact serialization, then send the encoded bytes once.
         let request_body = ($request_config | optional-get "body")
-        let has_body_content = $request_body != null and ("content" in ($request_body | columns))
-        let body_content = if $has_body_content { $request_body | get "content" } else { null }
-        let body_type_hint = if $request_body == null { null } else { $request_body | optional-get "type" }
+        let request_body_type = if $request_body == null { "nothing" } else { state-base-type $request_body }
+        let wrapped_body = $request_body_type == "record" and ("content" in ($request_body | columns))
+        let has_body_content = $wrapped_body or ($request_body != null and $request_body_type != "record")
+        let body_content = if $wrapped_body { $request_body | get "content" } else { $request_body }
+        let body_type_hint = if $wrapped_body { $request_body | optional-get "type" } else { null }
         let body_resolution = if $has_body_content {
             let body_type = (state-base-type $body_content)
             if $body_type_hint == "json" or $body_type in ["record" "list" "table"] {

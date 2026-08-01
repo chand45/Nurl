@@ -252,10 +252,15 @@ def serialize-structured-body [content: any] {
     }
 }
 
-def resolve-form-body [form: record] {
+def resolve-form-body [form: record, --no-interpolate] {
+    let content = if $no_interpolate {
+        $form
+    } else {
+        interpolate-structured $form --single-pass
+    }
     {
         kind: "encoded"
-        content: (encode-form-data (interpolate-structured $form --single-pass))
+        content: (encode-form-data $content)
     }
 }
 
@@ -1274,7 +1279,7 @@ def execute-request [
         $final_url
     }
     let body_via_stdin = (
-        (($body.kind in ["structured" "structured-encoded"]) or ($no_interpolate and (($final_body | str length) > 8000)))
+        (($body.kind in ["structured" "structured-encoded"]) or (($final_body | str length) > 8000))
         and (state-base-type $body.content) == "string"
         and $final_body != ""
     )
@@ -1792,7 +1797,7 @@ export def "api request" [
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
-            resolve-form-body $form
+            resolve-form-body $form --no-interpolate=$no_interpolate
         } else {
             resolve-body -b $body -f $body_file
         }

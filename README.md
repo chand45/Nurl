@@ -334,6 +334,9 @@ api get "https://api.example.com/flaky" --retries 3 --retry-delay 2
 
 # Don't save this request to history (A7)
 api get "https://api.example.com/users" --no-history
+
+# Replay an already-resolved generic request without variable interpolation
+api request -m POST "https://api.example.com/replay" --form { token: "{{literal}}" } --no-interpolate
 ```
 
 ### Output Control
@@ -427,6 +430,11 @@ Nurl supports three levels of variables, resolved in order (narrowest wins):
 2. **Collection environment** — Active environment for the collection
 3. **Global** — Workspace-wide in `variables.nuon`
 4. **Built-in** — Dynamic values like `{{$uuid}}`, `{{$timestamp}}`
+
+URL and ordinary header-value interpolation retain recursive variable resolution. Structured JSON
+bodies, forms, and chain values use a single pass so replacement values containing `{{...}}` cannot
+expand again. HTTP header names always remain literal. Structured body and form keys do interpolate;
+if two interpolated keys collide, the request fails before network I/O.
 
 ```nushell
 # Global variables (available to all requests)
@@ -649,6 +657,8 @@ request/response records, validates their field types before mutation, and omits
 metadata outside that schema, so history bytes, index, show/get, and export cannot expose smuggled
 credential fields. Response bodies remain unchanged. Resend requires `--headers` instead of
 transmitting mask text from a sensitive stored request header.
+Resend replays the stored URL, headers, and body without interpolation and does not reapply current
+configuration-default headers. `--headers` explicitly replaces the stored header record when needed.
 
 Caller-supplied URLs are also checked after interpolation and before authentication or network
 work. URL userinfo and exact, case-insensitive credential parameter names in queries or fragments
@@ -850,7 +860,7 @@ Run `api help` for the full command list, or:
 |----------|----------|
 | **HTTP** | `api get`, `api post`, `api put`, `api patch`, `api delete`, `api head`, `api options`, `api request` |
 | **Output control** | `--output pretty\|body\|raw\|json\|headers\|status\|none`, `--select <dot.path>`, `--verbose`, `--include`, `--save <file>`, `--binary-save <file>` |
-| **Request options** | `--form <record>`, `--follow-redirects`, `--retries <n>`, `--retry-delay <s>`, `--no-history`, `--dry-run` |
+| **Request options** | `--form <record>`, `--follow-redirects`, `--retries <n>`, `--retry-delay <s>`, `--no-history`, `--no-interpolate` (`api request`), `--dry-run` |
 | **Collections** | `api collection create/list/show/delete/copy` |
 | **Environments** | `api collection env create/use/show/set/unset/delete/list` |
 | **Requests** | `api request create/list/show/update/delete/export`, `api send` |

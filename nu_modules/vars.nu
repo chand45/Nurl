@@ -166,8 +166,9 @@ def interpolate-resolved-text [text: string, all_vars: record] {
     }
     let segments = ($text | split row -r '\{\{[^}]+\}\}')
     let chunks = ($matches | enumerate | each {|entry|
-        let var_name = ($entry.item.capture0 | str trim)
-        let placeholder = $"{{($var_name)}}"
+        let raw_var_name = $entry.item.capture0
+        let var_name = ($raw_var_name | str trim)
+        let placeholder = $"{{($raw_var_name)}}"
         let value = if ($var_name | str starts-with "$") {
             get-builtin-var $var_name
         } else if $var_name in $all_vars {
@@ -248,8 +249,9 @@ def interpolate-json-template [text: string, all_vars: record] {
     let matches = ($text | parse -r '\{\{([^}]+)\}\}')
     let segments = ($text | split row -r '\{\{[^}]+\}\}')
     let chunks = ($matches | enumerate | each {|entry|
-        let var_name = ($entry.item.capture0 | str trim)
-        let placeholder = $"{{($var_name)}}"
+        let raw_var_name = $entry.item.capture0
+        let var_name = ($raw_var_name | str trim)
+        let placeholder = $"{{($raw_var_name)}}"
         let value = if ($var_name | str starts-with "$") {
             get-builtin-var $var_name
         } else if $var_name in $all_vars {
