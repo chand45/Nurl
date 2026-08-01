@@ -49,7 +49,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/ready':
             self.emit({'ready': True})
         elif self.path == '/chain-source':
-            self.emit({'next': 'ZZ{{late}}ZZ'})
+            self.emit({'next': 'ZZ{{late}}ZZ', 'id': '101'})
         else:
             self.emit({'ok': True})
 
@@ -633,33 +633,36 @@ def test-request-body-chain-single-pass [] {
         | update default_headers {"X-Default-Chain": "{{captured}}"}
         | to nuon --indent 4
         | save -f $config_path
-        let chain = (api chain run ([
+        let steps = [
             {
                 method: GET
                 url: $"($base)/chain-source"
-                extract: {captured: "body.next"}
+                extract: {captured: "body.next", source_id: "body.id"}
             }
             {
                 method: POST
-                url: $"($base)/chain-target"
-                headers: {"{{chain_header_name}}": "literal-key", "X-Chain-Value": "{{captured}}"}
+                url: $"($base)/chain-use-{{route}}"
+                use: {route: "{{source_id}}", bound: "{{captured}}"}
+                headers: {"{{chain_header_name}}": "literal-key", "X-Chain-Value": "{{bound}}"}
                 auth: {type: bearer, token: $secret}
-                body: {content: {value: "{{captured}}"}}
+                body: {content: {value: "{{bound}}"}}
             }
             {
                 method: POST
                 url: $"($base)/chain-json-string"
-                body: {type: "json", content: "{{captured}}"}
+                use: {bound: "{{captured}}"}
+                body: {type: "json", content: "{{bound}}"}
             }
             {
                 method: POST
                 url: $"($base)/chain-json-null"
                 body: {type: "json", content: null}
             }
-        ]) --quiet)
+        ]
+        let chain = (api chain run $steps --quiet)
         assert equal $chain.success true "Single-pass chain failed"
         assert (not (($chain | to nuon) | str contains $secret)) "Chain result exposed its credential"
-        let event = (request-body-event $server "/chain-target")
+        let event = (request-body-event $server "/chain-use-101")
         assert equal ($event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "Chain header was interpolated more than once"
         assert equal ($event.headers | where name == "{{chain_header_name}}" | first | get value) "literal-key" "Chain header name was unexpectedly interpolated"
         assert equal ($event.headers | where name == "X-Expanded" | length) 0 "Chain header variable changed the header name"
@@ -668,6 +671,19 @@ def test-request-body-chain-single-pass [] {
         assert equal ($event.headers | where name == "Authorization" | length) 1 "Chain credential header was not sent exactly once"
         assert equal (request-body-event $server "/chain-json-string").body '"ZZ{{late}}ZZ"' "Chain JSON string scalar was not serialized as JSON"
         assert equal (request-body-event $server "/chain-json-null").body "null" "Chain JSON null was treated as an absent body"
+
+        let chain_path = ($root | path join "chains" "use-binding.nuon")
+        if not (($root | path join "chains") | path exists) {
+            mkdir ($root | path join "chains")
+        }
+        {name: "use-binding", steps: $steps} | to nuon --indent 4 | save -f $chain_path
+        let exec_result = (api chain exec use-binding --quiet)
+        assert equal $exec_result.success true "api chain exec did not resolve step.use"
+        let exec_events = (request-body-events $server | where path == "/chain-use-101")
+        assert equal ($exec_events | length) 2 "api chain run and exec did not both resolve the use-bound URL"
+        let exec_event = ($exec_events | last)
+        assert equal ($exec_event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "api chain exec expanded a response-controlled value twice"
+        assert equal (($exec_event.body | from json).value) "ZZ{{late}}ZZ"
 
         api post $"($base)/direct-header" -H {"X-Direct": "{{late}}"} -b {ok: true} --raw --no-history | ignore
         assert equal ((request-body-event $server "/direct-header").headers | where name == "X-Direct" | first | get value) "GLOBALLEAK" "Ordinary request header interpolation changed"

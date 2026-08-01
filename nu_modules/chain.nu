@@ -118,12 +118,11 @@ export def "api chain run" [
             continue
         }
 
-        # Merge context variables with step-specific variables
-        let step_vars = ($step | optional-get "use" | default {})
-        let all_vars = ($context | merge $step_vars)
-
-        # Resolve the step context once so extracted values are interpolated exactly once.
-        let resolved_vars = (api vars get-merged -c $step_collection -v $all_vars)
+        # Resolve use bindings once against globals, collection variables, and prior extracts.
+        let context_vars = (api vars get-merged -c $step_collection -v $context)
+        let raw_step_vars = ($step | optional-get "use" | default {})
+        let step_vars = (interpolate-record-values $raw_step_vars -e $context_vars --resolved --single-pass)
+        let resolved_vars = ($context_vars | merge $step_vars)
         let request_url = ($request_config | get "url")
         let url = (api vars interpolate $request_url -e $resolved_vars --resolved --single-pass)
         validate-secret-safe-url $url | ignore

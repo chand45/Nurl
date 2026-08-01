@@ -72,7 +72,7 @@ cleaned up after each test.
 | `test_secure_header_capture.nu` | Fileless curl response parsing, sensitive live response masking, trailers, redirects, and transport artifacts |
 | `test_state_durability.nu` | Best-effort sibling-temp replacement, raw-byte final-state detection, Windows sharing/byte-lock and POSIX sticky-directory fallback characterization, observational concurrent-reader evidence, persistence inventory, main-parity creates, fail-closed readers, runtime-qualified stale cleanup streams, copy fidelity, path aliases, and chain shapes |
 | `test_request_headers.nu` | ASCII case-insensitive request-header identity, stable precedence/order, form replacement, managed-auth and ambiguous-record preflights, legacy history, and preview/export wire fidelity |
-| `test_request_body.nu` | Structured JSON/form interpolation boundaries, null preservation, body-file injection safety, table replay/chains, single-pass headers, preview/export fidelity, and credential masking |
+| `test_request_body.nu` | Structured JSON/form interpolation boundaries, null preservation, body-file injection safety, table replay/chains, extracted `step.use` bindings through run/exec, single-pass headers, preview/export fidelity, and credential masking |
 | `run-security.nu` | Current-runtime focused security runner |
 | `run-security-compat.nu` | Minimum-runtime 13-test hermetic boundary and black-box runner |
 | `run-header-compat.nu` | Minimum-runtime deterministic request-header dedup, form, auth-collision, and preview subset |
