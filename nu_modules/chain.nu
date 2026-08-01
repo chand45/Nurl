@@ -1,7 +1,7 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured-json]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json]
 use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
@@ -136,7 +136,7 @@ export def "api chain run" [
         # Interpolate headers with collection context
         let request_headers = ($request_config | optional-get "headers")
         let headers = if $request_headers != null {
-            api vars interpolate-record $request_headers -e $resolved_vars --resolved --single-pass
+            interpolate-record-values $request_headers -e $resolved_vars --resolved --single-pass
         } else {
             {}
         }

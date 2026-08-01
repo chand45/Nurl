@@ -331,6 +331,36 @@ def interpolate-structured-value [
     }
 }
 
+def interpolate-values-only-value [
+    data: any
+    merged_vars: record
+    single_pass: bool
+] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (if $single_pass {
+            interpolate-resolved-text $data $merged_vars
+        } else {
+            interpolate-resolved-recursive-text $data $merged_vars
+        })
+    }
+    if $base_type in ["list" "table"] {
+        return ($data | reduce -f [] {|item, acc|
+            $acc | append [(interpolate-values-only-value $item $merged_vars $single_pass)]
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let new_value = (interpolate-values-only-value $row.value $merged_vars $single_pass)
+        $acc | merge { $row.key: $new_value }
+    }
+}
+
 # Recursively interpolate record keys/values and list/table elements.
 export def interpolate-structured [
     data: any
@@ -351,6 +381,27 @@ export def interpolate-structured [
         api vars get-merged -c $collection -v $extra_vars
     }
     interpolate-structured-value $data $merged_vars $single_pass
+}
+
+export def interpolate-record-values [
+    data: record
+    --extra-vars (-v): record = {}
+    --collection (-c): string = ""
+    --env-vars (-e): record = {}
+    --resolved
+    --single-pass
+] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let merged_vars = if $resolved {
+        $env_vars | merge $extra_vars
+    } else if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    interpolate-values-only-value $data $merged_vars $single_pass
 }
 
 export def interpolate-structured-json [

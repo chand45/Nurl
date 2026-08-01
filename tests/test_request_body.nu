@@ -502,7 +502,7 @@ def test-request-body-table-flows [] {
             collection: "body-null"
             method: "POST"
             url: $"($base)/saved-nulls"
-            headers: {}
+            headers: {"{{saved_header}}": "{{saved_header_value}}"}
             body: {type: "json", content: $null_body}
             auth: null
         } | to nuon --indent 4 | save -f $saved_path
@@ -569,6 +569,8 @@ def test-request-body-preview-history-and-masking [] {
         $env.API_ROOT = $root
         api init | ignore
         api vars set payload 'preview "quoted" \ value' | ignore
+        api vars set saved_header X-Saved-Expanded | ignore
+        api vars set saved_header_value saved-value | ignore
         let base = $"http://127.0.0.1:($server.port)"
         api collection create body-preview | ignore
         let request_path = ($root | path join "collections" "body-preview" "requests" "saved.nuon")
@@ -577,7 +579,7 @@ def test-request-body-preview-history-and-masking [] {
             collection: "body-preview"
             method: "POST"
             url: $"($base)/preview"
-            headers: {}
+            headers: {"{{saved_header}}": "{{saved_header_value}}"}
             body: {type: "json", content: {value: "{{payload}}"}}
             auth: null
         } | to nuon --indent 4 | save -f $request_path
@@ -587,6 +589,11 @@ def test-request-body-preview-history-and-masking [] {
         let preview = (run-command-process $root ($send_command + " --dry-run"))
         assert equal $exported.exit_code 0 $"Request export failed: ($exported.stderr)"
         assert equal ($exported.stdout | str trim) ($preview.stdout | str trim) "Request export differed from send preview"
+        let saved_event = (request-body-event $server "/preview")
+        let literal_saved_headers = ($saved_event.headers | where name == "{{saved_header}}")
+        assert equal ($literal_saved_headers | length) 1 $"Saved-request literal header missing: ($saved_event.headers | to nuon)"
+        assert equal ($literal_saved_headers | first | get value) "saved-value" "Saved-request header value did not interpolate"
+        assert equal ($saved_event.headers | where name == "X-Saved-Expanded" | length) 0 "Saved-request header name was unexpectedly interpolated"
 
         let secret = "BODY-CREDENTIAL-SENTINEL"
         let before_history = (request-body-history-ids $root)
@@ -618,6 +625,7 @@ def test-request-body-chain-single-pass [] {
         $env.API_ROOT = $root
         api init | ignore
         api vars set late GLOBALLEAK | ignore
+        api vars set chain_header_name X-Expanded | ignore
         let base = $"http://127.0.0.1:($server.port)"
         let secret = "CHAIN-BODY-CREDENTIAL-SENTINEL"
         let config_path = ($root | path join "config.nuon")
@@ -634,7 +642,7 @@ def test-request-body-chain-single-pass [] {
             {
                 method: POST
                 url: $"($base)/chain-target"
-                headers: {"X-Chain-Value": "{{captured}}"}
+                headers: {"{{chain_header_name}}": "literal-key", "X-Chain-Value": "{{captured}}"}
                 auth: {type: bearer, token: $secret}
                 body: {content: {value: "{{captured}}"}}
             }
@@ -653,6 +661,8 @@ def test-request-body-chain-single-pass [] {
         assert (not (($chain | to nuon) | str contains $secret)) "Chain result exposed its credential"
         let event = (request-body-event $server "/chain-target")
         assert equal ($event.headers | where name == "X-Chain-Value" | first | get value) "ZZ{{late}}ZZ" "Chain header was interpolated more than once"
+        assert equal ($event.headers | where name == "{{chain_header_name}}" | first | get value) "literal-key" "Chain header name was unexpectedly interpolated"
+        assert equal ($event.headers | where name == "X-Expanded" | length) 0 "Chain header variable changed the header name"
         assert equal ($event.headers | where name == "X-Default-Chain" | first | get value) "ZZ{{late}}ZZ" "Chain default header was interpolated more than once"
         assert equal (($event.body | from json).value) "ZZ{{late}}ZZ" "Chain body was interpolated more than once"
         assert equal ($event.headers | where name == "Authorization" | length) 1 "Chain credential header was not sent exactly once"
@@ -688,14 +698,11 @@ def test-request-body-interpolated-header-safety [] {
         api init | ignore
         let base = $"http://127.0.0.1:($server.port)"
         api vars set bad_header "X-Good\r\nX-Evil" | ignore
-        let before_invalid = (request-body-events $server | length)
-        let invalid = try {
-            api post $"($base)/invalid-header" -H {"{{bad_header}}": value} -b {ok: true} --raw --no-history | ignore
-            null
-        } catch {|error| $error}
-        assert ($invalid != null) "Interpolated CR/LF header name unexpectedly succeeded"
-        assert ($invalid.msg | str contains "must not contain carriage returns or newlines") "Interpolated header-name error was not actionable"
-        assert equal (request-body-events $server | length) $before_invalid "Invalid interpolated header name reached the endpoint"
+        api post $"($base)/literal-header-name" -H {"{{bad_header}}": value} -b {ok: true} --raw --no-history | ignore
+        let literal_event = (request-body-event $server "/literal-header-name")
+        assert equal ($literal_event.headers | where name == "{{bad_header}}" | first | get value) "value" "Header name variable did not remain literal"
+        assert equal ($literal_event.headers | where name == "X-Good" | length) 0 "CR/LF entered a header name through variable expansion"
+        assert equal ($literal_event.headers | where name == "X-Evil" | length) 0 "Header-name variable injected a second header"
 
         api vars set bad_value "safe\r\nX-Evil: injected" | ignore
         let before_value = (request-body-events $server | length)
@@ -723,16 +730,14 @@ def test-request-body-interpolated-header-safety [] {
         assert ($invalid_preview_auth != null) "Dry-run CR/LF auth header name unexpectedly succeeded"
         assert ($invalid_preview_auth.msg | str contains "Request header names must not contain carriage returns or newlines") "Dry-run auth header error was not actionable"
 
-        api vars set header_one "X-Same" | ignore
-        api vars set header_two "x-same" | ignore
         let before_collision = (request-body-events $server | length)
         let collision = try {
-            api post $"($base)/header-collision" -H {"{{header_one}}": first, "{{header_two}}": second} -b {ok: true} --raw --no-history | ignore
+            api post $"($base)/header-collision" -H {"X-Same": first, "x-same": second} -b {ok: true} --raw --no-history | ignore
             null
         } catch {|error| $error}
         assert ($collision != null) "Interpolated header-name collision unexpectedly succeeded"
-        assert ($collision.msg | str contains "contains both 'X-Same' and 'x-same'") "Interpolated header collision error was not actionable"
-        assert equal (request-body-events $server | length) $before_collision "Interpolated header collision reached the endpoint"
+        assert ($collision.msg | str contains "contains both 'X-Same' and 'x-same'") "Header collision did not use the dedicated request-header error"
+        assert equal (request-body-events $server | length) $before_collision "Header collision reached the endpoint"
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}
