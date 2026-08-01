@@ -1372,12 +1372,12 @@ def test-auth-preview-and-export-secrecy [] {
 
         let commands = [
             {label: "generic bearer", command: $"api request -m GET (($base + '/direct-bearer') | to nuon) -a {type: bearer, token_ref: 'preview ref.+odd'} --save ($text_output | to nuon) --binary-save ($binary_output | to nuon) --dry-run", expected: ["Authorization: ******"]}
-            {label: "get basic", command: $"api get (($base + '/direct-basic') | to nuon) -a {type: basic, creds_ref: preview-basic} --dry-run", expected: ["-u ******:******"]}
+            {label: "get basic", command: $"api get (($base + '/direct-basic') | to nuon) -a {type: basic, creds_ref: preview-basic} --dry-run", expected: ["-u '******:******'"]}
             {label: "post API-key header", command: $"api post (($base + '/direct-header') | to nuon) -b {ok: true} -a {type: api_key, key_ref: preview-header} --dry-run", expected: ["X.Nurl+Key: ******"]}
             {label: "put API-key query", command: $"api put (($base + '/direct-query?existing=1#frag') | to nuon) -b {ok: true} -a {type: api_key, ref: preview-query} --dry-run", expected: ["existing=1&api%26key%3D%23%25%2B%20space%E4%B8%96%E7%95%8C~._-=******#frag"]}
             {label: "patch OAuth", command: $"api patch (($base + '/direct-oauth') | to nuon) -b {ok: true} -a {type: oauth2, ref: preview-oauth} --dry-run", expected: ["Authorization: ******"]}
             {label: "delete inline bearer", command: $"api delete (($base + '/inline-bearer') | to nuon) -a {type: bearer, token: 'PREVIEW-BEARER-SENTINEL'} --dry-run", expected: ["Authorization: ******"]}
-            {label: "head inline basic", command: $"api head (($base + '/inline-basic') | to nuon) -a {type: basic, username: user, password: 'PREVIEW-BASIC-SENTINEL'} --dry-run", expected: ["-u ******:******"]}
+            {label: "head inline basic", command: $"api head (($base + '/inline-basic') | to nuon) -a {type: basic, username: user, password: 'PREVIEW-BASIC-SENTINEL'} --dry-run", expected: ["-u '******:******'"]}
             {label: "options inline query", command: $"api options (($base + '/empty?#frag') | to nuon) -a {type: api_key, key: 'PREVIEW-QUERY-SENTINEL', query: 'api.key+odd'} --dry-run", expected: ["empty?api.key%2Bodd=******#frag"]}
             {
                 label: "sensitive explicit headers"

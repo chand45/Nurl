@@ -8,7 +8,7 @@ use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-replacement-temp-path validate-resource-name]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use string-compat.nu [ascii-equal-ignore-case]
+use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
@@ -46,6 +46,66 @@ def get-default-headers [] {
             "Content-Type": "application/json"
             "Accept": "application/json"
         }
+    }
+}
+
+def normalize-header-name [name: string] {
+    $name | ascii-upcase
+}
+
+def assert-unique-header-names [headers: record] {
+    mut observed = []
+    for name in ($headers | columns) {
+        let folded = (normalize-header-name $name)
+        let prior = ($observed | where folded == $folded)
+        if not ($prior | is-empty) {
+            let previous = ($prior | first | get name)
+            fail-command $"Request header record contains both '($previous)' and '($name)'; remove one."
+        }
+        $observed = ($observed | append {name: $name, folded: $folded})
+    }
+}
+
+def header-name-present [headers: record, name: string] {
+    let folded = (normalize-header-name $name)
+    $headers | columns | any {|candidate| (normalize-header-name $candidate) == $folded }
+}
+
+def merge-request-headers [base: record, overlay: record] {
+    assert-unique-header-names $base
+    assert-unique-header-names $overlay
+
+    let base_rows = ($base | transpose key value)
+    let overlay_rows = ($overlay | transpose key value)
+    let replaced = (
+        $base_rows
+        | reduce -f {} {|header, result|
+            let matches = (
+                $overlay_rows
+                | where {|candidate| ascii-equal-ignore-case $candidate.key $header.key }
+            )
+            if ($matches | is-empty) {
+                $result | upsert $header.key $header.value
+            } else {
+                let winner = ($matches | first)
+                $result | upsert $winner.key $winner.value
+            }
+        }
+    )
+    $overlay_rows | reduce -f $replaced {|header, result|
+        if (header-name-present $base $header.key) {
+            $result
+        } else {
+            $result | upsert $header.key $header.value
+        }
+    }
+}
+
+def managed-auth-header-name [display_auth: record] {
+    match ($display_auth.type? | default "none") {
+        "bearer" | "saml" | "basic" => "Authorization"
+        "apikey_header" => ($display_auth.header_name? | default null)
+        _ => null
     }
 }
 
@@ -140,7 +200,7 @@ def resolve-body [
 
         # Try to validate as JSON, but allow raw content
         try {
-            $file_content | from json | to json
+            $file_content | from json | to json --raw
         } catch {
             $file_content
         }
@@ -150,7 +210,7 @@ def resolve-body [
             # Pre-serialized JSON string — pass through as-is
             $body
         } else if not ($body | is-empty) {
-            $body | to json
+            $body | to json --raw
         } else {
             ""
         }
@@ -293,18 +353,22 @@ def build-curl-args-for-display [
 
     # Add body if provided
     if $body != null and $body != "" {
-        let display_body = try {
-            $body | from json | to json --raw
-        } catch {
-            $body
-        }
-        $args = ($args | append ["-d" $display_body])
+        $args = ($args | append ["-d" $body])
     }
 
     $args
 }
 
-# Convert curl arguments to a copyable shell command string
+def quote-posix-shell-arg [arg: string] {
+    if $arg =~ '^[A-Za-z0-9_@%+:,./-]+$' {
+        $arg
+    } else {
+        let escaped = ($arg | str replace --all "'" "'\\''")
+        $"'($escaped)'"
+    }
+}
+
+# Convert curl arguments to a copyable POSIX shell command string.
 def curl-args-to-string [
     args: list      # The curl arguments list
     url: string     # The URL to request
@@ -312,29 +376,10 @@ def curl-args-to-string [
     mut parts = ["curl"]
 
     for arg in $args {
-        # Check if argument needs quoting
-        let needs_quote = ($arg | str contains "'") or ($arg | str contains '"') or ($arg | str contains " ") or ($arg | str contains "$") or ($arg | str contains "&") or ($arg | str contains "?") or ($arg | str contains "=") or ($arg | str contains ";") or ($arg | str contains "(") or ($arg | str contains ")") or ($arg | str contains "{") or ($arg | str contains "}")
-
-        if $needs_quote {
-            if ($arg | str contains "'") {
-                # Escape single quotes using '\'' pattern
-                let escaped = ($arg | str replace --all "'" "'\\''")
-                $parts = ($parts | append $"'($escaped)'")
-            } else {
-                $parts = ($parts | append $"'($arg)'")
-            }
-        } else {
-            $parts = ($parts | append $arg)
-        }
+        $parts = ($parts | append (quote-posix-shell-arg ($arg | into string)))
     }
 
-    # Add URL at the end (always quote it for safety)
-    if ($url | str contains "'") {
-        let escaped_url = ($url | str replace --all "'" "'\\''")
-        $parts = ($parts | append $"'($escaped_url)'")
-    } else {
-        $parts = ($parts | append $"'($url)'")
-    }
+    $parts = ($parts | append (quote-posix-shell-arg $url))
 
     $parts | str join " "
 }
@@ -1053,8 +1098,7 @@ def execute-request [
     --binary-save (-B): string = ""  # Save binary response bytes to a file
     --quiet-binary-status             # Suppress download status in data output modes
 ] {
-    # Merge default headers with provided headers
-    let all_headers = (get-default-headers | merge $headers)
+    let all_headers = (merge-request-headers (get-default-headers) $headers)
 
     # Interpolate variables with collection context
     let final_url = if $no_interpolate {
@@ -1063,16 +1107,28 @@ def execute-request [
         api vars interpolate $url -c $collection -v $extra_vars
     }
     validate-secret-safe-url $final_url | ignore
-    let auth_context = (prepare-auth-context $auth_spec --display-only=$dry_run)
-    let display_auth = ($auth_context.display? | default {})
-    let wire_auth = ($auth_context.wire? | default null)
-    let history_auth = ($auth_context.history? | default null)
 
     let final_headers = if $no_interpolate {
         $all_headers
     } else {
         api vars interpolate-record $all_headers -c $collection -v $extra_vars
     }
+    assert-unique-header-names $final_headers
+
+    let display_auth_context = (prepare-auth-context $auth_spec --display-only)
+    let display_auth = ($display_auth_context.display? | default {})
+    let managed_header = (managed-auth-header-name $display_auth)
+    if $managed_header != null and (header-name-present $final_headers $managed_header) {
+        fail-command $"Request supplies both --auth and an '($managed_header)' header; remove one."
+    }
+    let auth_context = if $dry_run {
+        $display_auth_context
+    } else {
+        prepare-auth-context $auth_spec
+    }
+    let wire_auth = ($auth_context.wire? | default null)
+    let history_auth = ($auth_context.history? | default null)
+
     let has_sensitive_request_headers = (
         $final_headers
         | transpose key value
@@ -1433,7 +1489,7 @@ export def "api post" [
         }
         # Override Content-Type header for form encoding
         let req_headers = if not ($form | is-empty) {
-            $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+            merge-request-headers $headers {"Content-Type": "application/x-www-form-urlencoded"}
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
@@ -1476,7 +1532,7 @@ export def "api put" [
             resolve-body -b $body -f $body_file
         }
         let req_headers = if not ($form | is-empty) {
-            $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+            merge-request-headers $headers {"Content-Type": "application/x-www-form-urlencoded"}
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
@@ -1519,7 +1575,7 @@ export def "api patch" [
             resolve-body -b $body -f $body_file
         }
         let req_headers = if not ($form | is-empty) {
-            $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+            merge-request-headers $headers {"Content-Type": "application/x-www-form-urlencoded"}
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
@@ -1590,7 +1646,7 @@ export def "api request" [
             resolve-body -b $body -f $body_file
         }
         let req_headers = if not ($form | is-empty) {
-            $headers | upsert "Content-Type" "application/x-www-form-urlencoded"
+            merge-request-headers $headers {"Content-Type": "application/x-www-form-urlencoded"}
         } else { $headers }
 
         let data_output = ($raw or $select != "" or $output != "pretty")
@@ -1677,7 +1733,7 @@ export def "api send" [
         let body = if $has_body_override {
             $resolved_body_override
         } else if ($request.body?.content? | default null) != null {
-            $request.body.content | to json
+            $request.body.content | to json --raw
         } else {
             ""
         }
