@@ -53,7 +53,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'next': 'ZZ{{late}}ZZ',
                 'id': '101',
                 'opaque_url': 'T{{late}}/Q{{c}}',
-                'number': 2,
+                'number': 42,
                 'flag': True,
                 'none': None,
                 'items': [1, 'L{{late}}'],
@@ -274,6 +274,24 @@ def test-request-body-json-boundary [] {
         api vars set a "{{c}}" | ignore
         api vars set b B | ignore
         api vars set c C | ignore
+        api vars set selfref "{{selfref}}x" | ignore
+        api vars set p "{{q}}" | ignore
+        api vars set q "{{p}}" | ignore
+        let variables_path = ($root | path join "variables.nuon")
+        let unused_vars = (0..299 | reduce -f {} {|index, vars|
+            $vars | merge {($"unused_($index)"): $"{{unused_($index)}}x"}
+        })
+        open $variables_path | merge $unused_vars | to nuon | save -f $variables_path
+        api post $"($base)/unused-cycles" -b {value: static} --raw --no-history | ignore
+        assert equal ((request-body-event $server "/unused-cycles").body | from json | get value) "static" "Unused variable cycles affected an unrelated request"
+        let before_referenced_cycle = (request-body-events $server | length)
+        let referenced_cycle = try {
+            api post $"($base)/referenced-cycle" -b {value: "{{selfref}}"} --raw --no-history | ignore
+            null
+        } catch {|error| $error}
+        assert ($referenced_cycle != null) "Referenced trusted-variable cycle unexpectedly succeeded"
+        assert ($referenced_cycle.msg | str contains "Variable interpolation cycle detected at 'selfref'") "Referenced cycle error was not actionable"
+        assert equal (request-body-events $server | length) $before_referenced_cycle "Referenced cycle reached the endpoint"
         let trusted_result = (api post $"($base)/trusted-layer" -b {value: "{{a}}/{{b}}"} --raw --no-history)
         assert equal $trusted_result.request.body.value "C/B" "Direct structured body did not pre-resolve trusted variables"
         assert equal ((request-body-event $server "/trusted-layer").body | from json | get value) "C/B"
@@ -701,6 +719,9 @@ def test-request-body-chain-single-pass [] {
         api vars set static_prefix STATIC | ignore
         api vars set static_header "{{static_prefix}}-resolved" | ignore
         api vars set static_suffix tail | ignore
+        api vars set dynamic_id "{{$uuid}}" | ignore
+        api vars set shadow_cycle "{{shadow_cycle}}" | ignore
+        api vars set global_var test_value | ignore
         let secret = "CHAIN-BODY-CREDENTIAL-SENTINEL"
         let config_path = ($root | path join "config.nuon")
         open $config_path
@@ -782,6 +803,12 @@ def test-request-body-chain-single-pass [] {
                     }
                 }
             }
+            {
+                method: POST
+                url: $"($base)/chain-extracted-extension"
+                use: {captured: "{{captured}}/extra"}
+                body: {type: json, content: {value: "{{captured}}"}}
+            }
         ]
         let chain = (api chain run $steps --quiet)
         assert equal $chain.success true "Single-pass chain failed"
@@ -802,7 +829,7 @@ def test-request-body-chain-single-pass [] {
             request-body-event $server "/opaque-url/T{{late}}/Q{{c}}/STATIC-resolved" | get path
         ) "/opaque-url/T{{late}}/Q{{c}}/STATIC-resolved" "Opaque URL braces did not reach the endpoint literally"
         let typed_body = (request-body-event $server "/chain-typed").body | from json
-        assert equal $typed_body.number 2 "Opaque numeric extract became a string"
+        assert equal $typed_body.number 42 "Opaque numeric extract became a string"
         assert equal $typed_body.flag true "Opaque boolean extract lost its type"
         assert ("none" in ($typed_body | columns)) "Opaque null extract was dropped"
         assert ($typed_body.none == null) "Opaque null extract did not remain null"
@@ -815,6 +842,9 @@ def test-request-body-chain-single-pass [] {
         assert ("opaque_none" in ($chain.context | columns)) "Null extract was not retained in chain context"
         assert ($chain.context.opaque_none == null)
         assert ("missing_extract" not-in ($chain.context | columns)) "Missing extract was incorrectly stored as null"
+        assert equal (
+            request-body-event $server "/chain-extracted-extension" | get body | from json | get value
+        ) "ZZ{{late}}ZZ/extra" "Same-name use binding did not extend opaque extracted context"
 
         let chain_path = ($root | path join "chains" "use-binding.nuon")
         if not (($root | path join "chains") | path exists) {
@@ -836,9 +866,12 @@ def test-request-body-chain-single-pass [] {
         let typed_exec_body = (request-body-events $server | where path == "/chain-typed" | last | get body | from json)
         assert equal $typed_exec_body.items [1 "L{{late}}"]
         assert equal $typed_exec_body.record {inner: "R{{c}}"}
-        assert equal $typed_exec_body.number 2
+        assert equal $typed_exec_body.number 42
         assert ($typed_exec_body.none == null)
         assert equal $typed_exec_body.sentinel "__NURL_CHAIN_OPAQUE_fake__"
+        assert equal (
+            request-body-events $server | where path == "/chain-extracted-extension" | last | get body | from json | get value
+        ) "ZZ{{late}}ZZ/extra"
 
         let invalid_steps = [
             {
@@ -928,6 +961,67 @@ def test-request-body-chain-single-pass [] {
         assert equal (request-body-events $server | where path == "/trusted-text/C" | length) 2
         assert equal (request-body-events $server | where path == "/trusted-structured/C" | length) 2
 
+        api vars set B beta | ignore
+        api vars set C "{{B}}-c" | ignore
+        let use_order_steps = [
+            {
+                method: POST
+                url: $"($base)/use-self-extension"
+                use: {C: "{{C}}/extra"}
+                body: {type: json, content: {value: "{{C}}"}}
+            }
+            {
+                method: POST
+                url: $"($base)/use-order"
+                use: {shown: "{{C}}", C: "override"}
+                body: {type: json, content: {shown: "{{shown}}", current: "{{C}}"}}
+            }
+            {
+                method: POST
+                url: $"($base)/use-dynamic"
+                use: {first: "{{dynamic_id}}", second: "{{dynamic_id}}"}
+                body: {type: json, content: {first: "{{first}}", second: "{{second}}"}}
+            }
+            {
+                method: POST
+                url: $"($base)/use-shadow-cycle/{{shadow_cycle}}"
+                use: {shadow_cycle: "override"}
+                body: "shadow"
+            }
+            {
+                method: POST
+                url: $"($base)/use-forward-order"
+                use: {
+                    global_var: "{{global_var}}/extra"
+                    x: "{{b}}"
+                    b: "{{global_var}}"
+                }
+                body: {type: json, content: {global_var: "{{global_var}}", x: "{{x}}", b: "{{b}}"}}
+            }
+        ]
+        let use_order_run = (api chain run $use_order_steps --quiet)
+        assert equal ($use_order_run.results | get status) [200 200 200 200 200]
+        assert equal ((request-body-event $server "/use-self-extension").body | from json | get value) "beta-c/extra" "Same-name use binding did not extend the prior trusted value"
+        let use_order_body = (request-body-event $server "/use-order").body | from json
+        assert equal $use_order_body.shown "beta-c" "Earlier use binding did not see the prior trusted value"
+        assert equal $use_order_body.current "override" "Later use binding did not override for the request"
+        let dynamic_use_body = (request-body-event $server "/use-dynamic").body | from json
+        assert equal $dynamic_use_body.first $dynamic_use_body.second "Dynamic trusted value was re-evaluated per use binding"
+        assert equal (request-body-event $server "/use-shadow-cycle/override").body "shadow" "Use override did not shadow an unused trusted cycle"
+        let forward_body = (request-body-event $server "/use-forward-order").body | from json
+        assert equal $forward_body.global_var "test_value/extra"
+        assert equal $forward_body.x "test_value/extra" "Forward use dependency ignored an earlier override"
+        assert equal $forward_body.b "test_value/extra"
+        let use_order_path = ($root | path join "chains" "use-order.nuon")
+        {name: "use-order", steps: $use_order_steps} | to nuon --indent 4 | save -f $use_order_path
+        let use_order_exec = (api chain exec use-order --quiet)
+        assert equal ($use_order_exec.results | get status) [200 200 200 200 200]
+        assert equal (request-body-events $server | where path == "/use-self-extension" | length) 2
+        assert equal (request-body-events $server | where path == "/use-order" | length) 2
+        assert equal (request-body-events $server | where path == "/use-dynamic" | length) 2
+        assert equal (request-body-events $server | where path == "/use-shadow-cycle/override" | length) 2
+        assert equal (request-body-events $server | where path == "/use-forward-order" | length) 2
+
         api post $"($base)/direct-header" -H {"X-Direct": "{{late}}"} -b {ok: true} --raw --no-history | ignore
         assert equal ((request-body-event $server "/direct-header").headers | where name == "X-Direct" | first | get value) "GLOBALLEAK" "Ordinary request header interpolation changed"
         assert equal (api vars interpolate "{{late}}/{{late}}") "GLOBALLEAK/GLOBALLEAK" "Repeated placeholders were not all restored"
@@ -997,6 +1091,27 @@ def test-request-body-interpolated-header-safety [] {
         assert ($collision != null) "Interpolated header-name collision unexpectedly succeeded"
         assert ($collision.msg | str contains "contains both 'X-Same' and 'x-same'") "Header collision did not use the dedicated request-header error"
         assert equal (request-body-events $server | length) $before_collision "Header collision reached the endpoint"
+
+        api vars set header_cycle "{{header_cycle}}" | ignore
+        let config_path = ($root | path join "config.nuon")
+        open $config_path
+        | update default_headers {"X-Cycle": "{{header_cycle}}"}
+        | to nuon --indent 4
+        | save -f $config_path
+        api post $"($base)/override-cyclic-default" -H {"x-cycle": fixed} -b {ok: true} --raw --no-history | ignore
+        assert equal (
+            request-body-event $server "/override-cyclic-default" | get headers | where name == "x-cycle" | first | get value
+        ) "fixed" "Overridden cyclic default header was still resolved"
+        let chain_override = (api chain run ([{
+            method: POST
+            url: $"($base)/chain-override-cyclic-default"
+            headers: {"x-cycle": fixed}
+            body: {content: {ok: true}}
+        }]) --quiet)
+        assert equal $chain_override.success true "Chain resolved an overridden cyclic default header"
+        assert equal (
+            request-body-event $server "/chain-override-cyclic-default" | get headers | where name == "x-cycle" | first | get value
+        ) "fixed"
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}

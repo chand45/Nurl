@@ -2,7 +2,7 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
-use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json, resolve-trusted-vars, restore-opaque-values]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured, interpolate-structured-json, referenced-variable-names, resolve-trusted-context, resolve-trusted-vars, restore-opaque-values]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
@@ -1185,12 +1185,41 @@ def execute-request [
     --quiet-binary-status             # Suppress download status in data output modes
 ] {
     let default_headers = (get-default-headers)
+    let applicable_defaults = (
+        $default_headers
+        | transpose key value
+        | reduce -f {} {|header, result|
+            if (header-name-present $headers $header.key) {
+                $result
+            } else {
+                $result | merge { $header.key: $header.value }
+            }
+        }
+    )
+    let default_names = (referenced-variable-names $applicable_defaults)
+    let body_names = match $body.kind {
+        "structured" | "form" => (referenced-variable-names $body.content --keys)
+        "text" => (referenced-variable-names $body.content)
+        _ => []
+    }
     let resolved_vars = if $no_interpolate {
         {}
     } else if "vars" in ($resolved_context | columns) {
-        $resolved_context.vars
+        let raw_trusted = ($resolved_context.trusted_raw? | default {})
+        let overrides = $resolved_context.vars
+        let names = ($default_names | where {|name| $name not-in ($overrides | columns) })
+        let default_result = (
+            resolve-trusted-context $raw_trusted $names --cache=($resolved_context.trusted_cache? | default {})
+        )
+        $default_result.values | merge $overrides
     } else {
-        resolve-trusted-vars (api vars get-merged -c $collection -v $extra_vars)
+        let names = [
+            ...(referenced-variable-names $url)
+            ...$default_names
+            ...(referenced-variable-names $headers)
+            ...$body_names
+        ] | uniq
+        resolve-trusted-vars (api vars get-merged -c $collection -v $extra_vars) $names
     }
     let single_pass = ($resolved_context.single_pass? | default false)
 
@@ -1205,7 +1234,7 @@ def execute-request [
     let final_headers = if $no_interpolate {
         $headers
     } else if $headers_resolved {
-        let resolved_defaults = (interpolate-record-values $default_headers -e $resolved_vars --resolved --single-pass=$single_pass)
+        let resolved_defaults = (interpolate-record-values $applicable_defaults -e $resolved_vars --resolved --single-pass=$single_pass)
         let opaque_values = ($resolved_context.opaque_values? | default [])
         let restored_defaults = (restore-opaque-values $resolved_defaults $opaque_values)
         merge-request-headers $restored_defaults $headers

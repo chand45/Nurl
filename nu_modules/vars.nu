@@ -468,12 +468,62 @@ def resolve-trusted-var [
     {state: $final_state, value: $value}
 }
 
-export def resolve-trusted-vars [vars: record] {
-    mut state = {resolved: {}, resolving: []}
-    for name in ($vars | columns) {
-        $state = (resolve-trusted-var $name $vars $state).state
+def collect-referenced-variable-names [data: any, include_keys: bool] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (
+            $data
+            | parse -r '\{\{([^}]+)\}\}'
+            | each {|match| $match.capture0 | str trim }
+            | where {|name| not ($name | str starts-with "$") }
+        )
     }
-    $state.resolved
+    if $base_type in ["list" "table"] {
+        return (
+            $data
+            | each {|item| collect-referenced-variable-names $item $include_keys }
+            | flatten
+        )
+    }
+    if $base_type != "record" {
+        return []
+    }
+    $data
+    | transpose key value
+    | each {|row|
+        let key_names = if $include_keys {
+            collect-referenced-variable-names $row.key false
+        } else {
+            []
+        }
+        [
+            ...$key_names
+            ...(collect-referenced-variable-names $row.value $include_keys)
+        ]
+    }
+    | flatten
+}
+
+export def referenced-variable-names [data: any, --keys] {
+    collect-referenced-variable-names $data $keys | uniq
+}
+
+export def resolve-trusted-context [
+    vars: record
+    names: list
+    --cache: record = {}
+] {
+    mut state = {resolved: $cache, resolving: []}
+    for name in ($names | uniq) {
+        if $name in ($vars | columns) {
+            $state = (resolve-trusted-var $name $vars $state).state
+        }
+    }
+    {values: $state.resolved, cache: $state.resolved}
+}
+
+export def resolve-trusted-vars [vars: record, names: list] {
+    (resolve-trusted-context $vars $names).values
 }
 
 def restore-opaque-text [text: string, replacements: list] {

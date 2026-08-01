@@ -1,7 +1,7 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, resolve-trusted-vars, restore-opaque-values]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, referenced-variable-names, resolve-trusted-context, restore-opaque-values]
 use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
@@ -145,6 +145,82 @@ def extract-path-result [data: any, path: string] {
     {found: true, value: $current}
 }
 
+def step-trusted-dependencies [
+    raw_step_vars: record
+    raw_trusted: record
+    names: list
+] {
+    mut pending = $names
+    mut visited = []
+    mut trusted = []
+    while not ($pending | is-empty) {
+        let name = ($pending | first)
+        $pending = ($pending | skip 1)
+        if $name in $visited {
+            continue
+        }
+        $visited = ($visited | append $name)
+        if $name in ($raw_trusted | columns) {
+            $trusted = ($trusted | append $name)
+        } else if $name in ($raw_step_vars | columns) {
+            $pending = (
+                $pending
+                | append (referenced-variable-names ($raw_step_vars | get $name) --keys)
+            )
+        }
+    }
+    $trusted | uniq
+}
+
+def resolve-step-use [
+    raw_step_vars: record
+    raw_trusted: record
+    protected_context: record
+    cache: record
+] {
+    mut resolved = {}
+    mut trusted_cache = $cache
+    for binding in ($raw_step_vars | transpose key value) {
+        let names = (referenced-variable-names $binding.value --keys)
+        let overrides = ($protected_context | merge $resolved)
+        let unresolved_names = ($names | where {|name| $name not-in ($overrides | columns) })
+        let trusted_names = (step-trusted-dependencies $raw_step_vars $raw_trusted $unresolved_names)
+        let trusted_result = (resolve-trusted-context $raw_trusted $trusted_names --cache $trusted_cache)
+        $trusted_cache = $trusted_result.cache
+        let step_names = ($unresolved_names | where {|name| $name not-in ($raw_trusted | columns) })
+        let step_source = ($raw_step_vars | merge $trusted_result.values | merge $overrides)
+        let step_result = (resolve-trusted-context $step_source $step_names)
+        let available = ($trusted_result.values | merge $step_result.values | merge $overrides)
+        let value = (
+            interpolate-record-values { $binding.key: $binding.value } -e $available --resolved --single-pass
+            | get $binding.key
+        )
+        $resolved = ($resolved | merge { $binding.key: $value })
+    }
+    {vars: $resolved, cache: $trusted_cache}
+}
+
+def request-template-variable-names [request_config: record] {
+    let url_names = (referenced-variable-names ($request_config | get "url"))
+    let headers = ($request_config | optional-get "headers" | default {})
+    let header_names = (referenced-variable-names $headers)
+    let request_body = ($request_config | optional-get "body")
+    let body_names = if $request_body == null {
+        []
+    } else {
+        let body_type = (state-base-type $request_body)
+        if $body_type == "record" and ("content" in ($request_body | columns)) {
+            let content = ($request_body | get "content")
+            let type_hint = ($request_body | optional-get "type")
+            let content_type = (state-base-type $content)
+            referenced-variable-names $content --keys=($type_hint == "json" or $content_type in ["record" "list" "table"])
+        } else {
+            referenced-variable-names $request_body --keys=($body_type in ["record" "list" "table"])
+        }
+    }
+    [...$url_names ...$header_names ...$body_names] | uniq
+}
+
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
@@ -197,12 +273,18 @@ export def "api chain run" [
         }
 
         # Resolve static templates recursively while extracted values remain opaque tokens.
-        let static_vars = (resolve-trusted-vars (api vars get-merged -c $step_collection))
+        let raw_trusted = (api vars get-merged -c $step_collection)
         let protected_context = (protect-chain-context $context)
-        let context_vars = ($static_vars | merge $protected_context.vars)
         let raw_step_vars = ($step | optional-get "use" | default {})
-        let step_vars = (interpolate-record-values $raw_step_vars -e ($context_vars | merge $raw_step_vars) --resolved)
-        let resolved_vars = ($context_vars | merge $step_vars)
+        let step_result = (resolve-step-use $raw_step_vars $raw_trusted $protected_context.vars {})
+        let step_vars = $step_result.vars
+        let overrides = ($protected_context.vars | merge $step_vars)
+        let request_names = (
+            request-template-variable-names $request_config
+            | where {|name| $name not-in ($overrides | columns) }
+        )
+        let request_result = (resolve-trusted-context $raw_trusted $request_names --cache $step_result.cache)
+        let resolved_vars = ($request_result.values | merge $overrides)
         let opaque_values = $protected_context.replacements
         let request_url = ($request_config | get "url")
         let protected_url = (api vars interpolate $request_url -e $resolved_vars --resolved --single-pass)
@@ -263,13 +345,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
+                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
+                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                     error: null
                 }
             } catch {|error|
