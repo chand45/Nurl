@@ -2,10 +2,10 @@
 # Core HTTP request functionality using curl
 
 use log.nu *
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured]
 use auth.nu [SAML_AUTH_SCHEME prepare-auth-context redact-sensitive-headers sensitive-header validate-secret-safe-url]
 use history.nu ["api history save"]
-use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-replacement-temp-path validate-resource-name]
+use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
@@ -189,7 +189,7 @@ def append-query-auth [url: string, name: string, value: string, --masked] {
 
 # Resolve body from multiple input sources (inline record/string, file)
 # Priority: body-file > inline body
-# Returns: JSON string ready for request
+# Returns tagged content so interpolation happens before serialization.
 def resolve-body [
     --body (-b): any = {}          # Inline body as record, list, or pre-serialized JSON string
     --body-file (-f): string = ""  # Path to file containing body
@@ -199,21 +199,27 @@ def resolve-body [
         let file_content = (read-body-file $body_file)
 
         # Try to validate as JSON, but allow raw content
-        try {
+        let content = try {
             $file_content | from json | to json --raw
         } catch {
             $file_content
         }
+        {kind: "text", content: $content}
     } else {
-        let body_type = ($body | describe)
-        if $body_type == "string" {
-            # Pre-serialized JSON string — pass through as-is
-            $body
+        if ($body | describe) == "string" {
+            {kind: "text", content: $body}
         } else if not ($body | is-empty) {
-            $body | to json --raw
+            {kind: "structured", content: $body}
         } else {
-            ""
+            {kind: "none", content: null}
         }
+    }
+}
+
+def resolve-form-body [form: record] {
+    {
+        kind: "encoded"
+        content: (encode-form-data (interpolate-structured $form))
     }
 }
 
@@ -1085,7 +1091,7 @@ def execute-request [
     method: string
     url: string
     --headers (-H): record = {}
-    --body (-b): string = ""
+    --body (-b): record = {kind: "none", content: null}
     --auth-spec: record = {}
     --no-interpolate   # Skip variable interpolation
     --no-history       # Don't save to history
@@ -1135,10 +1141,25 @@ def execute-request [
         | any {|header| sensitive-header $header.key $header.value }
     )
 
-    let final_body = if $no_interpolate or $body == "" {
-        $body
-    } else {
-        api vars interpolate $body -c $collection -v $extra_vars
+    let final_body = match $body.kind {
+        "none" => ""
+        "encoded" => $body.content
+        "text" => {
+            if $no_interpolate or $body.content == "" {
+                $body.content
+            } else {
+                api vars interpolate $body.content -c $collection -v $extra_vars
+            }
+        }
+        "structured" => {
+            let content = if $no_interpolate {
+                $body.content
+            } else {
+                interpolate-structured $body.content -c $collection -v $extra_vars
+            }
+            $content | to json --raw
+        }
+        _ => (fail-command $"Unknown request body kind '($body.kind)'")
     }
 
     # Handle dry-run mode
@@ -1235,10 +1256,17 @@ def execute-request [
                 null
             })
         }
-        let history_request_record = if $history_auth == null {
-            $public_request_record
+        let history_body = if $binary_save != "" or $final_body == "" {
+            null
+        } else if $body.kind == "structured" and (state-base-type $body.content) != "string" {
+            $public_request_record.body
         } else {
-            $public_request_record | insert auth $history_auth
+            $final_body
+        }
+        let history_request_record = if $history_auth == null {
+            $public_request_record | update body $history_body
+        } else {
+            $public_request_record | update body $history_body | insert auth $history_auth
         }
         let history_request_record = if $has_sensitive_request_headers {
             $history_request_record | insert headers_replayable false
@@ -1272,6 +1300,21 @@ def execute-request [
     }
 
     fail-command "Request retry loop ended without a result"
+}
+
+export def execute-encoded-request [
+    method: string
+    url: string
+    body: string
+    headers: record
+    auth: record
+] {
+    let result = (execute-request $method $url -H $headers -b {kind: "encoded", content: $body} --auth-spec $auth)
+    if "_raw_body" in ($result | columns) {
+        $result | reject _raw_body
+    } else {
+        $result
+    }
 }
 
 def save-response-body [body: any, path: string, --announce] {
@@ -1483,7 +1526,7 @@ export def "api post" [
     with-api-debug $debug {
         # Form encoding takes precedence over --body/--body-file
         let final_body = if not ($form | is-empty) {
-            encode-form-data $form
+            resolve-form-body $form
         } else {
             resolve-body -b $body -f $body_file
         }
@@ -1527,7 +1570,7 @@ export def "api put" [
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
-            encode-form-data $form
+            resolve-form-body $form
         } else {
             resolve-body -b $body -f $body_file
         }
@@ -1570,7 +1613,7 @@ export def "api patch" [
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
-            encode-form-data $form
+            resolve-form-body $form
         } else {
             resolve-body -b $body -f $body_file
         }
@@ -1641,7 +1684,7 @@ export def "api request" [
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
-            encode-form-data $form
+            resolve-form-body $form
         } else {
             resolve-body -b $body -f $body_file
         }
@@ -1733,9 +1776,9 @@ export def "api send" [
         let body = if $has_body_override {
             $resolved_body_override
         } else if ($request.body?.content? | default null) != null {
-            $request.body.content | to json --raw
+            {kind: "structured", content: $request.body.content}
         } else {
-            ""
+            {kind: "none", content: null}
         }
         let effective_auth = if not ($auth | is-empty) {
             $auth

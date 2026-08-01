@@ -3,7 +3,7 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use resource-path.nu [open-state-record path-type-safe resolve-under-base]
+use resource-path.nu [open-state-record path-type-safe resolve-under-base state-base-type]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 # History entries and indexes retain their existing persistence model.
@@ -957,11 +957,12 @@ export def "api history resend" [
 
     # Rebuild body record from stored body (avoid double-encoding)
     let body_record = if ($entry.request.body? | default null) != null {
-        if ($entry.request.body | describe | str starts-with "record") or ($entry.request.body | describe | str starts-with "list") {
+        let body_type = (state-base-type $entry.request.body)
+        if $body_type in ["record" "list"] {
             $entry.request.body
         } else {
-            # body stored as string — decode it
-            try { $entry.request.body | into string | from json } catch { {} }
+            # Text and encoded bodies are stored as exact request bytes.
+            $entry.request.body | into string
         }
     } else {
         {}

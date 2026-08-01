@@ -1,8 +1,8 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use http.nu ["api request"]
+use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract", interpolate-structured]
+use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
 use command-error.nu [fail-command]
@@ -140,13 +140,13 @@ export def "api chain run" [
             {}
         }
 
-        # Interpolate body with collection context
+        # Resolve structured values before compact serialization, then send the encoded bytes once.
         let request_body = ($request_config | optional-get "body")
         let body_content = if $request_body == null { null } else { $request_body | optional-get "content" }
         let body = if $body_content != null {
-            if ($body_content | describe | str starts-with "record") or ($body_content | describe | str starts-with "list") {
-                let interpolated = (api vars interpolate-record $body_content -v $all_vars -c $step_collection)
-                $interpolated | to json
+            let body_type = (state-base-type $body_content)
+            if $body_type in ["record" "list"] {
+                interpolate-structured $body_content -v $all_vars -c $step_collection | to json --raw
             } else {
                 api vars interpolate ($body_content | into string) -v $all_vars -c $step_collection
             }
@@ -166,13 +166,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                result: (execute-encoded-request $method $url $body $headers $auth)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                    result: (execute-encoded-request $method $url $body $headers $auth)
                     error: null
                 }
             } catch {|error|

@@ -1,7 +1,8 @@
 # Variable Interpolation Module
 # Handles {{variable}} replacement and built-in dynamic variables
 
-use resource-path.nu [open-state-record open-state-record-or-default resolve-under-base save-state-replace validate-resource-name]
+use resource-path.nu [open-state-record open-state-record-or-default resolve-under-base save-state-replace state-base-type validate-resource-name]
+use command-error.nu [fail-command]
 use string-compat.nu [optional-get]
 
 # ============================================================================
@@ -217,54 +218,62 @@ export def "api vars interpolate" [
     $result
 }
 
-# Interpolate variables in a record (recursively)
-# Resolution order: extra-vars > collection env > global vars > built-ins
+def interpolate-structured-value [
+    data: any
+    merged_vars: record
+    collection: string
+] {
+    let base_type = (state-base-type $data)
+    if $base_type == "string" {
+        return (api vars interpolate $data -c $collection -e $merged_vars)
+    }
+    if $base_type == "list" {
+        return ($data | each {|item|
+            interpolate-structured-value $item $merged_vars $collection
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let new_key = (api vars interpolate $row.key -c $collection -e $merged_vars)
+        if $new_key in ($acc | columns) {
+            fail-command $"Structured interpolation produced duplicate key '($new_key)'"
+        }
+        let new_value = (interpolate-structured-value $row.value $merged_vars $collection)
+        $acc | merge { $new_key: $new_value }
+    }
+}
+
+# Recursively interpolate record keys/values and list/table elements.
+export def interpolate-structured [
+    data: any
+    --extra-vars (-v): record = {}
+    --collection (-c): string = ""
+    --env-vars (-e): record = {}
+] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let merged_vars = if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    interpolate-structured-value $data $merged_vars $collection
+}
+
+# Backward-compatible record entry point.
 export def "api vars interpolate-record" [
     data: record
     --extra-vars (-v): record = {}
     --collection (-c): string = ""   # Collection context for variable resolution
     --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
 ] {
-    if $collection != "" {
-        validate-resource-name "collection" $collection | ignore
-    }
-
-    # Return empty record if input is empty
-    if ($data | is-empty) {
-        return {}
-    }
-
-    # Pre-fetch merged variables once for efficiency
-    let merged_vars = if not ($env_vars | is-empty) {
-        $env_vars | merge $extra_vars
-    } else {
-        api vars get-merged -c $collection -v $extra_vars
-    }
-
-    let rows = ($data | transpose key value | each {|row|
-        let new_value = match ($row.value | describe | str replace -r '<.*' '') {
-            "string" => (api vars interpolate $row.value -v $extra_vars -c $collection -e $merged_vars)
-            "record" => (api vars interpolate-record $row.value -v $extra_vars -c $collection -e $merged_vars)
-            "list" => ($row.value | each {|item|
-                if ($item | describe | str starts-with "string") {
-                    api vars interpolate $item -v $extra_vars -c $collection -e $merged_vars
-                } else if ($item | describe | str starts-with "record") {
-                    api vars interpolate-record $item -v $extra_vars -c $collection -e $merged_vars
-                } else {
-                    $item
-                }
-            })
-            _ => $row.value
-        }
-        { $row.key: $new_value }
-    })
-
-    # Handle empty rows after processing
-    if ($rows | is-empty) {
-        return {}
-    }
-
-    $rows | reduce {|it, acc| $acc | merge $it }
+    interpolate-structured $data -v $extra_vars -c $collection -e $env_vars
 }
 
 # List all available variables (global variables and built-ins)
