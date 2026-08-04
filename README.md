@@ -595,7 +595,7 @@ description or token fields.
 Every request is automatically logged. The history index enables instant search without scanning individual files.
 
 ```nushell
-# List recent requests (uses fast O(1) index lookup)
+# List recent requests (uses the history index)
 api history list
 api history list -l 20      # limit to 20 most recent
 
@@ -623,6 +623,16 @@ api history clear --all --force           # remove every history entry
 # Export history
 api history export --output history.json
 ```
+
+History commands coordinate index reads and writes through `.history-index.lock` in the API
+workspace root. The lock records its PID, hostname, acquisition time, and a unique token. Nurl
+automatically recovers a lock, after a brief publication grace period, only when it belongs to this
+host and its owner PID is demonstrably no longer running; live, remote-host, newly publishing,
+ownerless, or malformed locks remain fail-closed. If a history command times out after 30 seconds,
+first confirm that no Nurl process is
+using that workspace, then remove the exact `.history-index.lock` directory named in the error and
+retry. `.history-index.lock.release-*` directories are already released and never block commands;
+if a cleanup warning leaves one behind, it can be removed at any time.
 
 History uses one deterministic newest-first order for the index, list, search, and JSON/CSV export.
 New entries store RFC3339 UTC timestamps with nine fractional digits (for example,

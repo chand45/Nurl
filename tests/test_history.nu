@@ -117,6 +117,143 @@ def cleanup-history-alias-fixture [root: string, alias_path: string, alias_creat
     }
 }
 
+def history-lock-test-hostname [] {
+    ^hostname | str trim
+}
+
+def history-lock-test-owner [pid: int, token: string] {
+    {
+        pid: $pid
+        hostname: (history-lock-test-hostname)
+        acquired_at: (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
+        token: (if $token =~ '^[0-9a-fA-F]{8}-' { $token } else { random uuid })
+    }
+}
+
+def history-lock-test-process-running [pid: int] {
+    if $nu.os-info.name == "windows" {
+        let command = (
+            "if (Get-Process -Id "
+            + ($pid | into string)
+            + " -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+        )
+        let result = (
+            ^powershell.exe -NoProfile -NonInteractive -Command $command
+            | complete
+        )
+        $result.exit_code == 0
+    } else {
+        (^kill -0 $pid | complete).exit_code == 0
+    }
+}
+
+def stop-history-lock-test-process [pid: int] {
+    if $nu.os-info.name == "windows" {
+        let stopper = (test-temp-dir | path join $"history-lock-stop-($pid)-(random uuid).ps1")
+        'param([int]$RootPid)
+$frontier = @($RootPid)
+$all = @($RootPid)
+while ($frontier.Count -gt 0) {
+    $next = @(Get-CimInstance Win32_Process | Where-Object { $frontier -contains [int]$_.ParentProcessId } | ForEach-Object { [int]$_.ProcessId })
+    if ($next.Count -eq 0) { break }
+    $all += $next
+    $frontier = $next
+}
+[array]::Reverse($all)
+foreach ($processId in $all) {
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $processId -Force
+    }
+}
+' | save -f $stopper
+        ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $stopper $pid | complete | ignore
+        rm -f $stopper
+    } else {
+        ^kill -TERM $pid | complete | ignore
+    }
+    mut stopped = false
+    for _ in 1..50 {
+        if not (history-lock-test-process-running $pid) {
+            $stopped = true
+            break
+        }
+        sleep 20ms
+    }
+    assert $stopped $"history lock test process ($pid) did not stop"
+}
+
+def start-history-lock-owner-process [] {
+    let launched = if $nu.os-info.name == "windows" {
+        ^powershell.exe -NoProfile -NonInteractive -Command (
+            "$process = Start-Process -PassThru -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 3600'); [Console]::Out.Write($process.Id)"
+        ) | complete
+    } else {
+        ^sh -c 'sleep 3600 >/dev/null 2>&1 & echo $!' | complete
+    }
+    assert equal $launched.exit_code 0 $"could not launch history lock owner: ($launched.stderr)"
+    let pid = ($launched.stdout | str trim | into int)
+    assert (history-lock-test-process-running $pid) "history lock owner exited before the fixture was ready"
+    $pid
+}
+
+def start-history-lock-contender [tmp: string, root: string, label: string] {
+    let script = ($tmp | path join $"($label).nu")
+    let stdout = ($tmp | path join $"($label).stdout")
+    let stderr = ($tmp | path join $"($label).stderr")
+    let module_path = ($env.NURL_REPO_ROOT | path join "nu_modules" "mod.nu")
+    [
+        $"use ($module_path | to nuon) *"
+        $"$env.API_ROOT = ($root | to nuon)"
+        "api history list --limit 1 | ignore"
+    ] | str join "\n" | save -f $script
+
+    let launched = if $nu.os-info.name == "windows" {
+        let worker = ($tmp | path join $"($label)-worker.ps1")
+        let launcher = ($tmp | path join $"($label)-launcher.ps1")
+        'param($Exe, $Script, $Stdout, $Stderr)
+$process = Start-Process -PassThru -WindowStyle Hidden -FilePath $Exe -ArgumentList @("--no-config-file", $Script) -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
+Wait-Process -Id $process.Id
+' | save -f $worker
+        let launcher_source = "param($Worker, $Exe, $Script, $Stdout, $Stderr)
+$arguments = @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    ('\"{0}\"' -f $Worker),
+    ('\"{0}\"' -f $Exe),
+    ('\"{0}\"' -f $Script),
+    ('\"{0}\"' -f $Stdout),
+    ('\"{0}\"' -f $Stderr)
+)
+$process = Start-Process -PassThru -WindowStyle Hidden -FilePath 'powershell.exe' -ArgumentList $arguments
+[Console]::Out.Write($process.Id)
+"
+        $launcher_source | save -f $launcher
+        ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher $worker $nu.current-exe $script $stdout $stderr | complete
+    } else {
+        ^sh -c '"$1" --no-config-file "$2" >"$3" 2>"$4" & echo $!' sh $nu.current-exe $script $stdout $stderr | complete
+    }
+    assert equal $launched.exit_code 0 $"could not launch history lock contender: ($launched.stderr)"
+    {
+        pid: ($launched.stdout | str trim | into int)
+        stdout: $stdout
+        stderr: $stderr
+    }
+}
+
+def assert-no-history-lock-artifacts [root: string, label: string] {
+    let artifacts = (
+        ls -a $root
+        | where {|entry|
+            let name = ($entry.name | path basename)
+            ($name == ".history-index.lock") or ($name | str starts-with ".history-index.lock.release-")
+        }
+    )
+    assert ($artifacts | is-empty) $"($label) left history lock artifacts: ($artifacts | get name | to nuon)"
+}
+
 # -- B1: history index is maintained --------------------------------------------------
 
 def test-b1-index-created-on-save [] {
@@ -556,18 +693,143 @@ def test-b1-save-loads-index-once [] {
 
 def test-b1-history-lock-path-compatibility [] {
     let tmp = (make-temp-dir "b1-lock-path")
-    let root = ($tmp | path join "literal%PATH%segment")
+    let missing_root = ($tmp | path join "missing parent" "deep%PATH%root")
+    $env.API_ROOT = $missing_root
+    let missing_started = (date now)
+    assert equal (api history rebuild-index | length) 0 "missing-root rebuild changed its result"
+    assert (((date now) - $missing_started) < 1sec) "missing-root rebuild did not return promptly"
+    assert (not ($missing_root | path exists)) "missing-root rebuild created API_ROOT or lock parents"
+
+    let root = ($tmp | path join "literal space%PATH%segment")
     mkdir $root
     $env.API_ROOT = $root
 
     assert equal (api history rebuild-index | length) 0 "index-free rebuild changed its result"
-    assert (not (($root | path join ".history-index.lock") | path exists)) "index-free rebuild left the history lock behind"
+    assert-no-history-lock-artifacts $root "index-free rebuild"
 
     init-workspace
     let id = (api history save (synth-req "https://example.com/lock-path") (synth-res 200))
     assert equal (api history get $id | get id) $id "history lock changed a percent-bearing API_ROOT"
-    assert (not (($root | path join ".history-index.lock") | path exists)) "save left the history lock behind"
+    assert-no-history-lock-artifacts $root "percent-and-space root save"
     cleanup $tmp
+}
+
+def test-b1-dead-history-lock-recovers [] {
+    let tmp = (make-temp-dir "b1-dead-lock")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let owner_pid = (start-history-lock-owner-process)
+    let lock_path = ($tmp | path join ".history-index.lock")
+    mkdir $lock_path
+    history-lock-test-owner $owner_pid "killed-owner" | to nuon | save ($lock_path | path join "owner.nuon")
+    stop-history-lock-test-process $owner_pid
+
+    let started = (date now)
+    api history list --limit 1 | ignore
+    assert (((date now) - $started) < 5sec) "dead same-host lock was not recovered promptly"
+    assert-no-history-lock-artifacts $tmp "dead-owner recovery"
+    cleanup $tmp
+}
+
+def test-b1-live-history-lock-is-not-stolen [] {
+    let tmp = (make-temp-dir "b1-live-lock")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let owner_pid = (start-history-lock-owner-process)
+    let lock_path = ($tmp | path join ".history-index.lock")
+    let owner_path = ($lock_path | path join "owner.nuon")
+    mkdir $lock_path
+    history-lock-test-owner $owner_pid "live-owner" | to nuon | save $owner_path
+    let owner_before = (open $owner_path --raw)
+    let contender = (start-history-lock-contender $tmp $tmp "live-contender")
+    sleep 500ms
+
+    let failure = try {
+        assert (history-lock-test-process-running $contender.pid) "contender bypassed a demonstrably live lock"
+        assert equal (open $owner_path --raw) $owner_before "contender replaced live owner metadata"
+        null
+    } catch {|error| $error }
+    stop-history-lock-test-process $contender.pid
+    stop-history-lock-test-process $owner_pid
+    rm -rf $lock_path
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-ownerless-and-malformed-locks-fail-closed [] {
+    let tmp = (make-temp-dir "b1-unknown-locks")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let lock_path = ($tmp | path join ".history-index.lock")
+    let owner_path = ($lock_path | path join "owner.nuon")
+
+    mkdir $lock_path
+    let publishing = (start-history-lock-contender $tmp $tmp "ownerless-contender")
+    sleep 500ms
+    assert (history-lock-test-process-running $publishing.pid) "new ownerless lock was stolen during metadata publication grace"
+    stop-history-lock-test-process $publishing.pid
+    rm -rf $lock_path
+
+    mkdir $lock_path
+    {
+        pid: -1
+        hostname: (history-lock-test-hostname)
+        acquired_at: "not-a-timestamp"
+        token: "../not-a-uuid"
+    } | to nuon | save $owner_path
+    sleep 2100ms
+    let malformed_before = (open $owner_path --raw)
+    let malformed = (start-history-lock-contender $tmp $tmp "malformed-contender")
+    sleep 500ms
+    let failure = try {
+        assert (history-lock-test-process-running $malformed.pid) "old malformed lock was evicted without established ownership"
+        assert equal (open $owner_path --raw) $malformed_before "malformed owner metadata was replaced"
+        null
+    } catch {|error| $error }
+    stop-history-lock-test-process $malformed.pid
+    rm -rf $lock_path
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def test-b1-concurrent-dead-lock-recovery [] {
+    let tmp = (make-temp-dir "b1-concurrent-dead-lock")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let lock_path = ($tmp | path join ".history-index.lock")
+    mkdir $lock_path
+    history-lock-test-owner 2147483647 (random uuid) | to nuon | save ($lock_path | path join "owner.nuon")
+    sleep 2100ms
+
+    let outcomes = 1..8 | par-each {|_| run-command-process $tmp "api history list --limit 1 | ignore" }
+    let failed = ($outcomes | where exit_code != 0)
+    assert ($failed | is-empty) $"concurrent stale-lock recovery failed: ($failed | select exit_code stderr | to nuon)"
+    assert-no-history-lock-artifacts $tmp "concurrent dead-owner recovery"
+    cleanup $tmp
+}
+
+def test-b1-lock-creation-hard-errors-fail-fast [] {
+    if $nu.os-info.name == "windows" or ((^id -u | into int) == 0) {
+        error make {msg: "SKIP: POSIX non-root permission fixture"}
+    }
+    let tmp = (make-temp-dir "b1-lock-permission")
+    $env.API_ROOT = $tmp
+    init-workspace
+    ^chmod 500 $tmp
+    let started = (date now)
+    let result = (run-command-process $tmp "api history list --limit 1 | ignore")
+    let elapsed = ((date now) - $started)
+    ^chmod 700 $tmp
+
+    let failure = try {
+        assert ($result.exit_code != 0) "non-writable lock parent unexpectedly succeeded"
+        assert ($elapsed < 5sec) "hard lock creation error was misclassified as 30-second contention"
+        assert ($result.stderr | str contains "Could not create history index lock") "hard lock error lost its operation context"
+        assert (not ($result.stderr | str contains "Timed out waiting")) "hard lock error emitted misleading timeout remediation"
+        null
+    } catch {|error| $error }
+    cleanup $tmp
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 def test-b1-concurrent-saves-preserve-index [] {
@@ -593,12 +855,7 @@ def test-b1-concurrent-saves-preserve-index [] {
     assert equal ($index | length) $count "concurrent saves dropped index rows"
     assert equal ($index | get id | uniq | length) $count "concurrent saves produced duplicate index IDs"
     assert equal ($files | length) $count "concurrent saves dropped entry files"
-    assert (not (($tmp | path join ".history-index.lock") | path exists)) "concurrent saves left the index lock behind"
-    assert (
-        ls -a $tmp
-        | where {|entry| ($entry.name | path basename) | str starts-with ".history-index.lock.release-" }
-        | is-empty
-    ) "concurrent saves left a released lock directory behind"
+    assert-no-history-lock-artifacts $tmp "concurrent saves"
     cleanup $tmp
 }
 
@@ -1103,10 +1360,12 @@ def test-b1-rebuild-entry-io-failure-preserves-index [] {
     let blocker = (start-history-read-blocker $tmp $blocked_path)
 
     let explicit = (run-command-process $tmp "api history rebuild-index | ignore")
+    let explicit_lock_remained = (($tmp | path join ".history-index.lock") | path exists)
     let index_after_explicit = (open $index_path --raw)
     "{}" | save -f $index_path
     let invalid_index_before = (open $index_path --raw)
     let automatic = (run-command-process $tmp "api history list --limit 100 | ignore")
+    let automatic_lock_remained = (($tmp | path join ".history-index.lock") | path exists)
     let invalid_index_after = (open $index_path --raw)
 
     let stop_failure = try { stop-history-delete-blocker $blocker; null } catch {|error| $error }
@@ -1126,6 +1385,8 @@ def test-b1-rebuild-entry-io-failure-preserves-index [] {
         }
         assert equal $index_after_explicit $index_before "explicit failed rebuild replaced the valid index"
         assert equal $invalid_index_after $invalid_index_before "automatic failed rebuild replaced the invalid index"
+        assert (not $explicit_lock_remained) "explicit rebuild body error retained the history lock"
+        assert (not $automatic_lock_remained) "automatic rebuild body error retained the history lock"
         assert equal (open $readable_path --raw) $readable_before "failed rebuild changed the readable entry"
         assert equal (open $blocked_path --raw) $blocked_before "failed rebuild changed the blocked entry"
 
@@ -1674,6 +1935,11 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
         ...(run-suite-history-compatibility)
+        (run-test "B1: killed same-host lock owners recover promptly" { test-b1-dead-history-lock-recovers })
+        (run-test "B1: live history lock owners are never stolen" { test-b1-live-history-lock-is-not-stolen })
+        (run-test "B1: ownerless and malformed locks stay fail-closed" { test-b1-ownerless-and-malformed-locks-fail-closed })
+        (run-test "B1: concurrent dead-lock reclaimers preserve lock generations" { test-b1-concurrent-dead-lock-recovery })
+        (run-test "B1: hard lock creation errors fail fast" { test-b1-lock-creation-hard-errors-fail-fast })
         (run-test "B1: concurrent saves preserve every index row" { test-b1-concurrent-saves-preserve-index })
         (run-test "B1: API_ROOT and default environment stay isolated" { test-b1-api-root-environment-scoping })
         (run-test "B1: structurally invalid indexes rebuild canonically" { test-b1-invalid-index-shapes-recover })
