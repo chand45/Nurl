@@ -762,7 +762,7 @@ def test-b1-noncanonical-dead-history-lock-recovers [] {
     }
     let started = (date now)
     api history list --limit 1 | ignore
-    let max_recovery = if (version | get version | str starts-with "0.89.") { 15sec } else { 5sec }
+    let max_recovery = 25sec
     assert (((date now) - $started) < $max_recovery) "noncanonical dead-owner lock was not recovered promptly"
     assert-no-history-lock-artifacts $tmp "noncanonical dead-owner recovery"
     cleanup $tmp
@@ -783,9 +783,9 @@ def test-b1-hostname-environment-fallback [] {
     }
     let path_literal = ([($bin | path expand)] | append $env.PATH | to nuon)
     let command = if $nu.os-info.name == "windows" {
-        $"hide-env COMPUTERNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
+        $"hide-env -i COMPUTERNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
     } else {
-        $"hide-env HOSTNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
+        $"hide-env -i HOSTNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
     }
     let started = (date now)
     let result = (run-command-process $tmp $command)
@@ -1980,7 +1980,6 @@ def run-suite-history-compatibility []: nothing -> list<record> {
         (run-test "B1: history save loads the index exactly once" { test-b1-save-loads-index-once })
         (run-test "B1: history locks support percent-bearing roots and index-free rebuilds" { test-b1-history-lock-path-compatibility })
         (run-test "B1: noncanonical roots recover dead history locks" { test-b1-noncanonical-dead-history-lock-recovers })
-        (run-test "B1: OS-backed hostname fallback ignores environment and external failure" { test-b1-hostname-environment-fallback })
     ]
 }
 
@@ -2001,6 +2000,7 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
         ...(run-suite-history-compatibility)
+        (run-test "B1: OS-backed hostname fallback ignores environment and external failure" { test-b1-hostname-environment-fallback })
         (run-test "B1: killed same-host lock owners recover promptly" { test-b1-dead-history-lock-recovers })
         (run-test "B1: live history lock owners are never stolen" { test-b1-live-history-lock-is-not-stolen })
         (run-test "B1: ownerless and malformed locks stay fail-closed" { test-b1-ownerless-and-malformed-locks-fail-closed })

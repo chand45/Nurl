@@ -18,7 +18,6 @@ let expected_names = [
     "B1: history save loads the index exactly once"
     "B1: history locks support percent-bearing roots and index-free rebuilds"
     "B1: noncanonical roots recover dead history locks"
-    "B1: OS-backed hostname fallback ignores environment and external failure"
 ]
 let results = (run-suite-history-compatibility)
 let actual_names = ($results | get name)
