@@ -374,6 +374,234 @@ def test-b1-history-id-resolution [] {
     cleanup $tmp
 }
 
+def test-b1-index-order-equivalence [] {
+    let tmp = (make-temp-dir "b1-order-equivalence")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let date_dir = "2026-01-01"
+    let fixtures = [
+        (history-fixture "order-newest" "2026-01-01T00:00:03.000000003Z" "https://example.com/order/newest")
+        (history-fixture "order-middle" "2026-01-01T02:00:02+02:00" "https://example.com/order/middle")
+        (history-fixture "order-oldest" "2026-01-01T00:00:01Z" "https://example.com/order/oldest")
+    ]
+    for entry in $fixtures { save-history-fixture $tmp $date_dir $entry }
+    let summaries = ($fixtures | each {|entry| history-summary $entry $date_dir })
+    let expected = ($fixtures | get id)
+    let index_path = ($tmp | path join "history" "index.nuon")
+
+    for variant in [
+        {name: "canonical", entries: $summaries}
+        {name: "reverse", entries: ($summaries | reverse)}
+        {name: "shuffled", entries: [($summaries | get 1) ($summaries | get 2) ($summaries | get 0)]}
+    ] {
+        $variant.entries | to nuon | save -f $index_path
+        let before = (open $index_path --raw)
+        assert equal (api history list --limit 20 | get id) $expected $"($variant.name) list order changed"
+        assert equal (api history search "order/" --limit 20 | get id) $expected $"($variant.name) search order changed"
+
+        let json_export = (run-command-process $tmp "api history export --format json --limit 20")
+        let csv_export = (run-command-process $tmp "api history export --format csv --limit 20")
+        assert equal $json_export.exit_code 0 $"($variant.name) JSON export failed"
+        assert equal $csv_export.exit_code 0 $"($variant.name) CSV export failed"
+        assert equal ($json_export.stdout | from json | get id) $expected $"($variant.name) JSON export order changed"
+        assert equal ($csv_export.stdout | from csv | get id) $expected $"($variant.name) CSV export order changed"
+        assert equal (open $index_path --raw) $before $"($variant.name) read surfaces rewrote index bytes"
+    }
+    cleanup $tmp
+}
+
+def test-b1-legacy-ordering-equivalence [] {
+    let tmp = (make-temp-dir "b1-legacy-ordering")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let date_dir = "2026-01-01"
+    mut fixtures = [
+        (history-fixture "fractional-newest" "2026-01-01T00:00:01.100000000Z" "https://example.com/legacy/fractional")
+        (history-fixture "legacy-second-only" "2026-01-01T00:00:01Z" "https://example.com/legacy/second")
+        (history-fixture "offset-entry" "2026-01-01T02:00:00+02:00" "https://example.com/legacy/offset")
+        (history-fixture "tied-entry" "2026-01-01T00:00:00Z" "https://example.com/legacy/tied")
+        (history-fixture "date-only" "2026-01-01" "https://example.com/legacy/date")
+        (history-fixture "malformed" "not-a-timestamp" "https://example.com/legacy/malformed")
+        (history-fixture "missing-timestamp" null "https://example.com/legacy/missing")
+        (history-fixture "leap-second" "2026-06-30T23:59:60Z" "https://example.com/legacy/leap")
+    ]
+    let runtime_minor = (version | get version | split row "." | get 1 | into int)
+    if $runtime_minor != 89 {
+        $fixtures = ($fixtures | append (
+            history-fixture "out-of-range" "2026-13-45T00:00:00Z" "https://example.com/legacy/range"
+        ))
+    }
+    for entry in $fixtures { save-history-fixture $tmp $date_dir $entry }
+    let expected = if $runtime_minor == 89 {
+        ["leap-second"] | append ($fixtures | where id != "leap-second" | get id)
+    } else {
+        $fixtures | get id
+    }
+    let index_path = ($tmp | path join "history" "index.nuon")
+    ($fixtures | each {|entry| history-summary $entry $date_dir }) | to nuon | save -f $index_path
+
+    assert equal (api history list --limit 20 | get id) $expected "legacy fallback order changed"
+    assert equal (api history search "legacy/" --limit 20 | get id) $expected "legacy fallback search order changed"
+    api history rebuild-index | ignore
+    assert equal (api history list --limit 20 | get id) $expected "rebuild changed legacy fallback order"
+    cleanup $tmp
+}
+
+def test-b1-unusable-index-equivalence [] {
+    let tmp = (make-temp-dir "b1-unusable-index")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let newer = (history-fixture "unusable-newer" "2026-01-02T00:00:02Z" "https://example.com/unusable/newer")
+    let older = (history-fixture "unusable-older" "2026-01-01T00:00:01Z" "https://example.com/unusable/older")
+    save-history-fixture $tmp "2026-01-02" $newer
+    save-history-fixture $tmp "2026-01-01" $older
+    let index_path = ($tmp | path join "history" "index.nuon")
+    let expected = [$newer.id $older.id]
+
+    for state in [
+        {name: "absent", raw: null}
+        {name: "corrupt", raw: "[{id:"}
+        {name: "wrong-shape", raw: "{not: 'a list'}"}
+        {name: "empty-id", raw: "[{id: '', date_dir: '2026-01-01'}]"}
+        {name: "missing-column", raw: "[{id: 'missing-date-dir'}]"}
+    ] {
+        if ($index_path | path exists) { rm $index_path }
+        if $state.raw != null { $state.raw | save -f $index_path }
+        assert equal (api history list --limit 20 | get id) $expected $"($state.name) index did not rebuild equivalently"
+        assert equal (open $index_path | get id) $expected $"($state.name) rebuilt index bytes were not canonical"
+    }
+    cleanup $tmp
+}
+
+def test-b1-resolution-workspace-equivalence [] {
+    let tmp = (make-temp-dir "b1-resolution-workspace")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let fixtures = [
+        {date_dir: "2026-01-01", entry: (history-fixture "duplicate-id" "2026-01-01T00:00:01Z" "https://example.com/duplicate/one")}
+        {date_dir: "2026-01-02", entry: (history-fixture "duplicate-id" "2026-01-02T00:00:01Z" "https://example.com/duplicate/two")}
+        {date_dir: "2026-01-02", entry: (history-fixture "only-on-disk" "2026-01-02T00:00:02Z" "https://example.com/unindexed")}
+        {date_dir: "2026-01-02", entry: (history-fixture "CaseSensitive" "2026-01-02T00:00:03Z" "https://example.com/case")}
+        {date_dir: "2026-01-02", entry: (history-fixture "exact" "2026-01-02T00:00:04Z" "https://example.com/exact")}
+        {date_dir: "2026-01-02", entry: (history-fixture "prefix-exact-suffix" "2026-01-02T00:00:05Z" "https://example.com/partial")}
+    ]
+    for fixture in $fixtures {
+        save-history-fixture $tmp $fixture.date_dir $fixture.entry
+    }
+    let index_path = ($tmp | path join "history" "index.nuon")
+    [
+        (history-summary ($fixtures | get 0 | get entry) "2026-01-01")
+        {id: "stale-row", timestamp: "2026-01-03T00:00:00Z", method: "GET", url: "https://example.com/stale", status: 200, time_ms: 1, date_dir: "2026-01-03"}
+    ] | to nuon | save -f $index_path
+    let before = (open $index_path --raw)
+
+    assert equal (api history get "exact" | get id) "exact" "exact ID did not win over a containing fragment"
+    assert equal (api history show "only-on" | get id) "only-on-disk" "file absent from the index was not resolved"
+    assert equal (api history get "stale-row") null "stale index row resolved without an entry file"
+    assert equal (api history get "casesensitive") null "wrong-case ID unexpectedly resolved"
+    let ambiguity = try {
+        api history get "duplicate-id" | ignore
+        null
+    } catch {|error| $error.msg }
+    assert ($ambiguity | str contains "is ambiguous (2 matches); use a longer or exact ID") "duplicate exact IDs did not preserve ambiguity"
+    assert equal (open $index_path --raw) $before "ID resolution mutated index bytes"
+
+    rm $index_path
+    assert equal (api history get "only-on-disk" | get id) "only-on-disk" "index-free resolution changed"
+    cleanup $tmp
+}
+
+def test-b1-monotonic-unsorted-index [] {
+    let tmp = (make-temp-dir "b1-monotonic-unsorted")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let old = (history-fixture "old-entry" "2026-01-01T00:00:01Z" "https://example.com/old")
+    let malformed = (history-fixture "malformed-entry" "not-a-timestamp" "https://example.com/malformed")
+    let future = (history-fixture "future-entry" "2099-12-31T23:59:59.999999999Z" "https://example.com/future")
+    save-history-fixture $tmp "2026-01-01" $old
+    save-history-fixture $tmp "2026-01-01" $malformed
+    save-history-fixture $tmp "2099-12-31" $future
+    let index_path = ($tmp | path join "history" "index.nuon")
+    [
+        (history-summary $old "2026-01-01")
+        (history-summary $malformed "2026-01-01")
+        (history-summary $future "2099-12-31")
+    ] | to nuon | save -f $index_path
+
+    let ids = 1..3 | each {|n|
+        api history save (synth-req $"https://example.com/monotonic/($n)") (synth-res 200)
+    }
+    let instants = $ids | each {|id| api history get $id | get timestamp | into datetime | into int }
+    let future_ns = ($future.timestamp | into datetime | into int)
+    assert equal ($instants | uniq | length) 3 "unsorted-index burst timestamps were not unique"
+    assert equal $instants ($instants | sort) "unsorted-index burst was not strictly increasing"
+    assert (($instants | math min) > $future_ns) "save did not advance past every comparable index entry"
+    cleanup $tmp
+}
+
+def test-b1-save-loads-index-once [] {
+    let source = (open ($env.NURL_REPO_ROOT | path join "nu_modules" "history.nu") --raw)
+    let save_source = (
+        $source
+        | split row 'export def "api history save"'
+        | get 1
+        | split row '# List history entries'
+        | first
+    )
+    let load_count = (($save_source | split row "load-history-index-entries" | length) - 1)
+    assert equal $load_count 1 "api history save must load the index exactly once"
+    assert (not ($save_source | str contains "ensure-history-index")) "api history save retained the old ensure read"
+    assert (not ($save_source | str contains "(load-history-index)")) "api history save retained a direct index read"
+}
+
+def test-b1-history-lock-path-compatibility [] {
+    let tmp = (make-temp-dir "b1-lock-path")
+    let root = ($tmp | path join "literal%PATH%segment")
+    mkdir $root
+    $env.API_ROOT = $root
+
+    assert equal (api history rebuild-index | length) 0 "index-free rebuild changed its result"
+    assert (not (($root | path join ".history-index.lock") | path exists)) "index-free rebuild left the history lock behind"
+
+    init-workspace
+    let id = (api history save (synth-req "https://example.com/lock-path") (synth-res 200))
+    assert equal (api history get $id | get id) $id "history lock changed a percent-bearing API_ROOT"
+    assert (not (($root | path join ".history-index.lock") | path exists)) "save left the history lock behind"
+    cleanup $tmp
+}
+
+def test-b1-concurrent-saves-preserve-index [] {
+    let tmp = (make-temp-dir "b1-concurrent-saves")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let count = 12
+    let response = (synth-res 200)
+    let outcomes = 1..$count | par-each {|n|
+        let request = (synth-req $"https://example.com/concurrent/($n)")
+        run-command-process $tmp $"api history save ($request | to nuon) ($response | to nuon)"
+    }
+    let failed = ($outcomes | where exit_code != 0)
+    assert ($failed | is-empty) $"a concurrent history save failed: ($failed | select exit_code stderr | to nuon)"
+
+    let index = (open ($tmp | path join "history" "index.nuon"))
+    let files = (
+        ls ($tmp | path join "history")
+        | where type == "dir"
+        | each {|subdir| ls $subdir.name | where type == "file" and name =~ '\.nuon$' }
+        | flatten
+    )
+    assert equal ($index | length) $count "concurrent saves dropped index rows"
+    assert equal ($index | get id | uniq | length) $count "concurrent saves produced duplicate index IDs"
+    assert equal ($files | length) $count "concurrent saves dropped entry files"
+    assert (not (($tmp | path join ".history-index.lock") | path exists)) "concurrent saves left the index lock behind"
+    assert (
+        ls -a $tmp
+        | where {|entry| ($entry.name | path basename) | str starts-with ".history-index.lock.release-" }
+        | is-empty
+    ) "concurrent saves left a released lock directory behind"
+    cleanup $tmp
+}
+
 def test-b1-api-root-environment-scoping [] {
     let first_root = (make-temp-dir "b1-root-first")
     let second_root = (make-temp-dir "b1-root-second")
@@ -1417,6 +1645,18 @@ def test-b1-clear-all-removes-entire-history [] {
 
 # -- Suite runner ---------------------------------------------------------------
 
+def run-suite-history-compatibility []: nothing -> list<record> {
+    [
+        (run-test "B1: canonical, reverse, and shuffled indexes preserve read surfaces" { test-b1-index-order-equivalence })
+        (run-test "B1: legacy, offset, tied, and malformed timestamps preserve fallback order" { test-b1-legacy-ordering-equivalence })
+        (run-test "B1: unusable index shapes rebuild equivalently" { test-b1-unusable-index-equivalence })
+        (run-test "B1: workspace-derived ID resolution preserves exact, ambiguity, stale, and case behavior" { test-b1-resolution-workspace-equivalence })
+        (run-test "B1: unsorted indexes retain monotonic persistence" { test-b1-monotonic-unsorted-index })
+        (run-test "B1: history save loads the index exactly once" { test-b1-save-loads-index-once })
+        (run-test "B1: history locks support percent-bearing roots and index-free rebuilds" { test-b1-history-lock-path-compatibility })
+    ]
+}
+
 def run-suite-history [net_ok: bool]: nothing -> list<record> {
     print $"\n(ansi yellow)-- B1: History Index --(ansi reset)"
     # All B1 tests are offline -- they run regardless of network
@@ -1433,6 +1673,8 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: clock collision keeps timestamp, ID, and date directory consistent" { test-b1-clock-collision-boundary-consistency })
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
+        ...(run-suite-history-compatibility)
+        (run-test "B1: concurrent saves preserve every index row" { test-b1-concurrent-saves-preserve-index })
         (run-test "B1: API_ROOT and default environment stay isolated" { test-b1-api-root-environment-scoping })
         (run-test "B1: structurally invalid indexes rebuild canonically" { test-b1-invalid-index-shapes-recover })
         (run-test "B1: --before clear keeps index-backed surfaces consistent" { test-b1-clear-before-keeps-index-consistent })
