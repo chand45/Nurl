@@ -1319,7 +1319,7 @@ def test-sd-family-a-contract-and-inventory [] {
         {file: "state-store.nu", text: ('| path join ' + (char --integer 36) + '".($destination_path | path basename).nurl-(random uuid).tmp"'), class: "shared replacement staging", rationale: "shared contract"}
         {file: "http.nu", text: '$body_value | save -f $path', class: "downloaded response bodies", rationale: "declared exclusion: caller-selected decoded output remains outside the state replacement batch"}
         {file: "http.nu", text: '$result._raw_body | save -f $path', class: "downloaded response bodies", rationale: "declared exclusion: caller-selected decoded output remains outside the state replacement batch"}
-        {file: "history.nu", text: '($existing | append $summary | sort-history-entries) | to nuon | save -f $path', class: "history/index", rationale: "declared exclusion: history entry/index persistence remains outside this batch"}
+        {file: "history.nu", text: '$updated | to nuon | save -f $path', class: "history/index", rationale: "declared exclusion: history entry/index persistence remains outside this batch"}
         {file: "history.nu", text: '$entries | to nuon | save -f $path', class: "history/index", rationale: "declared exclusion: history entry/index persistence remains outside this batch"}
         {file: "history.nu", text: '$remaining | to nuon | save -f (get-history-index-path)', class: "history/index", rationale: "declared exclusion: history entry/index persistence remains outside this batch"}
         {file: "history.nu", text: '$snapshot.raw | save -f $snapshot.path', class: "history/index", rationale: "declared exclusion: history recovery remains outside this batch"}

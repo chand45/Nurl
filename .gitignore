@@ -3,6 +3,8 @@ secrets.nuon
 
 # History - local only
 history/
+.history-index.lock/
+.history-index.lock.release-*/
 
 # Temporary files
 *.tmp

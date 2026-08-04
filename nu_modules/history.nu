@@ -19,6 +19,408 @@ def get-history-index-path [] {
     (get-history-dir) | path join "index.nuon"
 }
 
+def get-history-index-lock-path [] {
+    (get-history-dir) | path dirname | path join ".history-index.lock"
+}
+
+def create-history-index-lock-directory [path: string] {
+    if $nu.os-info.name == "windows" {
+        let command = $'mkdir "($path)"'
+        with-env {NURL_HISTORY_LOCK_COMMAND: $command} {
+            ^cmd.exe /d /v:off /c '%NURL_HISTORY_LOCK_COMMAND%' | complete
+        }
+    } else {
+        ^mkdir -- $path | complete
+    }
+}
+
+def history-index-lock-create-contended [result: record, path: string] {
+    if ($path | path exists) {
+        return true
+    }
+    let detail = ([$result.stderr $result.stdout] | str join "\n")
+    if $nu.os-info.name == "windows" {
+        $detail | str contains -i "already exists"
+    } else {
+        $detail | str contains -i "file exists"
+    }
+}
+
+def history-index-lock-hostname [] {
+    let result = (^hostname | complete)
+    let hostname = ($result.stdout | str trim)
+    if $result.exit_code != 0 or ($hostname | is-empty) {
+        let detail = ($result.stderr | str trim)
+        fail-command $"Could not determine the local hostname for history index locking: ($detail)"
+    }
+    $hostname
+}
+
+def history-index-lock-acquired-at-valid [value: string] {
+    if $value !~ '^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$' {
+        return false
+    }
+    let date_parts = ($value | split row "T" | first | split row "-")
+    let year = ($date_parts | get 0 | into int)
+    let month = ($date_parts | get 1 | into int)
+    let day = ($date_parts | get 2 | into int)
+    let leap = (($year mod 4) == 0) and ((($year mod 100) != 0) or (($year mod 400) == 0))
+    let max_day = match $month {
+        2 => (if $leap { 29 } else { 28 })
+        4 | 6 | 9 | 11 => 30
+        _ => 31
+    }
+    if $day > $max_day {
+        return false
+    }
+    try {
+        $value | into datetime | ignore
+        true
+    } catch {
+        false
+    }
+}
+
+def history-index-lock-owner [owner_path: string] {
+    if not ($owner_path | path exists) {
+        return null
+    }
+    let parsed = try {
+        open $owner_path --raw | from nuon
+    } catch {
+        return null
+    }
+    if not (($parsed | describe) | str starts-with "record") {
+        return null
+    }
+    let pid = ($parsed.pid? | default null)
+    let hostname = ($parsed.hostname? | default null)
+    let acquired_at = ($parsed.acquired_at? | default null)
+    let token = ($parsed.token? | default null)
+    if (
+        ($pid | describe) != "int"
+        or $pid <= 0
+        or ($hostname | describe) != "string"
+        or ($hostname | str trim | is-empty)
+        or ($acquired_at | describe) != "string"
+        or (not (history-index-lock-acquired-at-valid $acquired_at))
+        or ($token | describe) != "string"
+        or $token !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ) {
+        return null
+    }
+    {pid: $pid, hostname: $hostname, acquired_at: $acquired_at, token: $token}
+}
+
+def history-index-lock-observation [path: string, local_hostname: string] {
+    if not ($path | path exists) {
+        return null
+    }
+    let owner_path = ($path | path join "owner.nuon")
+    let modified = try {
+        ls -a ($path | path dirname)
+        | where {|entry| $entry.name == $path }
+        | first
+        | get modified
+    } catch {
+        date now
+    }
+    let owner = (history-index-lock-owner $owner_path)
+    let age = ((date now) - $modified)
+    if $owner == null {
+        return {
+            owner: null
+            owner_state: (if $age < 2sec { "publishing" } else { "unknown" })
+            owner_live: null
+            age: $age
+        }
+    }
+    let same_host = (ascii-equal-ignore-case $owner.hostname $local_hostname)
+    let owner_live = if $same_host {
+        ps | any {|process| ($process.pid? | default (-1)) == $owner.pid }
+    } else {
+        null
+    }
+    {
+        owner: $owner
+        owner_state: (if not $same_host { "remote" } else if $owner_live { "live" } else { "dead" })
+        owner_live: $owner_live
+        age: $age
+    }
+}
+
+def history-index-lock-manual-recovery [path: string] {
+    $"After confirming that no Nurl process is using this workspace, remove the directory '($path)' and retry."
+}
+
+def history-index-lock-detail [observation: any] {
+    if $observation == null {
+        return "owner information is unavailable"
+    }
+    if $observation.owner == null {
+        return $"owner metadata is ($observation.owner_state)"
+    }
+    $"owner PID ($observation.owner.pid) on host '($observation.owner.hostname)', acquired at ($observation.owner.acquired_at), state ($observation.owner_state)"
+}
+
+def cleanup-retired-history-lock [path: string] {
+    do -i { rm -rf $path }
+    if ($path | path exists) {
+        print --stderr $"Released history index lock artifact '($path)' could not be removed; it does not block future history operations and may be removed manually."
+    }
+}
+
+def recover-dead-history-index-lock-windows [
+    path: string
+    owner_path: string
+    expected_raw: string
+    retired: string
+] {
+    let script = '
+$path = $env:NURL_HISTORY_LOCK_PATH
+$ownerPath = $env:NURL_HISTORY_LOCK_OWNER
+$expected = $env:NURL_HISTORY_LOCK_EXPECTED
+$retired = $env:NURL_HISTORY_LOCK_RETIRED
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NurlHistoryLockNative {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILETIME {
+        public uint LowDateTime;
+        public uint HighDateTime;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BY_HANDLE_FILE_INFORMATION {
+        public uint FileAttributes;
+        public FILETIME CreationTime;
+        public FILETIME LastAccessTime;
+        public FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetFileInformationByHandle(
+        SafeFileHandle handle,
+        out BY_HANDLE_FILE_INFORMATION information
+    );
+}
+"@
+$stream = [IO.File]::Open(
+    $ownerPath,
+    [IO.FileMode]::Open,
+    [IO.FileAccess]::Read,
+    [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+)
+try {
+    $information = [NurlHistoryLockNative+BY_HANDLE_FILE_INFORMATION]::new()
+    if (-not [NurlHistoryLockNative]::GetFileInformationByHandle($stream.SafeFileHandle, [ref]$information)) { exit 2 }
+    $identity = "{0:X8}-{1:X8}-{2:X8}" -f $information.VolumeSerialNumber, $information.FileIndexHigh, $information.FileIndexLow
+} finally {
+    $stream.Dispose()
+}
+$mutex = [Threading.Mutex]::new($false, "Global\NurlHistoryRecovery-$identity")
+$acquired = $false
+try {
+    $acquired = $mutex.WaitOne(0)
+} catch [Threading.AbandonedMutexException] {
+    $acquired = $true
+}
+if (-not $acquired) { exit 3 }
+try {
+    if (-not [IO.Directory]::Exists($path) -or -not [IO.File]::Exists($ownerPath)) { exit 2 }
+    if ([IO.File]::ReadAllText($ownerPath) -cne $expected) { exit 2 }
+    [IO.Directory]::Move($path, $retired)
+} finally {
+    $mutex.ReleaseMutex()
+    $mutex.Dispose()
+}
+'
+    with-env {
+        NURL_HISTORY_LOCK_PATH: $path
+        NURL_HISTORY_LOCK_OWNER: $owner_path
+        NURL_HISTORY_LOCK_EXPECTED: $expected_raw
+        NURL_HISTORY_LOCK_RETIRED: $retired
+    } {
+        ^powershell.exe -NoProfile -NonInteractive -Command $script | complete
+    }
+}
+
+def recover-dead-history-index-lock-posix [
+    path: string
+    owner_path: string
+    expected_raw: string
+    retired: string
+] {
+    let available = (^sh -c 'command -v flock >/dev/null 2>&1' | complete)
+    if $available.exit_code != 0 {
+        return {exit_code: 4, stdout: "", stderr: "flock is unavailable"}
+    }
+    let recovery_path = ($path | path join ".recovery")
+    let script = '
+current=$(cat -- "$NURL_HISTORY_LOCK_OWNER" 2>/dev/null) || exit 2
+[ "$current" = "$NURL_HISTORY_LOCK_EXPECTED" ] || exit 2
+mv -- "$NURL_HISTORY_LOCK_PATH" "$NURL_HISTORY_LOCK_RETIRED"
+'
+    with-env {
+        NURL_HISTORY_LOCK_PATH: $path
+        NURL_HISTORY_LOCK_OWNER: $owner_path
+        NURL_HISTORY_LOCK_EXPECTED: $expected_raw
+        NURL_HISTORY_LOCK_RETIRED: $retired
+    } {
+        ^flock -n $recovery_path sh -c $script | complete
+    }
+}
+
+def recover-dead-history-index-lock [path: string, observation: record] {
+    if $observation.owner_state != "dead" or $observation.age < 2sec {
+        return false
+    }
+    let owner_path = ($path | path join "owner.nuon")
+    let expected_raw = try { open $owner_path --raw } catch { return false }
+    let expected_owner = (history-index-lock-owner $owner_path)
+    if $expected_owner == null or $expected_owner.token != $observation.owner.token {
+        return false
+    }
+    let retired = ($path | path dirname | path join $".history-index.lock.release-(random uuid)")
+    let result = if $nu.os-info.name == "windows" {
+        recover-dead-history-index-lock-windows $path $owner_path $expected_raw $retired
+    } else {
+        recover-dead-history-index-lock-posix $path $owner_path $expected_raw $retired
+    }
+    if $result.exit_code == 0 {
+        cleanup-retired-history-lock $retired
+        return true
+    }
+    false
+}
+
+def acquire-history-index-lock [] {
+    let path = (get-history-index-lock-path)
+    let owner_path = ($path | path join "owner.nuon")
+    let hostname = (history-index-lock-hostname)
+    let deadline = ((date now) + 30sec)
+
+    loop {
+        let created = (create-history-index-lock-directory $path)
+        if $created.exit_code == 0 {
+            let token = (random uuid)
+            let owner = {
+                pid: $nu.pid
+                hostname: $hostname
+                acquired_at: (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
+                token: $token
+            }
+            let publication_error = try {
+                $owner | to nuon | save $owner_path
+                null
+            } catch {|error|
+                $error
+            }
+            if $publication_error != null {
+                let retired = ($path | path dirname | path join $".history-index.lock.release-(random uuid)")
+                let cleanup_error = try {
+                    mv $path $retired
+                    cleanup-retired-history-lock $retired
+                    null
+                } catch {|error|
+                    $error
+                }
+                if $cleanup_error != null {
+                    fail-command $"Could not publish history index lock owner metadata at '($owner_path)': ($publication_error.msg). Lock cleanup also failed: ($cleanup_error.msg). (history-index-lock-manual-recovery $path)"
+                }
+                fail-command $"Could not publish history index lock owner metadata at '($owner_path)': ($publication_error.msg)"
+            }
+            return {path: $path, owner_path: $owner_path, token: $token}
+        }
+
+        if not (history-index-lock-create-contended $created $path) {
+            let observed_detail = (
+                [$created.stderr $created.stdout]
+                | str join "\n"
+                | str trim
+            )
+            let detail = if ($observed_detail | is-empty) {
+                $"exit code ($created.exit_code)"
+            } else {
+                $observed_detail
+            }
+            fail-command $"Could not create history index lock '($path)': ($detail)"
+        }
+
+        let observation = (history-index-lock-observation $path $hostname)
+        if $observation != null and $observation.owner_state == "dead" {
+            if (recover-dead-history-index-lock $path $observation) {
+                continue
+            }
+        }
+
+        if (date now) >= $deadline {
+            let detail = (history-index-lock-detail $observation)
+            fail-command $"Timed out waiting for history index lock '($path)' after 30 seconds; a prior Nurl process may have been interrupted. Observed ($detail). (history-index-lock-manual-recovery $path)"
+        }
+        sleep 10ms
+    }
+}
+
+def release-history-index-lock [lock: record] {
+    let retired = ($lock.path | path dirname | path join $".history-index.lock.release-(random uuid)")
+    let deadline = ((date now) + 5sec)
+    loop {
+        if ($retired | path exists) {
+            break
+        }
+        let owner = (history-index-lock-owner $lock.owner_path)
+        if $owner == null or $owner.token != $lock.token {
+            fail-command $"History index lock '($lock.path)' ownership changed before release; refusing to remove it. (history-index-lock-manual-recovery $lock.path)"
+        }
+        let moved = try {
+            mv $lock.path $retired
+            true
+        } catch {
+            false
+        }
+        if $moved or ($retired | path exists) {
+            break
+        }
+        if (date now) >= $deadline {
+            fail-command $"History index lock '($lock.path)' could not be released after 5 seconds"
+        }
+        sleep 10ms
+    }
+    cleanup-retired-history-lock $retired
+}
+
+def with-history-index-lock [body: closure] {
+    let lock = (acquire-history-index-lock)
+    let outcome = try {
+        {value: (do $body), error: null}
+    } catch {|error|
+        {value: null, error: $error}
+    }
+    let release_error = try {
+        release-history-index-lock $lock
+        null
+    } catch {|error|
+        $error
+    }
+    if $outcome.error != null {
+        if $release_error != null {
+            error make {msg: $"($outcome.error.msg)\nHistory index lock cleanup also failed: ($release_error.msg)"}
+        }
+        error make $outcome.error
+    }
+    if $release_error != null {
+        error make $release_error
+    }
+    $outcome.value
+}
+
 def assert-resend-header-names [id: string, headers: record] {
     mut observed = []
     for name in ($headers | columns) {
@@ -30,13 +432,25 @@ def assert-resend-header-names [id: string, headers: record] {
     }
 }
 
+# Timestamp shapes history readers accept as chronologically comparable.
+def history-timestamp-pattern [] {
+    '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$'
+}
+
+# Strict current-format subset used only to gate the vectorized index scan.
+# Legacy precision, offsets, ties, and calendar-invalid values keep the
+# authoritative per-entry path.
+def history-vectorizable-timestamp-pattern [] {
+    '^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$'
+}
+
 # Parse legacy second-only and fractional RFC3339 timestamps to nanoseconds.
 # Invalid timestamps sort last but remain available to history readers.
 def history-timestamp-instant [timestamp: any] {
     if ($timestamp | describe) != "string" or ($timestamp | str trim | is-empty) {
         return null
     }
-    if $timestamp !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$' {
+    if $timestamp !~ (history-timestamp-pattern) {
         return null
     }
 
@@ -66,6 +480,46 @@ def sort-history-entries [] {
     | reject _history_timestamp_valid _history_timestamp_instant _history_tie_order
 }
 
+# Classify a loaded index once so hot paths can skip redundant full scans.
+# `comparable` means every row carries a timestamp this module accepts, so the
+# vectorized instants below are exactly what `sort-history-entries` derives.
+def history-index-order-view [entries: list] {
+    let fallback = {comparable: false, ordered: false, newest_instant: null}
+    if ($entries | is-empty) {
+        return {comparable: true, ordered: true, newest_instant: null}
+    }
+    let stamps = try { $entries | get timestamp } catch { null }
+    if ($stamps | describe) != "list<string>" {
+        return $fallback
+    }
+    let pattern = (history-vectorizable-timestamp-pattern)
+    if not ($stamps | all {|stamp| $stamp =~ $pattern }) {
+        return $fallback
+    }
+    let instants = try { $stamps | into datetime | into int } catch { null }
+    if ($instants | describe) != "list<int>" {
+        return $fallback
+    }
+    if ($instants | uniq | length) != ($instants | length) {
+        return $fallback
+    }
+    let descending = ($instants | sort --reverse)
+    {
+        comparable: true
+        ordered: ($instants == $descending)
+        newest_instant: ($descending | first)
+    }
+}
+
+# Canonical ordering that reuses an already-verified index order.
+def sort-history-entries-for-view [entries: list, view: record] {
+    if $view.ordered {
+        $entries
+    } else {
+        $entries | sort-history-entries
+    }
+}
+
 # Only lists/tables of summaries with stable identity/path fields are usable
 # index data. Other parseable NUON shapes are rebuilt from entry files.
 def history-index-summary-valid [summary: any] {
@@ -75,6 +529,27 @@ def history-index-summary-valid [summary: any] {
     let id = ($summary.id? | default null)
     let date_dir = ($summary.date_dir? | default null)
     (($id | describe) == "string") and (not ($id | str trim | is-empty)) and (($date_dir | describe) == "string") and (not ($date_dir | str trim | is-empty))
+}
+
+# Validate an index's identity columns in one vectorized pass.
+# Returns null when the parsed shape cannot be decided columnwise, so callers
+# fall back to the authoritative per-row check.
+def history-index-columns-valid [entries: list] {
+    let columns = try {
+        {ids: ($entries | get id), date_dirs: ($entries | get date_dir)}
+    } catch {
+        null
+    }
+    if $columns == null {
+        return null
+    }
+    if (($columns.ids | describe) != "list<string>") or (($columns.date_dirs | describe) != "list<string>") {
+        return null
+    }
+    (
+        (($columns.ids | str trim | str length | math min) > 0)
+        and (($columns.date_dirs | str trim | str length | math min) > 0)
+    )
 }
 
 def read-history-index [] {
@@ -117,7 +592,17 @@ def read-history-index [] {
             index_path: $path
         }
     }
-    if not ($parsed.value | all {|entry| history-index-summary-valid $entry }) {
+    let columnar_valid = if ($parsed.value | is-empty) {
+        true
+    } else {
+        history-index-columns-valid $parsed.value
+    }
+    let rows_valid = if $columnar_valid == null {
+        $parsed.value | all {|entry| history-index-summary-valid $entry }
+    } else {
+        $columnar_valid
+    }
+    if not $rows_valid {
         return {
             usable: false
             entries: []
@@ -142,10 +627,16 @@ def load-history-index [] {
 }
 
 # Append one summary entry to the history index (B1) — keeps index sorted newest-first
-def append-to-history-index [summary: record] {
+def append-to-history-index [entries: list, view: record, summary: record] {
     let path = (get-history-index-path)
-    let existing = (load-history-index)
-    ($existing | append $summary | sort-history-entries) | to nuon | save -f $path
+    let updated = if $view.comparable and $view.ordered {
+        # The persisted instant is strictly newer than every comparable entry,
+        # so prepending preserves the canonical order without re-sorting.
+        [$summary] | append $entries
+    } else {
+        $entries | append $summary | sort-history-entries
+    }
+    $updated | to nuon | save -f $path
 }
 
 # Convert a persisted history entry to its index summary.
@@ -333,10 +824,10 @@ def scan-history-summaries [existing: list = []] {
     $preserved | append $remaining
 }
 
-def rebuild-history-index [] {
-    let existing = (load-history-index)
+def rebuild-history-index [existing?: list] {
+    let hints = if $existing == null { (load-history-index) } else { $existing }
     let entries = (
-        scan-history-summaries $existing
+        scan-history-summaries $hints
         | sort-history-entries
     )
 
@@ -348,21 +839,32 @@ def rebuild-history-index [] {
 # Rebuild the full history index by scanning all date dirs + files (B1)
 export def "api history rebuild-index" [] {
     let dir = (get-history-dir)
-    if not ($dir | path exists) { return [] }
-
-    let entries = (rebuild-history-index)
-    print $"(ansi green)Index rebuilt: ($entries | length) entries(ansi reset)"
-    $entries
+    if not ($dir | path exists) {
+        return []
+    }
+    with-history-index-lock {
+        let entries = (rebuild-history-index)
+        print $"(ansi green)Index rebuilt: ($entries | length) entries(ansi reset)"
+        $entries
+    }
 }
 
-# Ensure history index exists; auto-rebuild if missing (B1)
-def ensure-history-index [] {
+# Load the index once, auto-rebuilding from files only when it is unusable (B1)
+def load-history-index-entries [--locked] {
+    if not $locked {
+        return (with-history-index-lock { load-history-index-entries --locked })
+    }
+
     let index = (read-history-index)
-    if not $index.usable {
-        let dir = (get-history-dir)
-        if ($dir | path exists) {
-            rebuild-history-index | ignore
-        }
+    if $index.usable {
+        return $index.entries
+    }
+
+    let dir = (get-history-dir)
+    if ($dir | path exists) {
+        rebuild-history-index []
+    } else {
+        []
     }
 }
 
@@ -382,17 +884,21 @@ def generate-history-id [instant: datetime] {
     $"($date_part)-($random_part)"
 }
 
-def next-history-persistence-instant [captured_at: datetime] {
+def next-history-persistence-instant [captured_at: datetime, entries: list, view: record] {
     let captured_ns = ($captured_at | into int)
-    let valid_instants = (
-        load-history-index
-        | each {|entry| history-timestamp-instant ($entry.timestamp? | default null) }
-        | where {|instant| $instant != null }
-    )
-    let latest_ns = if ($valid_instants | is-empty) {
-        null
+    let latest_ns = if $view.comparable {
+        $view.newest_instant
     } else {
-        $valid_instants | math max
+        let valid_instants = (
+            $entries
+            | each {|entry| history-timestamp-instant ($entry.timestamp? | default null) }
+            | where {|instant| $instant != null }
+        )
+        if ($valid_instants | is-empty) {
+            null
+        } else {
+            $valid_instants | math max
+        }
     }
 
     if $latest_ns != null and $captured_ns <= $latest_ns {
@@ -757,16 +1263,6 @@ export def "api history save" [
     let safe_response = (sanitize-history-response $response)
     let captured_at = (date now | date to-timezone UTC)
     let dir = (ensure-history-dir)
-    ensure-history-index
-    let persisted_at = (next-history-persistence-instant $captured_at)
-    let date_dir = ($dir | path join ($persisted_at | format date "%Y-%m-%d"))
-
-    if not ($date_dir | path exists) {
-        mkdir $date_dir
-    }
-
-    let id = (generate-history-id $persisted_at)
-
     # Get current environment
     let root = ($env.API_ROOT? | default (pwd))
     let config_path = ($root | path join "config.nuon")
@@ -776,34 +1272,46 @@ export def "api history save" [
         null
     }
 
-    let entry = {
-        id: $id
-        timestamp: ($persisted_at | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
-        environment: $current_env
-        request: $safe_request
-        response: $safe_response
+    with-history-index-lock {
+        let index_entries = (load-history-index-entries --locked)
+        let index_view = (history-index-order-view $index_entries)
+        let persisted_at = (next-history-persistence-instant $captured_at $index_entries $index_view)
+        let date_dir = ($dir | path join ($persisted_at | format date "%Y-%m-%d"))
+
+        if not ($date_dir | path exists) {
+            mkdir $date_dir
+        }
+
+        let id = (generate-history-id $persisted_at)
+        let entry = {
+            id: $id
+            timestamp: ($persisted_at | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
+            environment: $current_env
+            request: $safe_request
+            response: $safe_response
+        }
+
+        let file_name = $"($id).nuon"
+        let file_path = ($date_dir | path join $file_name)
+
+        $entry | to nuon | save $file_path
+
+        # Update history index (B1)
+        append-to-history-index $index_entries $index_view {
+            id: $id
+            timestamp: $entry.timestamp
+            method: ($safe_request.method? | default "")
+            url: ($safe_request.url? | default "")
+            status: ($safe_response.status? | default 0)
+            time_ms: ($safe_response.time_ms? | default 0)
+            date_dir: ($date_dir | path basename)
+        }
+
+        $id
     }
-
-    let file_name = $"($id).nuon"
-    let file_path = ($date_dir | path join $file_name)
-
-    $entry | to nuon | save $file_path
-
-    # Update history index (B1)
-    append-to-history-index {
-        id: $id
-        timestamp: $entry.timestamp
-        method: ($safe_request.method? | default "")
-        url: ($safe_request.url? | default "")
-        status: ($safe_response.status? | default 0)
-        time_ms: ($safe_response.time_ms? | default 0)
-        date_dir: ($date_dir | path basename)
-    }
-
-    $id
 }
 
-# List history entries — uses index for O(1) list/search (B1)
+# List history entries — index reads are independent of workspace size (B1)
 export def "api history list" [
     --limit (-l): int = 20       # Number of entries to show
     --filter (-f): string = ""   # Filter by method (method:GET), status (status:200), or URL substring
@@ -819,11 +1327,9 @@ export def "api history list" [
         return []
     }
 
-    # Ensure index exists (auto-build from files if needed)
-    ensure-history-index
-
     # Load from index and ensure newest-first order (sort guards against legacy unsorted indexes)
-    let all_entries = (load-history-index | sort-history-entries)
+    let index_entries = (load-history-index-entries)
+    let all_entries = (sort-history-entries-for-view $index_entries (history-index-order-view $index_entries))
 
     if ($all_entries | is-empty) {
         print "(ansi yellow)No history found(ansi reset)"
@@ -881,6 +1387,62 @@ export def "api history show" [
     $entry
 }
 
+# Enumerate history entry identities without resolving every file path.
+# Traversal, ordering and filtering mirror `list-history-entry-files`; the
+# per-file containment and type checks are deferred to resolved candidates.
+def list-history-entry-names [] {
+    let dir = (get-history-dir)
+    let subdirs = (ls $dir | where type == dir | get name | sort)
+    mut rows = []
+
+    for listed_subdir in $subdirs {
+        let date_dir = ($listed_subdir | path basename)
+        let subdir = (
+            resolve-under-base $dir $date_dir "history date directory"
+                --scope="history directory"
+        )
+        let listed = (
+            ls $subdir
+            | sort-by name
+            | where type == "file"
+            | where name =~ '\.nuon$'
+        )
+        if ($listed | is-empty) {
+            continue
+        }
+        let listed_names = ($listed | get name)
+        let file_names = ($listed_names | path basename)
+        $rows = ($rows | append (
+            (($file_names | path parse | get stem) | wrap id)
+            | merge ($file_names | wrap file_name)
+            | merge ($listed_names | wrap listed_name)
+            | insert date_dir $date_dir
+        ))
+    }
+
+    $rows | sort-by date_dir id
+}
+
+# Apply the per-file containment and type checks to one resolved candidate.
+def resolve-history-entry-file [candidate: record] {
+    let dir = (get-history-dir)
+    let path = (
+        resolve-under-base $dir $"($candidate.date_dir)/($candidate.file_name)" "history entry"
+            --nested
+            --scope="history directory"
+    )
+    let extension = ($path | path parse | get extension)
+    if (
+        (path-type-safe $path) != "file"
+        or (not (ascii-equal-ignore-case $extension "nuon"))
+    ) {
+        error make {
+            msg: $"History entry '($candidate.listed_name)' is not a readable regular NUON file"
+        }
+    }
+    $path
+}
+
 # Resolve exact IDs first, then accept only unique partial matches.
 def resolve-history-entry [id: string] {
     let dir = (get-history-dir)
@@ -889,11 +1451,7 @@ def resolve-history-entry [id: string] {
         return null
     }
 
-    let all_files = (
-        list-history-entry-files
-        | select path id
-        | sort-by path
-    )
+    let all_files = (list-history-entry-names)
 
     # Try exact match first
     let exact_matches = $all_files | where {|file| $file.id == $id }
@@ -910,7 +1468,7 @@ def resolve-history-entry [id: string] {
         fail-command ("History ID '" + $id + "' is ambiguous (" + ($match_count | into string) + " matches); use a longer or exact ID")
     }
 
-    open ($matches | first | get path)
+    open (resolve-history-entry-file ($matches | first))
 }
 
 # Resend a request from history
@@ -987,9 +1545,8 @@ export def "api history search" [
         return []
     }
 
-    ensure-history-index
-
-    let all_entries = (load-history-index | sort-history-entries)
+    let index_entries = (load-history-index-entries)
+    let all_entries = (sort-history-entries-for-view $index_entries (history-index-order-view $index_entries))
     if ($all_entries | is-empty) {
         print $"(ansi yellow)No results for '($query)'(ansi reset)"
         return []
@@ -1045,8 +1602,8 @@ export def "api history search" [
     $results
 }
 
-# Clear old history entries
-export def "api history clear" [
+# Clear old history entries while the caller holds the history index lock.
+def clear-history [
     --before (-b): string = ""  # Clear entries before date (YYYY-MM-DD)
     --all (-a)                  # Clear all history
     --force (-f)                # Skip confirmation
@@ -1059,14 +1616,6 @@ export def "api history clear" [
     }
 
     if $all {
-        if not $force {
-            let confirm = (input "Clear ALL history? [y/N] ")
-            if $confirm !~ "^[yY]" {
-                print "Cancelled"
-                return
-            }
-        }
-
         let recovery = (capture-history-recovery-hints)
         let delete_error = try {
             rm -rf $dir
@@ -1110,6 +1659,28 @@ export def "api history clear" [
     print $"(ansi green)Cleared ($cleared) days of history older than ($retention_days) days(ansi reset)"
 }
 
+# Clear old history entries
+export def "api history clear" [
+    --before (-b): string = ""  # Clear entries before date (YYYY-MM-DD)
+    --all (-a)                  # Clear all history
+    --force (-f)                # Skip confirmation
+] {
+    let dir = (get-history-dir)
+    if not ($dir | path exists) {
+        return (clear-history --before $before --all=$all --force=$force)
+    }
+    if $all and (not $force) {
+        let confirm = (input "Clear ALL history? [y/N] ")
+        if $confirm !~ "^[yY]" {
+            print "Cancelled"
+            return
+        }
+    }
+    with-history-index-lock {
+        clear-history --before $before --all=$all --force
+    }
+}
+
 # Export history to file
 export def "api history export" [
     --format (-f): string = "json"  # Export format: json, csv
@@ -1130,9 +1701,8 @@ export def "api history export" [
             print "(ansi yellow)No history to export(ansi reset)"
             return
         }
-        ensure-history-index
-        load-history-index
-        | sort-history-entries
+        let index_entries = (load-history-index-entries)
+        sort-history-entries-for-view $index_entries (history-index-order-view $index_entries)
         | first $limit
         | each {|summary|
             try { open (history-entry-path $summary) } catch { null }
