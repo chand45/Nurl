@@ -1,8 +1,8 @@
 # Request Chaining Module
 # Execute sequences of requests with variable extraction and passing
 
-use vars.nu ["api vars interpolate", "api vars interpolate-record", "api vars extract"]
-use http.nu ["api request"]
+use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, referenced-variable-names, resolve-trusted-context, restore-opaque-values]
+use http.nu [execute-encoded-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
 use command-error.nu [fail-command]
@@ -67,6 +67,160 @@ def is-transport-failure [error: record] {
     ($error.msg? | default "") | str starts-with "Curl transport failed"
 }
 
+def protect-chain-context [context: record] {
+    let replacements = (
+        $context
+        | transpose name value
+        | each {|entry|
+            {
+                name: $entry.name
+                token: $"__NURL_CHAIN_OPAQUE_(random uuid)__"
+                value: $entry.value
+            }
+        }
+    )
+    let vars = ($replacements | reduce -f {} {|entry, result|
+        $result | merge { $entry.name: $entry.token }
+    })
+    {
+        vars: $vars
+        replacements: $replacements
+    }
+}
+
+def extract-path-step [current: any, part: any] {
+    if $current == null {
+        return {found: false, value: null}
+    }
+    let current_type = (state-base-type $current)
+    if $current_type == "record" {
+        let key = ($part | into string)
+        if $key not-in ($current | columns) {
+            return {found: false, value: null}
+        }
+        return {found: true, value: ($current | get $key)}
+    }
+    if $current_type in ["list" "table"] {
+        if ($part | describe) == "int" {
+            if $part < 0 or $part >= ($current | length) {
+                return {found: false, value: null}
+            }
+            return {found: true, value: ($current | get $part)}
+        }
+        let key = ($part | into string)
+        let present = ($current | any {|row|
+            ((state-base-type $row) == "record") and ($key in ($row | columns))
+        })
+        if not $present {
+            return {found: false, value: null}
+        }
+        return {found: true, value: ($current | optional-get $key)}
+    }
+    {found: false, value: null}
+}
+
+def extract-path-result [data: any, path: string] {
+    mut current = $data
+    for part in ($path | split row ".") {
+        let bracket = ($part | parse -r '^([^\[]+)\[(\d+)\]$')
+        if not ($bracket | is-empty) {
+            let field_result = (extract-path-step $current $bracket.0.capture0)
+            if not $field_result.found {
+                return $field_result
+            }
+            let index_result = (extract-path-step $field_result.value ($bracket.0.capture1 | into int))
+            if not $index_result.found {
+                return $index_result
+            }
+            $current = $index_result.value
+        } else {
+            let key = if $part =~ '^\d+$' { $part | into int } else { $part }
+            let result = (extract-path-step $current $key)
+            if not $result.found {
+                return $result
+            }
+            $current = $result.value
+        }
+    }
+    {found: true, value: $current}
+}
+
+def step-trusted-dependencies [
+    raw_step_vars: record
+    raw_trusted: record
+    names: list
+] {
+    mut pending = $names
+    mut visited = []
+    mut trusted = []
+    while not ($pending | is-empty) {
+        let name = ($pending | first)
+        $pending = ($pending | skip 1)
+        if $name in $visited {
+            continue
+        }
+        $visited = ($visited | append $name)
+        if $name in ($raw_trusted | columns) {
+            $trusted = ($trusted | append $name)
+        } else if $name in ($raw_step_vars | columns) {
+            $pending = (
+                $pending
+                | append (referenced-variable-names ($raw_step_vars | get $name) --keys)
+            )
+        }
+    }
+    $trusted | uniq
+}
+
+def resolve-step-use [
+    raw_step_vars: record
+    raw_trusted: record
+    protected_context: record
+    cache: record
+] {
+    mut resolved = {}
+    mut trusted_cache = $cache
+    for binding in ($raw_step_vars | transpose key value) {
+        let names = (referenced-variable-names $binding.value --keys)
+        let overrides = ($protected_context | merge $resolved)
+        let unresolved_names = ($names | where {|name| $name not-in ($overrides | columns) })
+        let trusted_names = (step-trusted-dependencies $raw_step_vars $raw_trusted $unresolved_names)
+        let trusted_result = (resolve-trusted-context $raw_trusted $trusted_names --cache $trusted_cache)
+        $trusted_cache = $trusted_result.cache
+        let step_names = ($unresolved_names | where {|name| $name not-in ($raw_trusted | columns) })
+        let step_source = ($raw_step_vars | merge $trusted_result.values | merge $overrides)
+        let step_result = (resolve-trusted-context $step_source $step_names)
+        let available = ($trusted_result.values | merge $step_result.values | merge $overrides)
+        let value = (
+            interpolate-record-values { $binding.key: $binding.value } -e $available --resolved --single-pass
+            | get $binding.key
+        )
+        $resolved = ($resolved | merge { $binding.key: $value })
+    }
+    {vars: $resolved, cache: $trusted_cache}
+}
+
+def request-template-variable-names [request_config: record] {
+    let url_names = (referenced-variable-names ($request_config | get "url"))
+    let headers = ($request_config | optional-get "headers" | default {})
+    let header_names = (referenced-variable-names $headers)
+    let request_body = ($request_config | optional-get "body")
+    let body_names = if $request_body == null {
+        []
+    } else {
+        let body_type = (state-base-type $request_body)
+        if $body_type == "record" and ("content" in ($request_body | columns)) {
+            let content = ($request_body | get "content")
+            let type_hint = ($request_body | optional-get "type")
+            let content_type = (state-base-type $content)
+            referenced-variable-names $content --keys=($type_hint == "json" or $content_type in ["record" "list" "table"])
+        } else {
+            referenced-variable-names $request_body --keys=($body_type in ["record" "list" "table"])
+        }
+    }
+    [...$url_names ...$header_names ...$body_names] | uniq
+}
+
 # Execute a chain of requests
 export def "api chain run" [
     steps: list  # List of chain steps
@@ -118,13 +272,23 @@ export def "api chain run" [
             continue
         }
 
-        # Merge context variables with step-specific variables
-        let step_vars = ($step | optional-get "use" | default {})
-        let all_vars = ($context | merge $step_vars)
-
-        # Interpolate URL with collection context
+        # Resolve static templates recursively while extracted values remain opaque tokens.
+        let raw_trusted = (api vars get-merged -c $step_collection)
+        let protected_context = (protect-chain-context $context)
+        let raw_step_vars = ($step | optional-get "use" | default {})
+        let step_result = (resolve-step-use $raw_step_vars $raw_trusted $protected_context.vars {})
+        let step_vars = $step_result.vars
+        let overrides = ($protected_context.vars | merge $step_vars)
+        let request_names = (
+            request-template-variable-names $request_config
+            | where {|name| $name not-in ($overrides | columns) }
+        )
+        let request_result = (resolve-trusted-context $raw_trusted $request_names --cache $step_result.cache)
+        let resolved_vars = ($request_result.values | merge $overrides)
+        let opaque_values = $protected_context.replacements
         let request_url = ($request_config | get "url")
-        let url = (api vars interpolate $request_url -v $all_vars -c $step_collection)
+        let protected_url = (api vars interpolate $request_url -e $resolved_vars --resolved --single-pass)
+        let url = (restore-opaque-values $protected_url $opaque_values)
         validate-secret-safe-url $url | ignore
 
         if not $quiet {
@@ -135,23 +299,38 @@ export def "api chain run" [
         # Interpolate headers with collection context
         let request_headers = ($request_config | optional-get "headers")
         let headers = if $request_headers != null {
-            api vars interpolate-record $request_headers -v $all_vars -c $step_collection
+            let protected_headers = (interpolate-record-values $request_headers -e $resolved_vars --resolved --single-pass)
+            restore-opaque-values $protected_headers $opaque_values
         } else {
             {}
         }
 
-        # Interpolate body with collection context
+        # Resolve structured values before compact serialization, then send the encoded bytes once.
         let request_body = ($request_config | optional-get "body")
-        let body_content = if $request_body == null { null } else { $request_body | optional-get "content" }
-        let body = if $body_content != null {
-            if ($body_content | describe | str starts-with "record") or ($body_content | describe | str starts-with "list") {
-                let interpolated = (api vars interpolate-record $body_content -v $all_vars -c $step_collection)
-                $interpolated | to json
+        let request_body_type = if $request_body == null { "nothing" } else { state-base-type $request_body }
+        let wrapped_body = $request_body_type == "record" and ("content" in ($request_body | columns))
+        let has_body_content = $wrapped_body or ($request_body != null and $request_body_type != "record")
+        let body_content = if $wrapped_body { $request_body | get "content" } else { $request_body }
+        let body_type_hint = if $wrapped_body { $request_body | optional-get "type" } else { null }
+        let body_resolution = if $has_body_content {
+            let body_type = (state-base-type $body_content)
+            if $body_type_hint == "json" or $body_type in ["record" "list" "table"] {
+                let protected_body = (interpolate-structured-json $body_content -e $resolved_vars --resolved)
+                let resolved_body = (restore-opaque-values $protected_body $opaque_values --keys --typed)
+                let resolved_type = (state-base-type $resolved_body)
+                {
+                    content: (if $resolved_type == "string" { $resolved_body | to json } else { $resolved_body | to json --raw })
+                    structured_string: ($resolved_type == "string")
+                }
             } else {
-                api vars interpolate ($body_content | into string) -v $all_vars -c $step_collection
+                let protected_body = (api vars interpolate ($body_content | into string) -e $resolved_vars --resolved --single-pass)
+                {
+                    content: (restore-opaque-values $protected_body $opaque_values)
+                    structured_string: false
+                }
             }
         } else {
-            ""
+            {content: "", structured_string: false}
         }
 
         # Get auth config
@@ -166,13 +345,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (api request -m $method $url -b $body -H $headers -a $auth --raw)
+                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
                     error: null
                 }
             } catch {|error|
@@ -227,11 +406,11 @@ export def "api chain run" [
 
         if $extract_config != null {
             for item in ($extract_config | transpose key path) {
-                let value = (api vars extract $result.response $item.path)
-                if $value != null {
-                    $context = ($context | upsert $item.key $value)
+                let extracted = (extract-path-result $result.response $item.path)
+                if $extracted.found {
+                    $context = ($context | upsert $item.key $extracted.value)
                     if not $quiet {
-                        print $"  (ansi dark_gray)Extracted: ($item.key) = ($value | to nuon)(ansi reset)"
+                        print $"  (ansi dark_gray)Extracted: ($item.key) = ($extracted.value | to nuon)(ansi reset)"
                     }
                 }
             }

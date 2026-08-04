@@ -2,6 +2,7 @@
 # Handles {{variable}} replacement and built-in dynamic variables
 
 use resource-path.nu [open-state-record open-state-record-or-default resolve-under-base save-state-replace validate-resource-name]
+use command-error.nu [fail-command]
 use string-compat.nu [optional-get]
 
 # ============================================================================
@@ -154,6 +155,57 @@ def get-builtin-var [name: string] {
     }
 }
 
+def interpolate-resolved-text [text: string, all_vars: record] {
+    if not ($text | str contains "{{") {
+        return $text
+    }
+    let pattern = '\{\{([^}]+)\}\}'
+    let matches = ($text | parse -r $pattern)
+    if ($matches | is-empty) {
+        return $text
+    }
+    let segments = ($text | split row -r '\{\{[^}]+\}\}')
+    let chunks = ($matches | enumerate | each {|entry|
+        let raw_var_name = $entry.item.capture0
+        let var_name = ($raw_var_name | str trim)
+        let placeholder = $"{{($raw_var_name)}}"
+        let value = if ($var_name | str starts-with "$") {
+            get-builtin-var $var_name
+        } else if $var_name in $all_vars {
+            $all_vars | get $var_name
+        } else {
+            null
+        }
+        let following = try { $segments | get ($entry.index + 1) } catch { "" }
+        [
+            (if $value == null { $placeholder } else { $value | into string })
+            $following
+        ]
+    } | flatten)
+    [($segments | first) ...$chunks] | str join
+}
+
+def interpolate-resolved-recursive-text [text: string, all_vars: record] {
+    mut result = $text
+    mut seen = []
+    mut depth = 0
+    loop {
+        if $depth >= 32 {
+            fail-command "Variable interpolation exceeded 32 expansion steps; check for cyclic variable references."
+        }
+        let next = (interpolate-resolved-text $result $all_vars)
+        if $next == $result {
+            return $result
+        }
+        if $next in $seen {
+            return $result
+        }
+        $seen = ($seen | append $result)
+        $result = $next
+        $depth = $depth + 1
+    }
+}
+
 # Interpolate variables in a string
 # Supports: {{var_name}}, {{$uuid}}, {{$timestamp}}, etc.
 # Resolution order: extra-vars > collection env > global vars > built-ins
@@ -162,109 +214,435 @@ export def "api vars interpolate" [
     --extra-vars (-v): record = {}   # Additional variables (highest priority)
     --collection (-c): string = ""   # Collection context for variable resolution
     --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
+    --resolved                       # Treat --env-vars as an already-resolved context, even when empty
+    --single-pass                    # Do not interpolate placeholders introduced by replacement values
 ] {
     if $collection != "" {
         validate-resource-name "collection" $collection | ignore
     }
+    if not ($text | str contains "{{") {
+        return $text
+    }
 
-    # Get merged variables with proper layering
-    let all_vars = if not ($env_vars | is-empty) {
-        # Backward compatibility: if env_vars provided, use them merged with extra_vars
+    let all_vars = if $resolved {
+        $env_vars | merge $extra_vars
+    } else if not ($env_vars | is-empty) {
         $env_vars | merge $extra_vars
     } else {
-        # New layered resolution: global vars < collection env < extra vars
         api vars get-merged -c $collection -v $extra_vars
     }
+    if $single_pass {
+        interpolate-resolved-text $text $all_vars
+    } else {
+        interpolate-resolved-recursive-text $text $all_vars
+    }
+}
 
-    # Find all {{...}} patterns
+def json-string-content [value: any] {
+    $value | into string | to json | split chars | skip 1 | drop 1 | str join
+}
+
+def interpolate-json-template [text: string, all_vars: record] {
+    if not ($text | str contains "{{") {
+        return $text
+    }
+    let matches = ($text | parse -r '\{\{([^}]+)\}\}')
+    let segments = ($text | split row -r '\{\{[^}]+\}\}')
+    let chunks = ($matches | enumerate | each {|entry|
+        let raw_var_name = $entry.item.capture0
+        let var_name = ($raw_var_name | str trim)
+        let placeholder = $"{{($raw_var_name)}}"
+        let value = if ($var_name | str starts-with "$") {
+            get-builtin-var $var_name
+        } else if $var_name in $all_vars {
+            $all_vars | get $var_name
+        } else {
+            null
+        }
+        let following = try { $segments | get ($entry.index + 1) } catch { "" }
+        [
+            (if $value == null { $placeholder } else { json-string-content $value })
+            $following
+        ]
+    } | flatten)
+    [($segments | first) ...$chunks] | str join
+}
+
+def interpolate-json-recursive-template [text: string, all_vars: record] {
     mut result = $text
-    let pattern = '\{\{([^}]+)\}\}'
-
-    # Keep replacing until no more matches
+    mut seen = []
+    mut depth = 0
     loop {
-        let matches = ($result | parse -r $pattern)
-
-        if ($matches | is-empty) {
-            break
+        if $depth >= 32 {
+            fail-command "Structured interpolation exceeded 32 expansion steps; check for cyclic variable references."
         }
-
-        for match in $matches {
-            let var_name = ($match.capture0 | str trim)
-            let placeholder = $"{{($var_name)}}"
-
-            # Check if it's a built-in variable (starts with $)
-            let value = if ($var_name | str starts-with "$") {
-                get-builtin-var $var_name
-            } else if $var_name in $all_vars {
-                $all_vars | get $var_name
-            } else {
-                null
-            }
-
-            if $value != null {
-                $result = ($result | str replace $placeholder ($value | into string))
-            }
+        let next = (interpolate-json-template $result $all_vars)
+        if $next == $result {
+            return $result
         }
+        if $next in $seen {
+            return $result
+        }
+        $seen = ($seen | append $result)
+        $result = $next
+        $depth = $depth + 1
+    }
+}
 
-        # Check if we made any replacements
-        let new_matches = ($result | parse -r $pattern)
-        if ($new_matches | length) >= ($matches | length) {
-            # No progress made, exit to avoid infinite loop
-            break
+def structured-base-type [data: any] {
+    $data | describe | str replace -r '<.*' ''
+}
+
+def validate-interpolated-key-collisions [data: any, merged_vars: record, recursive: bool] {
+    let base_type = (structured-base-type $data)
+    if $base_type in ["list" "table"] {
+        for item in $data {
+            validate-interpolated-key-collisions $item $merged_vars $recursive
+        }
+        return
+    }
+    if $base_type != "record" {
+        return
+    }
+
+    mut observed = []
+    for row in ($data | transpose key value) {
+        let new_key = if $recursive {
+            interpolate-resolved-recursive-text $row.key $merged_vars
+        } else {
+            interpolate-resolved-text $row.key $merged_vars
+        }
+        if $new_key in $observed {
+            fail-command $"Structured interpolation produced duplicate key '($new_key)'"
+        }
+        $observed = ($observed | append $new_key)
+        validate-interpolated-key-collisions $row.value $merged_vars $recursive
+    }
+}
+
+def interpolate-structured-value [
+    data: any
+    merged_vars: record
+    single_pass: bool
+] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (if $single_pass {
+            interpolate-resolved-text $data $merged_vars
+        } else {
+            interpolate-resolved-recursive-text $data $merged_vars
+        })
+    }
+    if $base_type in ["list" "table"] {
+        return ($data | reduce -f [] {|item, acc|
+            $acc | append [(interpolate-structured-value $item $merged_vars $single_pass)]
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let new_key = (if $single_pass {
+            interpolate-resolved-text $row.key $merged_vars
+        } else {
+            interpolate-resolved-recursive-text $row.key $merged_vars
+        })
+        if $new_key in ($acc | columns) {
+            fail-command $"Structured interpolation produced duplicate key '($new_key)'"
+        }
+        let new_value = (interpolate-structured-value $row.value $merged_vars $single_pass)
+        $acc | merge { $new_key: $new_value }
+    }
+}
+
+def interpolate-values-only-value [
+    data: any
+    merged_vars: record
+    single_pass: bool
+] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (if $single_pass {
+            interpolate-resolved-text $data $merged_vars
+        } else {
+            interpolate-resolved-recursive-text $data $merged_vars
+        })
+    }
+    if $base_type in ["list" "table"] {
+        return ($data | reduce -f [] {|item, acc|
+            $acc | append [(interpolate-values-only-value $item $merged_vars $single_pass)]
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let new_value = (interpolate-values-only-value $row.value $merged_vars $single_pass)
+        $acc | merge { $row.key: $new_value }
+    }
+}
+
+# Recursively interpolate record keys/values and list/table elements.
+export def interpolate-structured [
+    data: any
+    --extra-vars (-v): record = {}
+    --collection (-c): string = ""
+    --env-vars (-e): record = {}
+    --resolved                       # Treat --env-vars as an already-resolved context, even when empty
+    --single-pass                    # Do not interpolate placeholders introduced by replacement values
+] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let merged_vars = if $resolved {
+        $env_vars | merge $extra_vars
+    } else if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    interpolate-structured-value $data $merged_vars $single_pass
+}
+
+export def interpolate-record-values [
+    data: record
+    --extra-vars (-v): record = {}
+    --collection (-c): string = ""
+    --env-vars (-e): record = {}
+    --resolved
+    --single-pass
+] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let merged_vars = if $resolved {
+        $env_vars | merge $extra_vars
+    } else if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    interpolate-values-only-value $data $merged_vars $single_pass
+}
+
+def resolve-trusted-var [
+    name: string
+    vars: record
+    state: record
+] {
+    if $name in ($state.resolved | columns) {
+        return {state: $state, value: ($state.resolved | get $name)}
+    }
+    if $name in $state.resolving {
+        fail-command $"Variable interpolation cycle detected at '($name)'."
+    }
+
+    let raw = ($vars | get $name)
+    mut next_state = ($state | update resolving ($state.resolving | append $name))
+    if ((structured-base-type $raw) == "string") and ($raw | str contains "{{") {
+        for match in ($raw | parse -r '\{\{([^}]+)\}\}') {
+            let dependency = ($match.capture0 | str trim)
+            if (not ($dependency | str starts-with "$")) and ($dependency in ($vars | columns)) {
+                let resolved_dependency = (resolve-trusted-var $dependency $vars $next_state)
+                $next_state = $resolved_dependency.state
+            }
         }
     }
 
-    $result
+    let value = if (structured-base-type $raw) == "string" {
+        interpolate-resolved-recursive-text $raw $next_state.resolved
+    } else {
+        $raw
+    }
+    let final_state = (
+        $next_state
+        | update resolved ($next_state.resolved | merge { $name: $value })
+        | update resolving ($next_state.resolving | where {|candidate| $candidate != $name })
+    )
+    {state: $final_state, value: $value}
 }
 
-# Interpolate variables in a record (recursively)
-# Resolution order: extra-vars > collection env > global vars > built-ins
+def collect-referenced-variable-names [data: any, include_keys: bool] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        return (
+            $data
+            | parse -r '\{\{([^}]+)\}\}'
+            | each {|match| $match.capture0 | str trim }
+            | where {|name| not ($name | str starts-with "$") }
+        )
+    }
+    if $base_type in ["list" "table"] {
+        return (
+            $data
+            | each {|item| collect-referenced-variable-names $item $include_keys }
+            | flatten
+        )
+    }
+    if $base_type != "record" {
+        return []
+    }
+    $data
+    | transpose key value
+    | each {|row|
+        let key_names = if $include_keys {
+            collect-referenced-variable-names $row.key false
+        } else {
+            []
+        }
+        [
+            ...$key_names
+            ...(collect-referenced-variable-names $row.value $include_keys)
+        ]
+    }
+    | flatten
+}
+
+export def referenced-variable-names [data: any, --keys] {
+    collect-referenced-variable-names $data $keys | uniq
+}
+
+export def resolve-trusted-context [
+    vars: record
+    names: list
+    --cache: record = {}
+] {
+    mut state = {resolved: $cache, resolving: []}
+    for name in ($names | uniq) {
+        if $name in ($vars | columns) {
+            $state = (resolve-trusted-var $name $vars $state).state
+        }
+    }
+    {values: $state.resolved, cache: $state.resolved}
+}
+
+export def resolve-trusted-vars [vars: record, names: list] {
+    (resolve-trusted-context $vars $names).values
+}
+
+def restore-opaque-text [text: string, replacements: list] {
+    $replacements | reduce -f $text {|replacement, result|
+        if not ($result | str contains $replacement.token) {
+            $result
+        } else {
+            let value_type = (structured-base-type $replacement.value)
+            let value = if $value_type in ["record" "list" "table"] {
+                fail-command $"Extracted chain value '($replacement.name)' cannot be interpolated into text."
+            } else {
+                try {
+                    $replacement.value | into string
+                } catch {
+                    fail-command $"Extracted chain value '($replacement.name)' cannot be interpolated into text."
+                }
+            }
+            $result | str replace --all $replacement.token $value
+        }
+    }
+}
+
+def restore-opaque-value [data: any, replacements: list, restore_keys: bool, typed_values: bool] {
+    let base_type = (structured-base-type $data)
+    if $base_type == "string" {
+        if $typed_values {
+            let exact = ($replacements | where token == $data)
+            if not ($exact | is-empty) {
+                return ($exact | first | get value)
+            }
+        }
+        return (restore-opaque-text $data $replacements)
+    }
+    if $base_type in ["list" "table"] {
+        return ($data | reduce -f [] {|item, acc|
+            $acc | append [(restore-opaque-value $item $replacements $restore_keys $typed_values)]
+        })
+    }
+    if $base_type != "record" {
+        return $data
+    }
+
+    $data
+    | transpose key value
+    | reduce -f {} {|row, acc|
+        let key = if $restore_keys {
+            restore-opaque-text $row.key $replacements
+        } else {
+            $row.key
+        }
+        if $key in ($acc | columns) {
+            fail-command $"Structured interpolation produced duplicate key '($key)'"
+        }
+        let value = (restore-opaque-value $row.value $replacements $restore_keys $typed_values)
+        $acc | merge { $key: $value }
+    }
+}
+
+export def restore-opaque-values [
+    data: any
+    replacements: list
+    --keys
+    --typed
+] {
+    if ($replacements | is-empty) {
+        $data
+    } else {
+        restore-opaque-value $data $replacements $keys $typed
+    }
+}
+
+export def interpolate-structured-json [
+    data: any
+    --extra-vars (-v): record = {}
+    --collection (-c): string = ""
+    --env-vars (-e): record = {}
+    --resolved
+    --recursive
+] {
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+    let merged_vars = if $resolved {
+        $env_vars | merge $extra_vars
+    } else if not ($env_vars | is-empty) {
+        $env_vars | merge $extra_vars
+    } else {
+        api vars get-merged -c $collection -v $extra_vars
+    }
+    let template = if (structured-base-type $data) == "string" {
+        $data | to json
+    } else {
+        $data | to json --raw
+    }
+    if not ($template | str contains "{{") {
+        return $data
+    }
+    let dynamic_key_pattern = '"([^"\\]|\\.)*\{\{[^}]+\}\}([^"\\]|\\.)*"\s*:'
+    if not (($template | parse -r $dynamic_key_pattern) | is-empty) {
+        validate-interpolated-key-collisions $data $merged_vars $recursive
+    }
+    let interpolated = if $recursive {
+        interpolate-json-recursive-template $template $merged_vars
+    } else {
+        interpolate-json-template $template $merged_vars
+    }
+    $interpolated | from json
+}
+
+# Backward-compatible record entry point.
 export def "api vars interpolate-record" [
     data: record
     --extra-vars (-v): record = {}
     --collection (-c): string = ""   # Collection context for variable resolution
     --env-vars (-e): record = {}     # Pre-fetched variables (for backward compat)
+    --resolved                       # Treat --env-vars as an already-resolved context, even when empty
+    --single-pass                    # Do not interpolate placeholders introduced by replacement values
 ] {
-    if $collection != "" {
-        validate-resource-name "collection" $collection | ignore
-    }
-
-    # Return empty record if input is empty
-    if ($data | is-empty) {
-        return {}
-    }
-
-    # Pre-fetch merged variables once for efficiency
-    let merged_vars = if not ($env_vars | is-empty) {
-        $env_vars | merge $extra_vars
-    } else {
-        api vars get-merged -c $collection -v $extra_vars
-    }
-
-    let rows = ($data | transpose key value | each {|row|
-        let new_value = match ($row.value | describe | str replace -r '<.*' '') {
-            "string" => (api vars interpolate $row.value -v $extra_vars -c $collection -e $merged_vars)
-            "record" => (api vars interpolate-record $row.value -v $extra_vars -c $collection -e $merged_vars)
-            "list" => ($row.value | each {|item|
-                if ($item | describe | str starts-with "string") {
-                    api vars interpolate $item -v $extra_vars -c $collection -e $merged_vars
-                } else if ($item | describe | str starts-with "record") {
-                    api vars interpolate-record $item -v $extra_vars -c $collection -e $merged_vars
-                } else {
-                    $item
-                }
-            })
-            _ => $row.value
-        }
-        { $row.key: $new_value }
-    })
-
-    # Handle empty rows after processing
-    if ($rows | is-empty) {
-        return {}
-    }
-
-    $rows | reduce {|it, acc| $acc | merge $it }
+    interpolate-structured $data -v $extra_vars -c $collection -e $env_vars --resolved=$resolved --single-pass=$single_pass
 }
 
 # List all available variables (global variables and built-ins)

@@ -3,7 +3,7 @@
 
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use resource-path.nu [open-state-record path-type-safe resolve-under-base]
+use resource-path.nu [open-state-record path-type-safe resolve-under-base state-base-type]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 use auth.nu [auth-history-projection redact-sensitive-headers sensitive-header validate-secret-safe-url]
 # History entries and indexes retain their existing persistence model.
@@ -957,18 +957,19 @@ export def "api history resend" [
 
     # Rebuild body record from stored body (avoid double-encoding)
     let body_record = if ($entry.request.body? | default null) != null {
-        if ($entry.request.body | describe | str starts-with "record") or ($entry.request.body | describe | str starts-with "list") {
+        let body_type = (state-base-type $entry.request.body)
+        if $body_type in ["record" "list"] {
             $entry.request.body
         } else {
-            # body stored as string — decode it
-            try { $entry.request.body | into string | from json } catch { {} }
+            # Text and encoded bodies are stored as exact request bytes.
+            $entry.request.body | into string
         }
     } else {
         {}
     }
 
-    # Execute request — pass body as record (api request handles to-json internally)
-    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --raw=$raw --dry-run=$dry_run
+    # Persisted URL, headers, and body are already resolved request values.
+    api request -m $entry.request.method $entry.request.url -b $body_record -H $effective_headers -a $effective_auth --no-interpolate --raw=$raw --dry-run=$dry_run
 }
 
 # Search history — uses index for URL/method; falls back to files for body search
