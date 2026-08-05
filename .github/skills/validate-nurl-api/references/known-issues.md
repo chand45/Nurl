@@ -318,3 +318,18 @@ bulk changes.
 - **Re-check:** `tests/test_request_headers.nu` executes each emitted curl command and compares its
   headers/body with the corresponding Nurl execution, including form, XML, plain text, body files,
   records, pre-serialized JSON, single quotes, and `api request export`.
+
+## 28. FIXED: `@`-leading request bodies could disclose local files
+- **Old symptom:** curl interpreted a short or non-structured body beginning with `@` as a filename,
+  silently transmitting that local file's contents instead of the requested text. Interpolated and
+  remotely extracted chain values, form keys, body-file content, and history resend inherited the
+  same behavior while history continued to show the misleading literal value.
+- **Fix:** execution, binary-save requests, dry-run, and saved-request export now pass these bodies
+  with `--data-raw`. The intentional long/structured-body stdin path remains `--data-binary @-`.
+  Previews also include request-affecting `-L` and use `--head` for HEAD, matching execution.
+- **Compatibility:** `--data-raw` requires curl 7.43; Nurl already requires curl 7.75. Non-`@` wire
+  bytes, command signatures, output/history schemas, exit behavior, and Nushell 0.89 support are
+  unchanged. Use documented `--body-file` when file content is intended.
+- **Re-check:** run `tests/test_request_headers.nu`, `tests/test_request_body.nu`, and
+  `tests/run-header-compat.nu`; the local-server cases assert absolute wire bodies for literal paths,
+  forms, body files, exports, chains, history resend, redirects, HEAD, and binary-save requests.

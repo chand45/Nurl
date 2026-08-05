@@ -24,6 +24,7 @@ def start-request-body-server [tmp: string] {
     let launcher_script = ($tmp | path join "body-launcher.py")
     let port_file = ($tmp | path join "body-port.txt")
     let event_file = ($tmp | path join "body-events.jsonl")
+    let chain_body_file = ($tmp | path join "chain-body.txt")
     let stop_file = ($tmp | path join "body-stop.txt")
     let server_source = "import http.server
 import json
@@ -31,7 +32,7 @@ import os
 import sys
 import time
 
-port_file, event_file, stop_file = sys.argv[1:4]
+port_file, event_file, chain_body_file, stop_file = sys.argv[1:5]
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -62,6 +63,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'duplicate_a': 'D{{late}}',
                 'duplicate_b': 'D{{late}}',
             })
+        elif self.path == '/literal-chain-source':
+            with open(chain_body_file, encoding='utf-8') as handle:
+                self.emit({'next_body': handle.read()})
         else:
             self.emit({'ok': True})
 
@@ -119,8 +123,9 @@ print(process.pid)
 "
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
+    "" | save -f $chain_body_file
     let launched = (test-complete-result (do {
-        ^$python $launcher_script $python $server_script $port_file $event_file $stop_file
+        ^$python $launcher_script $python $server_script $port_file $event_file $chain_body_file $stop_file
     } | complete))
     assert equal $launched.exit_code 0 $"Request-body server launcher failed: ($launched.stderr)"
     let server_base = {
@@ -128,6 +133,7 @@ print(process.pid)
         port: 0
         port_file: $port_file
         event_file: $event_file
+        chain_body_file: $chain_body_file
         stop_file: $stop_file
         python: $python
     }
@@ -1120,6 +1126,73 @@ def test-request-body-interpolated-header-safety [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def test-request-body-literal-at-flows [] {
+    let root = (make-temp-dir "request-body-literal-at")
+    let infra = (make-temp-dir "request-body-literal-at-server")
+    let server = (start-request-body-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let sentinel_file = ($root | path join "local-secret.txt")
+        let sentinel = "NURL-LOCAL-SENTINEL-MUST-NEVER-REACH-THE-SERVER"
+        $sentinel | save -f $sentinel_file
+        let literal_body = "@" + $sentinel_file
+        $literal_body | save -f $server.chain_body_file
+
+        api vars set literal_body $literal_body | ignore
+        api post $"($base)/interpolated-at" -b "{{literal_body}}" --raw --no-history | ignore
+        assert equal (request-body-event $server "/interpolated-at").body $literal_body "Interpolated @ body read a local file"
+
+        let inline_chain = (api chain run ([{
+            method: POST
+            url: $"($base)/chain-inline-at"
+            body: {type: "text", content: $literal_body}
+        }]) --quiet)
+        assert equal $inline_chain.success true "Inline @ chain body failed"
+        assert equal (request-body-event $server "/chain-inline-at").body $literal_body "Inline chain body read a local file"
+
+        let extracted_chain = (api chain run ([
+            {
+                method: GET
+                url: $"($base)/literal-chain-source"
+                extract: {payload: "body.next_body"}
+            }
+            {
+                method: POST
+                url: $"($base)/chain-extracted-at"
+                body: {type: "text", content: "{{payload}}"}
+            }
+        ]) --quiet)
+        assert equal $extracted_chain.success true "Remote-extracted @ chain body failed"
+        assert equal $extracted_chain.context.payload $literal_body "Chain extraction changed the literal @ path"
+        assert equal (request-body-event $server "/chain-extracted-at").body $literal_body "Remote-extracted body read a local file"
+
+        api post $"($base)/history-at" -b $literal_body --raw | ignore
+        let history_id = (api history list --limit 1 | first | get id)
+        api history resend $history_id --raw | ignore
+        let history_events = (request-body-events $server | where path == "/history-at")
+        assert equal ($history_events | length) 2 "History request and resend did not both reach the endpoint"
+        assert ($history_events | all {|event| $event.body == $literal_body }) "History resend read a local file"
+
+        let binary_path = ($root | path join "literal-at-response.bin")
+        api post $"($base)/binary-at" -b $literal_body --binary-save $binary_path --no-history | ignore
+        assert equal (request-body-event $server "/binary-at").body $literal_body "Binary-save request read a local file"
+        assert ($binary_path | path exists) "Binary-save response was not committed"
+
+        let leaked = (
+            request-body-events $server
+            | where {|event| $event.body | str contains $sentinel }
+        )
+        assert equal ($leaked | length) 0 "A literal @ request leaked sentinel file contents"
+        null
+    } catch {|error| $error}
+    try { stop-request-body-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def run-suite-request-body []: nothing -> list<record> {
     [
         (run-test "request body: JSON interpolation precedes serialization" { test-request-body-json-boundary })
@@ -1128,6 +1201,7 @@ def run-suite-request-body []: nothing -> list<record> {
         (run-test "request body: chain headers and bodies interpolate once" { test-request-body-chain-single-pass })
         (run-test "request body: interpolated header names fail safely" { test-request-body-interpolated-header-safety })
         (run-test "request body: preview, history, and masking stay coherent" { test-request-body-preview-history-and-masking })
+        (run-test "request body: literal @ survives interpolation, chain, history, and binary flows" { test-request-body-literal-at-flows })
     ]
 }
 

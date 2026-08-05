@@ -379,7 +379,7 @@ def build-curl-args [
 
     # Add body if provided
     if $body != null and $body != "" {
-        $args = ($args | append ["-d" $body])
+        $args = ($args | append ["--data-raw" $body])
     }
 
     $args
@@ -392,11 +392,14 @@ def build-curl-args-for-display [
     headers: record
     body?: string
     auth?: record
+    follow_redirects: bool = false
 ] {
-    mut args = [
-        "--globoff"
-        "-X" $method
-    ]
+    mut args = ["--globoff"]
+    if $method == "HEAD" {
+        $args = ($args | append ["--head"])
+    } else {
+        $args = ($args | append ["-X" $method])
+    }
 
     # Add headers
     for header in (redact-sensitive-headers $headers | transpose key value) {
@@ -426,7 +429,11 @@ def build-curl-args-for-display [
 
     # Add body if provided
     if $body != null and $body != "" {
-        $args = ($args | append ["-d" $body])
+        $args = ($args | append ["--data-raw" $body])
+    }
+
+    if $follow_redirects {
+        $args = ($args | append "-L")
     }
 
     $args
@@ -513,7 +520,7 @@ def build-curl-args-binary [
     }
 
     if $body != null and $body != "" {
-        $args = ($args | append ["-d" $body])
+        $args = ($args | append ["--data-raw" $body])
     }
 
     $args
@@ -1304,7 +1311,7 @@ def execute-request [
         } else {
             $final_url
         }
-        let display_args = (build-curl-args-for-display $method $display_url $final_headers $final_body $display_auth)
+        let display_args = (build-curl-args-for-display $method $display_url $final_headers $final_body $display_auth $follow_redirects)
         let curl_command = (curl-args-to-string $display_args $display_url)
         print $curl_command
         return null

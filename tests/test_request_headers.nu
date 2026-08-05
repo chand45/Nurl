@@ -39,11 +39,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def emit(self, payload, status=200, head=False):
+    def emit(self, payload, status=200, head=False, headers=None):
         encoded = json.dumps(payload, separators=(',', ':')).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(encoded)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if not head:
             self.wfile.write(encoded)
@@ -67,6 +69,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         }
         with open(event_file, 'a', encoding='utf-8') as handle:
             handle.write(json.dumps(event, separators=(',', ':')) + '\\n')
+        if self.path == '/redirect':
+            self.emit({'redirect': True}, status=302, head=head, headers={'Location': '/redirect-final'})
+            return
         if self.path.startswith('/token'):
             token_count += 1
             with open(token_count_file, 'w', encoding='utf-8') as handle:
@@ -637,6 +642,7 @@ def assert-request-header-preview-case [
     tmp: string
     label: string
     command: string
+    expected_body?: string
 ] {
     let before = (request-header-events $server | length)
     let preview = (run-command-process $root ($command + " --dry-run"))
@@ -662,6 +668,11 @@ def assert-request-header-preview-case [
     let preview_event = ($events | first)
     let wire_event = ($events | last)
     assert equal $preview_event.body $wire_event.body $"($label) preview body differed from execution"
+    if $expected_body != null {
+        assert ($rendering.args | any {|arg| $arg == "--data-raw" }) $"($label) preview omitted --data-raw"
+        assert equal $preview_event.body $expected_body $"($label) preview sent the wrong absolute body"
+        assert equal $wire_event.body $expected_body $"($label) execution sent the wrong absolute body"
+    }
     for folded in ["CONTENT-TYPE" "ACCEPT" "X-KEEP"] {
         assert equal (request-header-values $preview_event $folded) (request-header-values $wire_event $folded) $"($label) preview headers differed from execution"
     }
@@ -679,6 +690,12 @@ def test-request-header-preview-fidelity [] {
         let common = " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
         let body_file = ($root | path join "body.txt")
         "body-file=exact&value=1\nsecond line" | save -f $body_file
+        let sentinel_file = ($scratch | path join "literal-body-sentinel.txt")
+        let sentinel = "NURL-LOCAL-FILE-CONTENTS-MUST-NOT-BE-SENT"
+        $sentinel | save -f $sentinel_file
+        let literal_path_body = "@" + $sentinel_file
+        let at_body_file = ($root | path join "at-body.txt")
+        $literal_path_body | save -f $at_body_file
         "" | save -f ($scratch | path join "match.nurlshell")
         let cases = [
             {label: "record", command: ("api post " + (($base + "/preview-record") | to nuon) + " -b {title: t, n: 1}" + $common)}
@@ -695,9 +712,17 @@ def test-request-header-preview-fidelity [] {
             {label: "multiline", command: ("api post " + (($base + "/preview-multiline") | to nuon) + " -b " + ("line one\nline two" | to nuon) + $common)}
             {label: "form", command: ("api post " + (($base + "/preview-form") | to nuon) + " -F {a: '1', b: '2'} -H {'content-type': text/plain, 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history")}
             {label: "body-file", command: ("api post " + (($base + "/preview-file") | to nuon) + " --body-file " + ($body_file | to nuon) + $common)}
+            {label: "at-literal", command: ("api post " + (($base + "/preview-at-literal") | to nuon) + " -b " + ("@everyone please review" | to nuon) + $common), expected_body: "@everyone please review"}
+            {label: "at-existing-path", command: ("api post " + (($base + "/preview-at-path") | to nuon) + " -b " + ($literal_path_body | to nuon) + $common), expected_body: $literal_path_body}
+            {label: "at-form", command: ("api post " + (($base + "/preview-at-form") | to nuon) + " -F {'@who': team} -H {'content-type': text/plain, 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"), expected_body: "@who=team"}
+            {label: "at-body-file", command: ("api post " + (($base + "/preview-at-file") | to nuon) + " --body-file " + ($at_body_file | to nuon) + $common), expected_body: $literal_path_body}
         ]
         for case in $cases {
-            assert-request-header-preview-case $root $server $scratch $case.label $case.command
+            if ($case.expected_body? | default null) == null {
+                assert-request-header-preview-case $root $server $scratch $case.label $case.command
+            } else {
+                assert-request-header-preview-case $root $server $scratch $case.label $case.command $case.expected_body
+            }
         }
 
         api collection create preview-export | ignore
@@ -708,6 +733,9 @@ def test-request-header-preview-fidelity [] {
             {label: "glob", body: "*.nurlshell"}
             {label: "quote", body: "it's exact"}
             {label: "multiline", body: "line one\nline two"}
+            {label: "at-literal", body: "@everyone please review"}
+            {label: "at-existing-path", body: $literal_path_body}
+            {label: "at-body-file-content", body: (open $at_body_file --raw)}
         ]
         for case in $export_cases {
             let name = "export-" + $case.label
@@ -725,6 +753,7 @@ def test-request-header-preview-fidelity [] {
             let export_line = ($exported.stdout | str trim)
             let rendering = (request-header-preview-rendering $server $export_line $scratch)
             assert equal $export_line $rendering.canonical $"($case.label) export used unsafe shell rendering"
+            assert ($rendering.args | any {|arg| $arg == "--data-raw" }) $"($case.label) export omitted --data-raw"
             let replay = if $nu.os-info.name == "windows" {
                 test-complete-result (do { ^curl ...$rendering.args } | complete)
             } else {
@@ -745,6 +774,60 @@ def test-request-header-preview-fidelity [] {
                 assert equal (request-header-values ($events | first) $folded) (request-header-values ($events | last) $folded)
             }
         }
+
+        let no_redirect_preview = (run-command-process $root ("api get " + (($base + "/redirect") | to nuon) + " --raw --no-history --dry-run"))
+        assert equal $no_redirect_preview.exit_code 0 $"Non-redirect preview failed: ($no_redirect_preview.stderr)"
+        let no_redirect_rendering = (request-header-preview-rendering $server ($no_redirect_preview.stdout | str trim) $scratch)
+        assert not ($no_redirect_rendering.args | any {|arg| $arg == "-L" }) "Preview emitted -L without --follow-redirects"
+
+        let redirect_before = (request-header-events $server | length)
+        let redirect_preview = (run-command-process $root ("api get " + (($base + "/redirect") | to nuon) + " -L --raw --no-history --dry-run"))
+        assert equal $redirect_preview.exit_code 0 $"Redirect preview failed: ($redirect_preview.stderr)"
+        let redirect_rendering = (request-header-preview-rendering $server ($redirect_preview.stdout | str trim) $scratch)
+        assert ($redirect_rendering.args | any {|arg| $arg == "-L" }) "Redirect preview omitted -L"
+        let redirect_replay = (test-complete-result (do { ^curl ...$redirect_rendering.args } | complete))
+        assert equal $redirect_replay.exit_code 0 $"Redirect preview replay failed: ($redirect_replay.stderr)"
+        let redirect_execution = (run-command-process $root ("api get " + (($base + "/redirect") | to nuon) + " -L --raw --no-history"))
+        assert equal $redirect_execution.exit_code 0 $"Redirect execution failed: ($redirect_execution.stderr)"
+        let redirect_paths = (request-header-events $server | skip $redirect_before | get path)
+        assert equal $redirect_paths ["/redirect" "/redirect-final" "/redirect" "/redirect-final"] "Preview replay and execution did not follow the same redirect"
+
+        let ordered_preview = (run-command-process $root (
+            "api post " + (($base + "/redirect") | to nuon)
+            + " -b " + ("@ordering" | to nuon) + " -L --raw --no-history --dry-run"
+        ))
+        assert equal $ordered_preview.exit_code 0 $"Ordered preview failed: ($ordered_preview.stderr)"
+        let ordered_args = (request-header-preview-rendering $server ($ordered_preview.stdout | str trim) $scratch | get args)
+        let data_position = ($ordered_args | enumerate | where item == "--data-raw" | first | get index)
+        let redirect_position = ($ordered_args | enumerate | where item == "-L" | first | get index)
+        assert ($data_position < $redirect_position) "Preview placed -L before --data-raw"
+
+        let head_before = (request-header-events $server | length)
+        let head_preview = (run-command-process $root ("api head " + (($base + "/preview-head") | to nuon) + " --raw --no-history --dry-run"))
+        assert equal $head_preview.exit_code 0 $"HEAD preview failed: ($head_preview.stderr)"
+        let head_rendering = (request-header-preview-rendering $server ($head_preview.stdout | str trim) $scratch)
+        assert ($head_rendering.args | any {|arg| $arg == "--head" }) "HEAD preview omitted --head"
+        assert not (
+            $head_rendering.args
+            | window 2
+            | any {|pair| ($pair | first) == "-X" and ($pair | last) == "HEAD" }
+        ) "HEAD preview emitted -X HEAD"
+        let head_replay = (test-complete-result (do { ^curl ...$head_rendering.args } | complete))
+        assert equal $head_replay.exit_code 0 $"HEAD preview replay failed: ($head_replay.stderr)"
+        let head_execution = (run-command-process $root ("api head " + (($base + "/preview-head") | to nuon) + " --raw --no-history"))
+        assert equal $head_execution.exit_code 0 $"HEAD execution failed: ($head_execution.stderr)"
+        let head_events = (request-header-events $server | skip $head_before)
+        assert equal ($head_events | length) 2 "HEAD preview replay and execution did not both reach the endpoint"
+        assert ($head_events | all {|event| $event.method == "HEAD" and $event.path == "/preview-head" }) "HEAD preview replay and execution diverged"
+
+        let module_files = (
+            ls ($env.NURL_REPO_ROOT | path join "nu_modules")
+            | where type == file
+            | where name =~ '\.nu$'
+            | get name
+        )
+        let bare_data_flags = ($module_files | where {|path| open $path --raw | str contains '["-d"' })
+        assert equal ($bare_data_flags | length) 0 "A bare curl -d body argument remains in nu_modules"
         null
     } catch {|error| $error}
     try { stop-request-header-server $server } catch {}
@@ -779,6 +862,26 @@ def test-request-header-compatibility-subset [] {
             + " -b " + ("plain body" | to nuon)
             + " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
         )
+        let sentinel_file = ($scratch | path join "compat-sentinel.txt")
+        "COMPAT-SENTINEL-MUST-NOT-BE-SENT" | save -f $sentinel_file
+        let literal_path_body = "@" + $sentinel_file
+        let body_file = ($scratch | path join "compat-body.txt")
+        $literal_path_body | save -f $body_file
+        assert-request-header-preview-case $root $server $scratch "compat-at-literal" (
+            "api post " + (($base + "/compat-at-literal") | to nuon)
+            + " -b " + ("@everyone please review" | to nuon)
+            + " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
+        ) "@everyone please review"
+        assert-request-header-preview-case $root $server $scratch "compat-at-path" (
+            "api post " + (($base + "/compat-at-path") | to nuon)
+            + " -b " + ($literal_path_body | to nuon)
+            + " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
+        ) $literal_path_body
+        assert-request-header-preview-case $root $server $scratch "compat-at-body-file" (
+            "api post " + (($base + "/compat-at-body-file") | to nuon)
+            + " --body-file " + ($body_file | to nuon)
+            + " -H {'content-type': 'application/xml', 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"
+        ) $literal_path_body
         null
     } catch {|error| $error}
     try { stop-request-header-server $server } catch {}
