@@ -118,7 +118,13 @@ def cleanup-history-alias-fixture [root: string, alias_path: string, alias_creat
 }
 
 def history-lock-test-hostname [] {
-    ^hostname | str trim
+    let runtime = (version | get version)
+    let command = if ($runtime | str starts-with "0.89.") {
+        "sys | get host | get hostname"
+    } else {
+        "sys host | get hostname"
+    }
+    ^$nu.current-exe --no-config-file -c $command | str trim
 }
 
 def history-lock-test-owner [pid: int, token: string] {
@@ -731,6 +737,64 @@ def test-b1-dead-history-lock-recovers [] {
     cleanup $tmp
 }
 
+def test-b1-noncanonical-dead-history-lock-recovers [] {
+    let tmp = (make-temp-dir "b1-noncanonical-dead-lock")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let lock_path = ($tmp | path join ".history-index.lock")
+    mkdir $lock_path
+    let owner = (
+        history-lock-test-owner 2147483647 (random uuid)
+        | upsert acquired_at (
+            (date now) - 3sec
+            | date to-timezone UTC
+            | format date "%Y-%m-%dT%H:%M:%S%.9fZ"
+        )
+    )
+    $owner | to nuon | save ($lock_path | path join "owner.nuon")
+
+    if $nu.os-info.name == "windows" {
+        $env.API_ROOT = ($tmp | str replace --all "\\" "/")
+    } else {
+        let alias = ($tmp | path join "noncanonical-child")
+        mkdir $alias
+        $env.API_ROOT = ($alias | path join "..")
+    }
+    let started = (date now)
+    api history list --limit 1 | ignore
+    let max_recovery = 25sec
+    assert (((date now) - $started) < $max_recovery) "noncanonical dead-owner lock was not recovered promptly"
+    assert-no-history-lock-artifacts $tmp "noncanonical dead-owner recovery"
+    cleanup $tmp
+}
+
+def test-b1-hostname-environment-fallback [] {
+    let tmp = (make-temp-dir "b1-hostname-fallback")
+    $env.API_ROOT = $tmp
+    init-workspace
+    let bin = ($tmp | path join "failing-hostname-bin")
+    mkdir $bin
+    if $nu.os-info.name == "windows" {
+        "@exit /b 1" | save ($bin | path join "hostname.cmd")
+        "@echo ComputerName REG_SZ REMOTE-NODE" | save ($bin | path join "reg.cmd")
+    } else {
+        "#!/bin/sh\nexit 1" | save ($bin | path join "hostname")
+        ^chmod +x ($bin | path join "hostname")
+    }
+    let path_literal = ([($bin | path expand)] | append $env.PATH | to nuon)
+    let command = if $nu.os-info.name == "windows" {
+        $"hide-env -i COMPUTERNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
+    } else {
+        $"hide-env -i HOSTNAME; $env.PATH = ($path_literal); api history list --limit 1 | ignore"
+    }
+    let started = (date now)
+    let result = (run-command-process $tmp $command)
+    assert equal $result.exit_code 0 $"OS-backed hostname fallback failed without environment or with a failing hostname command: ($result.stderr)"
+    assert (((date now) - $started) < 5sec) "OS-backed hostname fallback was unexpectedly slow"
+    assert-no-history-lock-artifacts $tmp "hostname fallback"
+    cleanup $tmp
+}
+
 def test-b1-live-history-lock-is-not-stolen [] {
     let tmp = (make-temp-dir "b1-live-lock")
     $env.API_ROOT = $tmp
@@ -772,10 +836,10 @@ def test-b1-ownerless-and-malformed-locks-fail-closed [] {
 
     mkdir $lock_path
     {
-        pid: -1
+        pid: 2147483647
         hostname: (history-lock-test-hostname)
-        acquired_at: "not-a-timestamp"
-        token: "../not-a-uuid"
+        acquired_at: "9999-12-31T23:59:59.999999999Z"
+        token: (random uuid)
     } | to nuon | save $owner_path
     sleep 2100ms
     let malformed_before = (open $owner_path --raw)
@@ -1915,6 +1979,7 @@ def run-suite-history-compatibility []: nothing -> list<record> {
         (run-test "B1: unsorted indexes retain monotonic persistence" { test-b1-monotonic-unsorted-index })
         (run-test "B1: history save loads the index exactly once" { test-b1-save-loads-index-once })
         (run-test "B1: history locks support percent-bearing roots and index-free rebuilds" { test-b1-history-lock-path-compatibility })
+        (run-test "B1: noncanonical roots recover dead history locks" { test-b1-noncanonical-dead-history-lock-recovers })
     ]
 }
 
@@ -1935,6 +2000,7 @@ def run-suite-history [net_ok: bool]: nothing -> list<record> {
         (run-test "B1: mixed and malformed timestamps use canonical deterministic order" { test-b1-mixed-and-malformed-timestamps })
         (run-test "B1: history IDs resolve exact-first and reject ambiguous partials" { test-b1-history-id-resolution })
         ...(run-suite-history-compatibility)
+        (run-test "B1: OS-backed hostname fallback ignores environment and external failure" { test-b1-hostname-environment-fallback })
         (run-test "B1: killed same-host lock owners recover promptly" { test-b1-dead-history-lock-recovers })
         (run-test "B1: live history lock owners are never stolen" { test-b1-live-history-lock-is-not-stolen })
         (run-test "B1: ownerless and malformed locks stay fail-closed" { test-b1-ownerless-and-malformed-locks-fail-closed })

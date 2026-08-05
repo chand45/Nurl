@@ -17,6 +17,7 @@ let expected_names = [
     "B1: unsorted indexes retain monotonic persistence"
     "B1: history save loads the index exactly once"
     "B1: history locks support percent-bearing roots and index-free rebuilds"
+    "B1: noncanonical roots recover dead history locks"
 ]
 let results = (run-suite-history-compatibility)
 let actual_names = ($results | get name)

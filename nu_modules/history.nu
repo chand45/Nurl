@@ -46,14 +46,70 @@ def history-index-lock-create-contended [result: record, path: string] {
     }
 }
 
-def history-index-lock-hostname [] {
-    let result = (^hostname | complete)
-    let hostname = ($result.stdout | str trim)
-    if $result.exit_code != 0 or ($hostname | is-empty) {
-        let detail = ($result.stderr | str trim)
-        fail-command $"Could not determine the local hostname for history index locking: ($detail)"
+def history-index-lock-system-hostname [] {
+    let native = if $nu.os-info.name == "windows" {
+        try {
+            let system_reg = 'C:\Windows\System32\reg.exe'
+            if ($system_reg | path exists) {
+                let result = (
+                    ^$system_reg query 'HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName'
+                        /v ComputerName
+                    | complete
+                )
+                if $result.exit_code == 0 {
+                    $result.stdout
+                    | lines
+                    | where {|line| ($line | str contains "ComputerName") and ($line | str contains "REG_SZ") }
+                    | first
+                    | split row "REG_SZ"
+                    | last
+                    | str trim
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch {
+            null
+        }
+    } else {
+        try {
+            open /etc/hostname --raw | lines | first | str trim
+        } catch {
+            null
+        }
     }
-    $hostname
+    if ($native | describe) == "string" and (not ($native | str trim | is-empty)) {
+        return ($native | str trim)
+    }
+
+    let runtime = (version | get version)
+    let command = if ($runtime | str starts-with "0.89.") {
+        "sys | get host | get hostname"
+    } else {
+        "sys host | get hostname"
+    }
+    let attempted = try {
+        let result = (^$nu.current-exe --no-config-file -c $command | complete)
+        {
+            hostname: ($result.stdout | str trim)
+            error: (if $result.exit_code == 0 { null } else { $result.stderr | str trim })
+        }
+    } catch {|error|
+        {hostname: null, error: $error.msg}
+    }
+    if (
+        ($attempted.hostname | describe) != "string"
+        or ($attempted.hostname | str trim | is-empty)
+    ) {
+        fail-command $"Could not determine a stable OS hostname for history index locking: ($attempted.error | default 'system hostname is empty')"
+    }
+    $attempted.hostname | str trim
+}
+
+def history-index-lock-published-hostname [] {
+    history-index-lock-system-hostname
 }
 
 def history-index-lock-acquired-at-valid [value: string] {
@@ -109,6 +165,16 @@ def history-index-lock-owner [owner_path: string] {
     ) {
         return null
     }
+    let duration_safe = try {
+        let acquired = ($acquired_at | into datetime)
+        (date now | date to-timezone UTC) - $acquired | ignore
+        true
+    } catch {
+        false
+    }
+    if not $duration_safe {
+        return null
+    }
     {pid: $pid, hostname: $hostname, acquired_at: $acquired_at, token: $token}
 }
 
@@ -117,17 +183,14 @@ def history-index-lock-observation [path: string, local_hostname: string] {
         return null
     }
     let owner_path = ($path | path join "owner.nuon")
-    let modified = try {
-        ls -a ($path | path dirname)
-        | where {|entry| $entry.name == $path }
-        | first
-        | get modified
-    } catch {
-        date now
-    }
     let owner = (history-index-lock-owner $owner_path)
-    let age = ((date now) - $modified)
     if $owner == null {
+        let modified = try {
+            ls -a -D $path | first | get modified
+        } catch {
+            date now
+        }
+        let age = ((date now) - $modified)
         return {
             owner: null
             owner_state: (if $age < 2sec { "publishing" } else { "unknown" })
@@ -135,6 +198,8 @@ def history-index-lock-observation [path: string, local_hostname: string] {
             age: $age
         }
     }
+    let acquired = ($owner.acquired_at | into datetime)
+    let age = ((date now | date to-timezone UTC) - $acquired)
     let same_host = (ascii-equal-ignore-case $owner.hostname $local_hostname)
     let owner_live = if $same_host {
         ps | any {|process| ($process.pid? | default (-1)) == $owner.pid }
@@ -273,19 +338,21 @@ mv -- "$NURL_HISTORY_LOCK_PATH" "$NURL_HISTORY_LOCK_RETIRED"
         NURL_HISTORY_LOCK_EXPECTED: $expected_raw
         NURL_HISTORY_LOCK_RETIRED: $retired
     } {
-        ^flock -n $recovery_path sh -c $script | complete
+        ^flock -n -E 3 $recovery_path sh -c $script | complete
     }
 }
 
 def recover-dead-history-index-lock [path: string, observation: record] {
     if $observation.owner_state != "dead" or $observation.age < 2sec {
-        return false
+        return {recovered: false, unavailable: null}
     }
     let owner_path = ($path | path join "owner.nuon")
-    let expected_raw = try { open $owner_path --raw } catch { return false }
+    let expected_raw = try { open $owner_path --raw } catch {
+        return {recovered: false, unavailable: null}
+    }
     let expected_owner = (history-index-lock-owner $owner_path)
     if $expected_owner == null or $expected_owner.token != $observation.owner.token {
-        return false
+        return {recovered: false, unavailable: null}
     }
     let retired = ($path | path dirname | path join $".history-index.lock.release-(random uuid)")
     let result = if $nu.os-info.name == "windows" {
@@ -295,16 +362,30 @@ def recover-dead-history-index-lock [path: string, observation: record] {
     }
     if $result.exit_code == 0 {
         cleanup-retired-history-lock $retired
-        return true
+        return {recovered: true, unavailable: null}
     }
-    false
+    if $result.exit_code in [2 3] {
+        return {recovered: false, unavailable: null}
+    }
+    let detail = (
+        [$result.stderr $result.stdout]
+        | str join "\n"
+        | str trim
+    )
+    let platform = if $nu.os-info.name == "windows" { "Windows mutex" } else { "POSIX flock" }
+    {
+        recovered: false
+        unavailable: $"automatic dead-owner recovery via ($platform) is unavailable: (if ($detail | is-empty) { 'helper exited with code ' + ($result.exit_code | into string) } else { $detail })"
+    }
 }
 
 def acquire-history-index-lock [] {
     let path = (get-history-index-lock-path)
     let owner_path = ($path | path join "owner.nuon")
-    let hostname = (history-index-lock-hostname)
+    let published_hostname = (history-index-lock-published-hostname)
     let deadline = ((date now) + 30sec)
+    mut recovery_unavailable = null
+    let system_hostname = $published_hostname
 
     loop {
         let created = (create-history-index-lock-directory $path)
@@ -312,7 +393,7 @@ def acquire-history-index-lock [] {
             let token = (random uuid)
             let owner = {
                 pid: $nu.pid
-                hostname: $hostname
+                hostname: $published_hostname
                 acquired_at: (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.9fZ")
                 token: $token
             }
@@ -353,16 +434,31 @@ def acquire-history-index-lock [] {
             fail-command $"Could not create history index lock '($path)': ($detail)"
         }
 
-        let observation = (history-index-lock-observation $path $hostname)
+        let observation = (history-index-lock-observation $path $system_hostname)
         if $observation != null and $observation.owner_state == "dead" {
-            if (recover-dead-history-index-lock $path $observation) {
+            let recovery = (recover-dead-history-index-lock $path $observation)
+            if $recovery.unavailable != null {
+                $recovery_unavailable = $recovery.unavailable
+            }
+            if $recovery.recovered {
+                sleep 10ms
+                if (date now) >= $deadline and ($path | path exists) {
+                    let final_observation = (history-index-lock-observation $path $system_hostname)
+                    let detail = (history-index-lock-detail $final_observation)
+                    fail-command $"Timed out waiting for history index lock '($path)' after 30 seconds; the stale lock was recovered but another owner acquired the lock before the bounded final attempt. Observed ($detail). (history-index-lock-manual-recovery $path)"
+                }
                 continue
             }
         }
 
         if (date now) >= $deadline {
             let detail = (history-index-lock-detail $observation)
-            fail-command $"Timed out waiting for history index lock '($path)' after 30 seconds; a prior Nurl process may have been interrupted. Observed ($detail). (history-index-lock-manual-recovery $path)"
+            let recovery_detail = if $recovery_unavailable == null {
+                ""
+            } else {
+                $" ($recovery_unavailable)."
+            }
+            fail-command $"Timed out waiting for history index lock '($path)' after 30 seconds; a prior Nurl process may have been interrupted. Observed ($detail).($recovery_detail) (history-index-lock-manual-recovery $path)"
         }
         sleep 10ms
     }
