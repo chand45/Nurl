@@ -498,15 +498,10 @@ def build-curl-args-binary [
         "-s"
         "-S"
         "--globoff"
+        "-X" $method
         "--max-time" (get-timeout | into string)
         "-o" $output_path
     ]
-
-    if $method == "HEAD" {
-        $args = ($args | append ["--head"])
-    } else {
-        $args = ($args | append ["-X" $method])
-    }
 
     for header in ($headers | transpose key value) {
         $args = ($args | append ["-H" $"($header.key): ($header.value)"])
