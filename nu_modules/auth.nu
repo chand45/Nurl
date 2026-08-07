@@ -771,6 +771,7 @@ export def sensitive-header [name: string, value: any] {
             "PROXY_AUTHORIZATION"
             "COOKIE"
             "SET_COOKIE"
+            "SET_COOKIE2"
             "X_TOKEN"
         ]
         or (sensitive-credential-name $name)

@@ -678,19 +678,26 @@ def parse-response-parts [body_raw: string, headers_raw: string, meta_part: stri
     } else { 0 }
 
     # Parse headers
-    let header_lines = ($headers_raw | lines | skip 1)  # Skip status line
-    let headers = $header_lines
-        | each {|line|
-            let parts = ($line | split row ":" | str trim)
-            if ($parts | length) >= 2 {
-                let key = ($parts | first)
-                let value = ($parts | skip 1 | str join ":")
-                { $key: ($value | str trim) }
+    let headers = (
+        $headers_raw
+        | lines
+        | skip 1
+        | reduce -f [] {|line, folded|
+            let parts = ($line | split row ":")
+            if ($parts | length) < 2 {
+                $folded
             } else {
-                {}
+                let key = ($parts | get 0 | str trim)
+                let value = ($parts | skip 1 | str join ":" | str trim)
+                if ($key | is-empty) {
+                    $folded
+                } else {
+                    fold-wire-header $folded $key $value
+                }
             }
         }
-        | reduce -f {} {|it, acc| $acc | merge $it }
+        | wire-header-record
+    )
 
     # Try to parse body as JSON
     let body = try {
@@ -849,12 +856,50 @@ def upsert-wire-header [headers: record, key: string, value: string] {
     $retained | upsert $key $value
 }
 
+def fold-wire-header [headers: list, key: string, value: string] {
+    let matches = (
+        $headers
+        | enumerate
+        | where {|header| ascii-equal-ignore-case $header.item.key $key }
+    )
+    let line_sensitive = (sensitive-header $key $value)
+    if ($matches | is-empty) {
+        $headers | append {
+            key: $key
+            value: (if $line_sensitive { "******" } else { $value })
+            sensitive: $line_sensitive
+        }
+    } else {
+        let matched = ($matches | first)
+        let sensitive = ($matched.item.sensitive or $line_sensitive)
+        let combined = if $sensitive {
+            "******"
+        } else {
+            $"($matched.item.value), ($value)"
+        }
+        $headers
+        | enumerate
+        | each {|header|
+            if $header.index == $matched.index {
+                {key: $key, value: $combined, sensitive: $sensitive}
+            } else {
+                $header.item
+            }
+        }
+    }
+}
+
+def wire-header-record []: list -> record {
+    $in
+    | reduce -f {} {|header, result| $result | upsert $header.key $header.value }
+}
+
 def parse-wire-headers [header_output: string] {
     let final_block = (last-header-block $header_output)
     $final_block
     | lines
     | skip 1
-    | reduce -f {} {|line, headers|
+    | reduce -f [] {|line, headers|
         let parts = ($line | split row ":")
         if ($parts | length) < 2 {
             $headers
@@ -864,10 +909,11 @@ def parse-wire-headers [header_output: string] {
             if ($key | is-empty) {
                 $headers
             } else {
-                upsert-wire-header $headers $key $value
+                fold-wire-header $headers $key $value
             }
         }
     }
+    | wire-header-record
 }
 
 def parse-wire-trailers [trailer_bytes: binary] {
@@ -885,7 +931,7 @@ def parse-wire-trailers [trailer_bytes: binary] {
     $output
     | lines
     | where {|line| not ($line | str trim | is-empty) }
-    | reduce -f {} {|line, trailers|
+    | reduce -f [] {|line, trailers|
         let parts = ($line | split row ":")
         if ($parts | length) < 2 {
             fail-command "Curl returned malformed response trailers"
@@ -905,8 +951,9 @@ def parse-wire-trailers [trailer_bytes: binary] {
             fail-command "Curl returned malformed response trailers"
         }
         let value = ($parts | skip 1 | str join ":" | str trim)
-        upsert-wire-header $trailers $key $value
+        fold-wire-header $trailers $key $value
     }
+    | wire-header-record
 }
 
 def as-binary [value: any] {

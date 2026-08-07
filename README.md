@@ -392,12 +392,18 @@ Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `st
 whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
 takes precedence over `--output`. Recognized sensitive response headers are masked in the public
 result before `--raw`, `--output headers|json`, `--select`, or human rendering, while non-sensitive
-header names, values, and result types remain unchanged. With `--dry-run`, the curl preview is returned instead of an
-HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
-OAuth token endpoint. They render bearer/OAuth/SAML authorization, basic credentials, API-key values,
-and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
-header/query names. Query API-key names use RFC 3986 query-component encoding in previews, and real
-requests encode both the name and value exactly once while preserving existing queries and fragments.
+header names, values, and result types remain unchanged. Repeated response field lines within one
+header or trailer section are matched with ASCII case-insensitive names and joined in wire order with
+`, `. The field retains its first-appearance position and final wire spelling. Sensitivity is checked
+on every field line before joining; one sensitive name or credential-shaped value makes the public
+field exactly `******`. `Set-Cookie` and `Set-Cookie2` also project as one mask without exposing a
+count. Trailers still override same-named response headers, and redirect blocks remain separate.
+With `--dry-run`, the curl preview is returned instead of an HTTP response. Dry-run and saved-request
+export never build secret-bearing wire auth or contact an OAuth token endpoint. They render
+bearer/OAuth/SAML authorization, basic credentials, API-key values, and recognized sensitive headers
+as `******` while preserving non-sensitive headers and API-key header/query names. Query API-key
+names use RFC 3986 query-component encoding in previews, and real requests encode both the name and
+value exactly once while preserving existing queries and fragments.
 `--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted

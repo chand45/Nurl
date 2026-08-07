@@ -318,3 +318,22 @@ bulk changes.
 - **Re-check:** `tests/test_request_headers.nu` executes each emitted curl command and compares its
   headers/body with the corresponding Nurl execution, including form, XML, plain text, body files,
   records, pre-serialized JSON, single quotes, and `api request export`.
+
+## 28. FIXED: Repeated response field lines were discarded
+- **Old symptom:** the response parsers replaced an ASCII-case-insensitively equal header or trailer
+  with its final field line. Pagination links, cache variance, authentication challenges, custom
+  values, and repeated trailers were permanently lost in live output and persisted history.
+- **Security trap:** joining raw values before masking was unsafe because a safe prefix could prevent
+  the shared credential-value rule from recognizing a later `Bearer`, `Basic`, or SAML value.
+  Conversely, last-value replacement made exposure depend on wire order.
+- **Fix:** each original field line is classified with the shared sensitive-header policy before a
+  section-local fold. Non-sensitive values join with exact `, ` in wire order. One sensitive line
+  yields exactly one `******`; `Set-Cookie` and `Set-Cookie2` therefore expose neither value nor
+  count. The logical field keeps first-appearance position and final spelling. Trailer-over-header
+  replacement and final redirect-block selection are unchanged, and the legacy parser now agrees.
+- **Compatibility:** single-occurrence fields and response/history schemas are unchanged. No
+  `headers_all` field, migration, flag, or request-rendering change is introduced.
+- **Re-check:** run `tests/test_secure_header_capture.nu` through `tests/run-security.nu` and the
+  legacy parser case in `tests/test_features.nu`. Fixtures cover list-valued headers, both
+  sensitive-value orders, cookies, empty/comma/colon/metacharacter values, 25 repetitions, trailers,
+  redirects, all output modes, history resend/read/export bytes, and exact single-field types.

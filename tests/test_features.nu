@@ -56,6 +56,50 @@ def test-c6-redirect-parse-hermetic [] {
     assert (not $has_location) "final headers must not contain Location from redirect block"
 }
 
+def test-c6-legacy-repeated-header-parity [] {
+    let output = (
+        "HTTP/1.1 200 OK\r\n"
+        + "X-Before: before\r\n"
+        + "x-dup: a\r\n"
+        + "X-Middle: middle\r\n"
+        + "X-Dup: b\r\n"
+        + "X-DUP: c\r\n"
+        + "Link: </a>; rel=\"next\"\r\n"
+        + "Link: </b>; rel=\"prev\"\r\n"
+        + "WWW-Authenticate: Digest realm=\"one\"\r\n"
+        + "WWW-Authenticate: Newauth realm=\"two\"\r\n"
+        + "X-Debug-Alpha: info\r\n"
+        + "X-Debug-Alpha: Bearer LEGACY-LAST-SENTINEL\r\n"
+        + "X-Debug-Beta: Bearer LEGACY-FIRST-SENTINEL\r\n"
+        + "X-Debug-Beta: info\r\n"
+        + "Set-Cookie2: first=LEGACY-COOKIE2-FIRST\r\n"
+        + "Set-Cookie2: second=LEGACY-COOKIE2-SECOND\r\n"
+        + "X-After: after\r\n\r\n"
+        + "{}\r\n\r\n---RESPONSE_META---\r\n200\r\n0.1\r\n2\r\n"
+    )
+    let parsed = (parse-curl-response $output)
+    assert equal ($parsed.headers | get "X-DUP") "a, b, c"
+    assert equal ($parsed.headers | get "Link") "</a>; rel=\"next\", </b>; rel=\"prev\""
+    assert equal ($parsed.headers | get "WWW-Authenticate") "Digest realm=\"one\", Newauth realm=\"two\""
+    assert equal ($parsed.headers | get "X-Debug-Alpha") "******"
+    assert equal ($parsed.headers | get "X-Debug-Beta") "******"
+    assert equal ($parsed.headers | get "Set-Cookie2") "******"
+    assert equal (
+        $parsed.headers
+        | columns
+        | where {|name| $name in ["X-Before" "X-DUP" "X-Middle" "Link" "WWW-Authenticate" "X-Debug-Alpha" "X-Debug-Beta" "Set-Cookie2" "X-After"] }
+    ) ["X-Before" "X-DUP" "X-Middle" "Link" "WWW-Authenticate" "X-Debug-Alpha" "X-Debug-Beta" "Set-Cookie2" "X-After"]
+    let serialized = ($parsed | to nuon)
+    for secret in [
+        "LEGACY-LAST-SENTINEL"
+        "LEGACY-FIRST-SENTINEL"
+        "LEGACY-COOKIE2-FIRST"
+        "LEGACY-COOKIE2-SECOND"
+    ] {
+        assert (not ($serialized | str contains $secret)) $"legacy parser exposed a repeated-header secret: ($secret)"
+    }
+}
+
 def test-c6-follow-redirects-final-status [] {
     require-network
     let tmp = (make-temp-dir "c6-redir")
@@ -614,6 +658,7 @@ def run-suite-features [net_ok: bool]: nothing -> list<record> {
     mut results = [
         # Offline tests — run regardless of network
         (run-test "C6: redirect parse hermetic (offline)"         { test-c6-redirect-parse-hermetic })
+        (run-test "C6: legacy parser folds repeated headers"      { test-c6-legacy-repeated-header-parity })
         (run-test "C8: --retries on transient failure (local server)" { test-c8-retries-on-transient-failure })
         (run-test "C10: api options method flag (dry-run offline)" { test-c10-options-method-offline })
         (run-test "C11: api request export prints curl command"   { test-c11-export-prints-curl-command })
