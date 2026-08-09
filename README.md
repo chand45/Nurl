@@ -794,7 +794,11 @@ Managed bearer, SAML, OAuth2, and Basic authentication reserve `Authorization`; 
 keys reserve their configured header. Supplying the same header through `-H` is an error rather
 than silently dropping either value. Query-mode API keys do not conflict with request headers.
 `--dry-run` and `api request export` print the deduplicated headers and resolved body exactly as
-execution sends them, with credentials still masked.
+execution sends them, with credentials still masked. The command includes every flag that affects
+the request or selects the response: the method form (`-X` or `--head`), headers, body flag and
+value, and `-L` when redirects are enabled. Output-only flags such as silence, timeout, and response
+file handling remain omitted so the preview stays copy-friendly. Request bodies are always passed
+as literal data; use `--body-file` when file contents should be sent.
 
 ---
 
