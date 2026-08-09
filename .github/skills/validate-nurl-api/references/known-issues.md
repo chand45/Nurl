@@ -319,21 +319,18 @@ bulk changes.
   headers/body with the corresponding Nurl execution, including form, XML, plain text, body files,
   records, pre-serialized JSON, single quotes, and `api request export`.
 
-## 28. FIXED: Repeated response field lines were discarded
-- **Old symptom:** the response parsers replaced an ASCII-case-insensitively equal header or trailer
-  with its final field line. Pagination links, cache variance, authentication challenges, custom
-  values, and repeated trailers were permanently lost in live output and persisted history.
-- **Security trap:** joining raw values before masking was unsafe because a safe prefix could prevent
-  the shared credential-value rule from recognizing a later `Bearer`, `Basic`, or SAML value.
-  Conversely, last-value replacement made exposure depend on wire order.
-- **Fix:** each original field line is classified with the shared sensitive-header policy before a
-  section-local fold. Non-sensitive values join with exact `, ` in wire order. One sensitive line
-  yields exactly one `******`; `Set-Cookie` and `Set-Cookie2` therefore expose neither value nor
-  count. The logical field keeps first-appearance position and final spelling. Trailer-over-header
-  replacement and final redirect-block selection are unchanged, and the legacy parser now agrees.
-- **Compatibility:** single-occurrence fields and response/history schemas are unchanged. No
-  `headers_all` field, migration, flag, or request-rendering change is introduced.
-- **Re-check:** run `tests/test_secure_header_capture.nu` through `tests/run-security.nu` and the
-  legacy parser case in `tests/test_features.nu`. Fixtures cover list-valued headers, both
-  sensitive-value orders, cookies, empty/comma/colon/metacharacter values, 25 repetitions, trailers,
-  redirects, all output modes, history resend/read/export bytes, and exact single-field types.
+## 28. FIXED: `@`-leading request bodies could disclose local files
+- **Old symptom:** curl treated a short request body beginning with `@` as a file reference. Nurl
+  could silently send that local file's contents instead of the resolved body, including when a
+  chain extracted the value from a remote response. An `@`-leading form key failed with curl exit
+  26. History still recorded the intended literal value, so Nurl's output did not reveal the wire
+  mismatch.
+- **Fix:** argument-vector bodies use curl `--data-raw`, while the intentional large/structured
+  stdin path remains `--data-binary @-`. Dry-run and request export use the same literal body flag,
+  emit `--head` for HEAD, and include `-L` when redirects are enabled.
+- **Compatibility:** `--data-raw` requires curl 7.43; Nurl already requires curl 7.75 or newer.
+  Bodies that do not begin with `@` retain identical bytes. The undocumented `-d @file` behavior is
+  intentionally removed; use Nurl's `--body-file` option to send file contents.
+- **Re-check:** run `tests/run-header-compat.nu` and `tests/run-body-compat.nu`. The local-server
+  cases assert absolute wire bytes for literal, existing-path, body-file, form, binary, history,
+  inline-chain, and remote-extracted-chain bodies, plus redirect and HEAD preview replay.

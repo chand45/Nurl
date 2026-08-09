@@ -24,6 +24,7 @@ def start-request-body-server [tmp: string] {
     let launcher_script = ($tmp | path join "body-launcher.py")
     let port_file = ($tmp | path join "body-port.txt")
     let event_file = ($tmp | path join "body-events.jsonl")
+    let chain_body_file = ($tmp | path join "body-chain-value.txt")
     let stop_file = ($tmp | path join "body-stop.txt")
     let server_source = "import http.server
 import json
@@ -31,7 +32,7 @@ import os
 import sys
 import time
 
-port_file, event_file, stop_file = sys.argv[1:4]
+port_file, event_file, chain_body_file, stop_file = sys.argv[1:5]
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -49,8 +50,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/ready':
             self.emit({'ready': True})
         elif self.path == '/chain-source':
+            with open(chain_body_file, encoding='utf-8') as handle:
+                next_body = handle.read()
             self.emit({
                 'next': 'ZZ{{late}}ZZ',
+                'next_body': next_body,
                 'id': '101',
                 'opaque_url': 'T{{late}}/Q{{c}}',
                 'number': 42,
@@ -63,7 +67,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'duplicate_b': 'D{{late}}',
             })
         else:
-            self.emit({'ok': True})
+            self.handle_body()
 
     def handle_body(self):
         length = int(self.headers.get('Content-Length', '0'))
@@ -88,6 +92,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.handle_body()
 
     def do_PATCH(self):
+        self.handle_body()
+
+    def do_DELETE(self):
         self.handle_body()
 
 server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
@@ -119,8 +126,9 @@ print(process.pid)
 "
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
+    "" | save -f $chain_body_file
     let launched = (test-complete-result (do {
-        ^$python $launcher_script $python $server_script $port_file $event_file $stop_file
+        ^$python $launcher_script $python $server_script $port_file $event_file $chain_body_file $stop_file
     } | complete))
     assert equal $launched.exit_code 0 $"Request-body server launcher failed: ($launched.stderr)"
     let server_base = {
@@ -128,6 +136,7 @@ print(process.pid)
         port: 0
         port_file: $port_file
         event_file: $event_file
+        chain_body_file: $chain_body_file
         stop_file: $stop_file
         python: $python
     }
@@ -240,6 +249,91 @@ def assert-request-body-preview-case [
     let events = (request-body-events $server | skip $before)
     assert equal ($events | length) 2 "Preview and execution did not each reach the endpoint"
     assert equal ($events | first | get body) ($events | last | get body) "Preview body differed from execution"
+}
+
+def test-request-body-literal-at-boundary [] {
+    let root = (make-temp-dir "request-body-literal-at")
+    let infra = (make-temp-dir "request-body-literal-at-server")
+    let server = (start-request-body-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let sentinel_path = ($root | path join "local-secret.txt")
+        "LOCAL-FILE-CONTENTS-MUST-NOT-BE-SENT" | save -f $sentinel_path
+        let at_path = "@" + $sentinel_path
+
+        api post $"($base)/at-post" -b $at_path --raw --no-history | ignore
+        api put $"($base)/at-put" -b $at_path --raw --no-history | ignore
+        api patch $"($base)/at-patch" -b $at_path --raw --no-history | ignore
+        api request -m DELETE $"($base)/at-delete" -b $at_path --raw --no-history | ignore
+        api request -m GET $"($base)/at-get" -b $at_path --raw --no-history | ignore
+        for path in ["/at-post" "/at-put" "/at-patch" "/at-delete" "/at-get"] {
+            assert equal (request-body-event $server $path).body $at_path $"($path) did not send an @-leading body literally"
+        }
+
+        let at_body_file = ($root | path join "at-body.txt")
+        $at_path | save -f $at_body_file
+        api post $"($base)/at-body-file" --body-file $at_body_file --raw --no-history | ignore
+        assert equal (request-body-event $server "/at-body-file").body $at_path "Body-file content triggered curl file substitution"
+
+        api vars set literal_at_body $at_path | ignore
+        api post $"($base)/at-interpolated" -b "{{literal_at_body}}" --raw --no-history | ignore
+        assert equal (request-body-event $server "/at-interpolated").body $at_path "Interpolated @ body triggered curl file substitution"
+
+        api post $"($base)/at-form" -F {"@who": team} --raw --no-history | ignore
+        assert equal (request-body-event $server "/at-form").body "@who=team" "An @-leading form key triggered curl file substitution"
+
+        let binary_path = ($root | path join "at-response.bin")
+        api request -m POST $"($base)/at-binary" -b $at_path --binary-save $binary_path --output none --no-history
+        assert equal (request-body-event $server "/at-binary").body $at_path "Binary response mode did not send an @-leading body literally"
+        assert ($binary_path | path exists) "Binary response mode did not save its response"
+
+        let history_id = (api history save {
+            method: "POST"
+            url: $"($base)/at-history"
+            headers: {"Content-Type": "text/plain"}
+            body: $at_path
+        } {
+            status: 200
+            status_text: "OK"
+            headers: {}
+            body: null
+            time_ms: 0
+            size_bytes: 0
+        })
+        api history resend $history_id --raw | ignore
+        assert equal (request-body-event $server "/at-history").body $at_path "History resend triggered curl file substitution"
+
+        let inline_chain = (api chain run ([{
+            method: POST
+            url: $"($base)/at-chain-inline"
+            body: {type: text, content: $at_path}
+        }]) --quiet)
+        assert equal $inline_chain.success true "Inline @ body chain failed"
+        assert equal (request-body-event $server "/at-chain-inline").body $at_path "Inline chain body triggered curl file substitution"
+
+        $at_path | save -f $server.chain_body_file
+        let extracted_chain = (api chain run ([
+            {
+                method: GET
+                url: $"($base)/chain-source"
+                extract: {payload: "body.next_body"}
+            }
+            {
+                method: POST
+                url: $"($base)/at-chain-extracted"
+                body: {type: text, content: "{{payload}}"}
+            }
+        ]) --quiet)
+        assert equal $extracted_chain.success true "Extracted @ body chain failed"
+        assert equal (request-body-event $server "/at-chain-extracted").body $at_path "Remote-extracted chain body disclosed local file contents"
+        null
+    } catch {|error| $error}
+    try { stop-request-body-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
 }
 
 def test-request-body-json-boundary [] {
@@ -1122,6 +1216,7 @@ def test-request-body-interpolated-header-safety [] {
 
 def run-suite-request-body []: nothing -> list<record> {
     [
+        (run-test "request body: @-leading data is always literal" { test-request-body-literal-at-boundary })
         (run-test "request body: JSON interpolation precedes serialization" { test-request-body-json-boundary })
         (run-test "request body: form interpolation precedes URL encoding" { test-request-body-form-boundary })
         (run-test "request body: tables survive vars, history, and chain flows" { test-request-body-table-flows })
