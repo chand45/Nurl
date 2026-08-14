@@ -793,6 +793,14 @@ the header retains its first position. A record containing case variants such as
 Managed bearer, SAML, OAuth2, and Basic authentication reserve `Authorization`; header-mode API
 keys reserve their configured header. Supplying the same header through `-H` is an error rather
 than silently dropping either value. Query-mode API keys do not conflict with request headers.
+
+`--body-file` reads UTF-8 text without trimming, so leading/trailing whitespace, LF/CRLF endings,
+and explicitly empty bodies are transmitted exactly. Valid JSON files retain structured variable
+interpolation; other text remains literal. Non-UTF-8 files fail with an actionable error before any
+request is sent. Newly created or updated saved requests retain this distinction. Legacy saved
+entries without the new literal marker keep their existing interpretation until repaired with
+`api request update --body-file`.
+
 `--dry-run` and `api request export` print the deduplicated headers and resolved body exactly as
 execution sends them, with credentials still masked. The command includes every flag that affects
 the request or selects the response: the method form (`-X` or `--head`), headers, body flag and
