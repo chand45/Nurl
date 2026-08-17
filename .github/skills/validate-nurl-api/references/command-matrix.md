@@ -89,13 +89,13 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | Command | Invocation | Expected |
 |---|---|---|
 | api get | `api get https://jsonplaceholder.typicode.com/posts/1 -r` | `.response.status == 200`. |
-| api post | `api post https://jsonplaceholder.typicode.com/posts -b {title: t, body: b, userId: 1} -r` | `201`. |
-| api put | `api put https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. |
-| api patch | `api patch https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. |
+| api post | `api post https://jsonplaceholder.typicode.com/posts -b {title: t, body: b, userId: 1} -r` | `201`. Exact-wire form coverage includes UTF-8, reserved bytes, controls, and keys. |
+| api put | `api put https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. Shares byte-exact form serialization. |
+| api patch | `api patch https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. Shares byte-exact form serialization. |
 | api delete | `api delete https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. |
 | api head | `api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history` | Exit 0, typed status `200`, no body rendering, empty stderr, and no history entry. |
 | api options | `api options https://jsonplaceholder.typicode.com/posts --raw --no-history` | Exit 0 with structured status `204`, empty stderr, and no history write. |
-| api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
+| api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode), and `--form` shares byte-exact form serialization. |
 | api send | `api send get-post -r`; `api send get-post -c jsonplaceholder -r` | Both return `200` with `{{base_url}}` resolved from the discovered/explicit collection's active env. Omission searches collections in listed order; use `-c` when names collide. Try every saved request. |
 
 Request header names are ASCII-case-insensitive on every transferring surface. A later layer

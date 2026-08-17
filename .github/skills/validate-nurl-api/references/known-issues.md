@@ -334,3 +334,21 @@ bulk changes.
 - **Re-check:** run `tests/run-header-compat.nu` and `tests/run-body-compat.nu`. The local-server
   cases assert absolute wire bytes for literal, existing-path, body-file, form, binary, history,
   inline-chain, and remote-extracted-chain bodies, plus redirect and HEAD preview replay.
+
+## 29. FIXED: Form encoding corrupted UTF-8 and emitted reserved bytes raw
+- **Old symptom:** `--form` escaped only `%`, `+`, `&`, `=`, `#`, and spaces. Non-ASCII text,
+  non-BMP characters, controls, reserved punctuation, and field names could reach curl unescaped;
+  servers could decode replacement characters or parse different fields. Null and structured
+  values leaked low-level conversion errors.
+- **Fix:** the shared POST/PUT/PATCH/generic serializer applies UTF-8
+  `application/x-www-form-urlencoded` rules: alphanumeric plus `*`, `-`, `.`, `_` remain literal,
+  spaces become `+`, and every other byte becomes uppercase `%XX`. Values are validated as scalars
+  before auth/transport, with null encoded as an empty value.
+- **Re-check:** run `tests/run-header-compat.nu` on Nushell 0.89 and current. Its local echo server
+  asserts exact execution bytes, dry-run text, content type, errors, streams, and no side effects.
+
+## 30. Explicit empty form remains indistinguishable from omitted `--form`
+- **Symptom:** `--form {}` follows the same legacy path as omitting `--form`, so it does not force an
+  empty `application/x-www-form-urlencoded` body.
+- **Status:** retained for backward compatibility. Empty-form semantics require a separate public
+  flag contract decision; this release changes only non-empty form serialization and validation.

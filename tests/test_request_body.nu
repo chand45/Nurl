@@ -282,7 +282,7 @@ def test-request-body-literal-at-boundary [] {
         assert equal (request-body-event $server "/at-interpolated").body $at_path "Interpolated @ body triggered curl file substitution"
 
         api post $"($base)/at-form" -F {"@who": team} --raw --no-history | ignore
-        assert equal (request-body-event $server "/at-form").body "@who=team" "An @-leading form key triggered curl file substitution"
+        assert equal (request-body-event $server "/at-form").body "%40who=team" "An @-leading form key was not encoded literally"
 
         let binary_path = ($root | path join "at-response.bin")
         api request -m POST $"($base)/at-binary" -b $at_path --binary-save $binary_path --output none --no-history
@@ -582,7 +582,7 @@ def test-request-body-form-boundary [] {
         }
         api post $"($base)/form-trusted" -F {value: "{{a}}/{{b}}"} --raw --no-history | ignore
         let trusted_form_body = (request-body-event $server "/form-trusted").body
-        assert equal $trusted_form_body "value=C/B" $"Direct form did not pre-resolve trusted variables: ($trusted_form_body)"
+        assert equal $trusted_form_body "value=C%2FB" $"Direct form did not pre-resolve trusted variables: ($trusted_form_body)"
         api vars set dynamic_id "{{$uuid}}" | ignore
         api vars set layered_dynamic "{{dynamic_id}}" | ignore
         api request -m POST $"($base)/form-dynamic/{{dynamic_id}}" -F {id: "{{dynamic_id}}"} --raw --no-history | ignore
@@ -602,7 +602,7 @@ def test-request-body-form-boundary [] {
         let literal_form_body = (request-body-event $server "/form-literal" | get body)
         assert equal (
             $literal_form_body
-        ) "{{form_key}}={{payload}}" $"--no-interpolate changed literal form content: ($literal_form_body)"
+        ) "%7B%7Bform_key%7D%7D=%7B%7Bpayload%7D%7D" $"--no-interpolate changed literal form content: ($literal_form_body)"
         null
     } catch {|error| $error}
     try { stop-request-body-server $server } catch {}
