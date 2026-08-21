@@ -110,13 +110,15 @@ def test-chain-saved-request-ambiguity-is-soft [] {
         let quiet = (run-command-process $tmp "let result = (api chain run [{request: deploy}] --quiet); print ($result | to json --raw)")
         assert equal $quiet.exit_code 0 "quiet ambiguous chain should fail softly"
         assert equal ($quiet.stderr | str trim) "" "quiet ambiguous chain wrote stderr"
-        assert (not ($quiet.stdout | str contains "a-first")) "quiet chain used unrelated candidate text"
-        assert ($quiet.stdout | str contains "alpha, beta") "quiet chain summary omitted sorted candidates"
+        let expected_error = "Request 'deploy' is ambiguous: alpha, beta. Set the step collection or use api chain run --collection."
+        let quiet_result = ($quiet.stdout | from json)
+        assert equal $quiet_result.error $expected_error "quiet chain returned the wrong ambiguity guidance"
+        assert (not ($quiet.stdout | str contains "jsonplaceholder.typicode.com")) "quiet ambiguity leaked a candidate request URL"
 
         let stopped = (api chain run [{request: deploy}] --stop-on-error --quiet)
         assert equal $stopped.success false "ambiguous chain step unexpectedly succeeded"
         assert equal ($stopped.results | length) 0 "stop-on-error appended the failed ambiguity result"
-        assert ($stopped.error | str contains "alpha, beta") "ambiguity error did not sort candidates"
+        assert equal $stopped.error $expected_error "stop-on-error returned the wrong ambiguity guidance"
 
         let continued = (api chain run [
             {request: deploy}
@@ -128,8 +130,7 @@ def test-chain-saved-request-ambiguity-is-soft [] {
 
         let noisy = (run-command-process $tmp "let result = (api chain run [{request: deploy}] --stop-on-error); print ($result | to json --raw)")
         assert equal $noisy.exit_code 0 "non-quiet ambiguity should retain the soft failure contract"
-        assert ($noisy.stderr | str contains "Request not found: deploy") "non-quiet ambiguity omitted stderr"
-        assert ($noisy.stderr | str contains "alpha, beta") "non-quiet ambiguity stderr did not sort candidates"
+        assert ($noisy.stderr | str contains $expected_error) "non-quiet ambiguity omitted actionable stderr"
         null
     } catch {|error| $error }
     cleanup $tmp

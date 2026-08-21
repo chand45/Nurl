@@ -109,8 +109,10 @@ api send get-users
 
 > **Intentional breaking change for duplicate names:** If two or more collections contain the
 > same saved-request name, unscoped `api send` and `api request show` now fail instead of choosing
-> a filesystem-order match. Pass `--collection <name>` to select one. Zero matches and uniquely
-> named requests retain their existing behavior.
+> a filesystem-order match, while an unscoped duplicate saved-request chain step fails softly.
+> Set `collection` on the step or pass `api chain run --collection <name>` to select one.
+> `api chain run -c/--collection` is a strict request-and-variable scope with no global fallback.
+> Zero matches and uniquely named requests retain their existing behavior.
 
 ---
 

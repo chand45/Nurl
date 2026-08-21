@@ -265,7 +265,7 @@ export def "api chain run" [
         if $request_config == null {
             let message = if $resolution_status == "ambiguous" {
                 let candidates = ($resolution_candidates | str join ", ")
-                $"Request not found: ($request_name) \(ambiguous across collections: ($candidates); set the step collection\)"
+                $"Request '($request_name)' is ambiguous: ($candidates). Set the step collection or use api chain run --collection."
             } else {
                 $"Request not found: ($request_name)"
             }

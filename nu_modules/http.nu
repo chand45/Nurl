@@ -86,14 +86,21 @@ export def resolve-saved-request [
     mut matches = []
     mut canonical_paths = []
     for candidate_collection in $candidate_collections {
-        let collection_path = (resolve-collection-dir $collections_dir $candidate_collection)
-        let requests_dir = (resolve-requests-dir $collection_path $candidate_collection)
-        let request_path = (resolve-request-file $requests_dir $name --optional-suffix=$optional_suffix)
-        if ($request_path | path exists) and ($request_path not-in $canonical_paths) {
-            $canonical_paths = ($canonical_paths | append $request_path)
-            $matches = ($matches | append {
-                path: $request_path
+        let candidate = try {
+            let collection_path = (resolve-collection-dir $collections_dir $candidate_collection)
+            let requests_dir = (resolve-requests-dir $collection_path $candidate_collection)
+            {
+                path: (resolve-request-file $requests_dir $name --optional-suffix=$optional_suffix)
                 collection: $candidate_collection
+            }
+        } catch {
+            null
+        }
+        if $candidate != null and ($candidate.path | path exists) and ($candidate.path not-in $canonical_paths) {
+            $canonical_paths = ($canonical_paths | append $candidate.path)
+            $matches = ($matches | append {
+                path: $candidate.path
+                collection: $candidate.collection
             })
         }
     }
