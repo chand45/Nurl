@@ -1242,8 +1242,9 @@ def test-symlink-escapes [] {
     assert ((api collection show alias) | describe | str starts-with "record") "contained collection link should be accepted"
     assert equal (api request show canonical-shared | get url) "http://127.0.0.1:1/canonical-shared" "canonical collection aliases should deduplicate one request"
     let unscoped_send = (run-module-script $root "api send canonical-shared --dry-run --no-history")
+    let unscoped_send_stderr = try { $unscoped_send.stderr } catch { "" }
     assert equal $unscoped_send.exit_code 0 "unscoped send should skip an unrelated escaping collection candidate"
-    assert equal ($unscoped_send.stderr | str trim) "" "unscoped send leaked an escaping collection error"
+    assert equal ($unscoped_send_stderr | str trim) "" "unscoped send leaked an escaping collection error"
     assert ($unscoped_send.stdout | str contains "http://127.0.0.1:1/canonical-shared") "unscoped send did not resolve the healthy contained collection"
     assert (not ($unscoped_send.stdout | str contains "https://escape.invalid/must-not-resolve")) "unscoped send resolved the escaping collection candidate"
     let unscoped_chain = (api chain run [{request: canonical-shared}] --quiet)
