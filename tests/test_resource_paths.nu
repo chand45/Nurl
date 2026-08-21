@@ -1212,6 +1212,7 @@ def test-symlink-escapes [] {
 
     api collection create demo | ignore
     api collection create real | ignore
+    api request create canonical-shared GET "https://example.invalid/canonical-shared" --collection real | ignore
     mkdir ($root | path join "chains")
     {name: "secret", method: "GET", url: "https://example.invalid"} | to nuon | save -f ($outside_requests | path join "secret.nuon")
     "TEST-SECRET-SENTINEL" | save -f ($outside_collection | path join "sentinel.txt")
@@ -1237,6 +1238,7 @@ def test-symlink-escapes [] {
 
     assert (($contained_collections | path join "demo") | path exists) "linked collections base should remain usable"
     assert ((api collection show alias) | describe | str starts-with "record") "contained collection link should be accepted"
+    assert equal (api request show canonical-shared | get url) "https://example.invalid/canonical-shared" "canonical collection aliases should deduplicate one request"
     assert equal (api request show "contained/inside" --collection demo | get name) inside
     expect-resource-error { api collection show escape } "existing links cannot escape"
     expect-resource-error { api request show "escape/secret" --collection demo } "existing links cannot escape"

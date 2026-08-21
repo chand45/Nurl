@@ -30,6 +30,94 @@ def resolve-request-file [requests_dir: string, name: string, --optional-suffix]
     resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix=(not $optional_suffix) --scope "<collection>/requests" --base-is-canonical
 }
 
+# Resolve a saved request without choosing arbitrarily between collections.
+export def resolve-saved-request [
+    name: string
+    --collection (-c): string = ""
+    --optional-suffix
+] {
+    mut segments = (validate-resource-name "request" $name --nested --scope "<collection>/requests")
+    if $collection != "" {
+        validate-resource-name "collection" $collection | ignore
+    }
+
+    let collections_dir = (get-collections-dir)
+    if $collection != "" {
+        let collection_path = (resolve-collection-dir $collections_dir $collection)
+        let requests_dir = (resolve-requests-dir $collection_path $collection)
+        let request_path = (resolve-request-file $requests_dir $name --optional-suffix=$optional_suffix)
+        if ($request_path | path exists) {
+            return {
+                status: "found"
+                path: $request_path
+                collection: $collection
+                candidates: []
+            }
+        }
+        return {status: "none", path: null, collection: null, candidates: []}
+    }
+
+    if not ($collections_dir | path exists) {
+        return {status: "none", path: null, collection: null, candidates: []}
+    }
+
+    let leaf_index = (($segments | length) - 1)
+    let leaf = ($segments | get $leaf_index)
+    if (not $optional_suffix) or (not ($leaf | str ends-with ".nuon")) {
+        $segments = ($segments | update $leaf_index $"($leaf).nuon")
+    }
+
+    let collection_names = (
+        try { ls $collections_dir | get name } catch { [] }
+        | each {|path| $path | path basename }
+        | sort
+    )
+    mut candidate_collections = []
+    for candidate_collection in $collection_names {
+        mut probe = ($collections_dir | path join $candidate_collection "requests")
+        for segment in $segments {
+            $probe = ($probe | path join $segment)
+        }
+        if ($probe | path exists) {
+            $candidate_collections = ($candidate_collections | append $candidate_collection)
+        }
+    }
+
+    mut matches = []
+    mut canonical_paths = []
+    for candidate_collection in $candidate_collections {
+        let collection_path = (resolve-collection-dir $collections_dir $candidate_collection)
+        let requests_dir = (resolve-requests-dir $collection_path $candidate_collection)
+        let request_path = (resolve-request-file $requests_dir $name --optional-suffix=$optional_suffix)
+        if ($request_path | path exists) and ($request_path not-in $canonical_paths) {
+            $canonical_paths = ($canonical_paths | append $request_path)
+            $matches = ($matches | append {
+                path: $request_path
+                collection: $candidate_collection
+            })
+        }
+    }
+
+    if ($matches | is-empty) {
+        {status: "none", path: null, collection: null, candidates: []}
+    } else if ($matches | length) == 1 {
+        let selected = ($matches | first)
+        {
+            status: "found"
+            path: $selected.path
+            collection: $selected.collection
+            candidates: []
+        }
+    } else {
+        {
+            status: "ambiguous"
+            path: null
+            collection: null
+            candidates: ($matches | get collection)
+        }
+    }
+}
+
 def list-request-files [requests_dir: string] {
     list-contained-resource-files $requests_dir "request" --suffix ".nuon" --scope "<collection>/requests"
 }
@@ -1884,50 +1972,22 @@ export def "api send" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
-    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
-    if $collection != "" {
-        validate-resource-name "collection" $collection | ignore
-    }
-    let has_body_override = (not ($body | is-empty)) or $body_file != ""
-    let resolved_body_override = if $has_body_override {
-        resolve-body -b $body -f $body_file
-    } else {
-        null
-    }
     with-api-debug $debug {
-        let collections_dir = (get-collections-dir)
-
-        # Find request file and determine collection name
-        mut coll_name = $collection
-        let request_path = if $collection != "" {
-            let collection_path = (resolve-collection-dir $collections_dir $collection)
-            let requests_dir = (resolve-requests-dir $collection_path $collection)
-            resolve-request-file $requests_dir $name --optional-suffix
-        } else {
-            # Search in all collections
-            let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-            mut found_file: string = ""
-            for discovered_path in $colls {
-                let discovered_name = ($discovered_path | path basename)
-                let coll_path = (resolve-collection-dir $collections_dir $discovered_name)
-                let requests_dir = (resolve-requests-dir $coll_path $discovered_name)
-                let request_file = (resolve-request-file $requests_dir $name --optional-suffix)
-                if ($request_file | path exists) {
-                    $found_file = $request_file
-                    $coll_name = $discovered_name
-                    break
-                }
-            }
-
-            if ($found_file | is-empty) {
-                fail-command $"Request '($name)' not found"
-            }
-
-            $found_file
+        let resolved = (resolve-saved-request $name --collection $collection --optional-suffix)
+        if $resolved.status == "ambiguous" {
+            let candidates = ($resolved.candidates | str join ", ")
+            fail-command $"Request '($name)' is ambiguous: ($candidates). Use --collection."
         }
-
-        if not ($request_path | path exists) {
+        if $resolved.status == "none" {
             fail-command $"Request '($name)' not found"
+        }
+        let request_path = $resolved.path
+        let coll_name = $resolved.collection
+        let has_body_override = (not ($body | is-empty)) or $body_file != ""
+        let resolved_body_override = if $has_body_override {
+            resolve-body -b $body -f $body_file
+        } else {
+            null
         }
 
         # Load request
@@ -2120,36 +2180,17 @@ export def "api request show" [
     name: string                   # Request name
     --collection (-c): string = ""  # Collection name (searches all if not specified)
 ] {
-    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
-    if $collection != "" {
-        validate-resource-name "collection" $collection | ignore
+    let resolved = (resolve-saved-request $name --collection $collection)
+    if $resolved.status == "ambiguous" {
+        let candidates = ($resolved.candidates | str join ", ")
+        fail-command $"Request '($name)' is ambiguous: ($candidates). Use --collection."
     }
-    let collections_dir = (get-collections-dir)
-
-    let request_file = if $collection != "" {
-        # Search in specific collection
-        let collection_dir = (resolve-collection-dir $collections_dir $collection)
-        let requests_dir = (resolve-requests-dir $collection_dir $collection)
-        resolve-request-file $requests_dir $name
-    } else {
-        # Search across all collections
-        let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-        let found = $colls | each {|discovered_path|
-            let coll_name = ($discovered_path | path basename)
-            let coll_path = (resolve-collection-dir $collections_dir $coll_name)
-            let requests_dir = (resolve-requests-dir $coll_path $coll_name)
-            let file = (resolve-request-file $requests_dir $name)
-            if ($file | path exists) { $file } else { null }
-        } | where {|f| $f != null }
-        if ($found | is-empty) { null } else { $found | first }
-    }
-
-    if ($request_file == null) or (not ($request_file | path exists)) {
+    if $resolved.status == "none" {
         let scope = if $collection != "" { $"collection '($collection)'" } else { "any collection" }
         fail-command $"Request '($name)' not found in ($scope)"
     }
 
-    open-state-record $request_file $"request '($name)'"
+    open-state-record $resolved.path $"request '($name)'"
 }
 
 # Update an existing saved request

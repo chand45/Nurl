@@ -96,7 +96,18 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api head | `api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history` | Exit 0, typed status `200`, no body rendering, empty stderr, and no history entry. |
 | api options | `api options https://jsonplaceholder.typicode.com/posts --raw --no-history` | Exit 0 with structured status `204`, empty stderr, and no history write. |
 | api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
-| api send | `api send get-post -r`; `api send get-post -c jsonplaceholder -r` | Both return `200` with `{{base_url}}` resolved from the discovered/explicit collection's active env. Omission searches collections in listed order; use `-c` when names collide. Try every saved request. |
+| api send | `api send get-post -r`; duplicate `get-post` in two collections and retry; `api send get-post -c jsonplaceholder -r` | Unique discovery and explicit scope return `200` with `{{base_url}}` resolved from the selected collection. Duplicate unscoped names fail nonzero with empty stdout and sorted candidates directing the user to `--collection`; no curl, auth, network, history, or output-file side effect occurs. Try every saved request. |
+
+### Duplicate saved-request validation scenario
+
+In a throwaway workspace, create `deploy` in collections `z-last` and `a-first`, with distinct URLs,
+active-environment variables, and an auth reference. Run unscoped `api send deploy --dry-run`,
+`api request show deploy`, inline `api chain run [{request: deploy}]`, and a named chain containing
+that step. Send/show must hard-fail with empty stdout and sorted `a-first, z-last` candidates before
+curl/auth/history/output work. Chains must fail the step softly, obey quiet/stop/continue, and retain
+an empty failed-result list under stop-on-error. Then verify both `-c`/`--collection` command aliases,
+`{request: deploy, collection: z-last}` in inline and named chains, step scope overriding run scope,
+strict `chain run -c`, and unique unscoped steps from different collections.
 
 Request header names are ASCII-case-insensitive on every transferring surface. A later layer
 overrides a same-named earlier layer with its spelling/value while retaining first-appearance
@@ -145,7 +156,7 @@ Full lifecycle on a temp request, cleaned up at the end.
 | Command | Invocation | Expected |
 |---|---|---|
 | api chain exec | `api chain exec example-workflow` | Runs the file's steps. Step 1 POSTs; **step 2 GET /posts/101 → 404 by design** (jsonplaceholder doesn't persist). A caught transport failure continues without `--stop-on-error` and returns `success:false`; with it, the command exits nonzero. |
-| api chain run | `api chain run (open chains/example-workflow.nuon \| get steps)` | Same steps via the **list** form (`chain run` takes a list, not a file path). `--quiet` suppresses progress and caught-failure diagnostics. |
+| api chain run | `api chain run (open chains/example-workflow.nuon \| get steps)`; exercise `{request: deploy, collection: beta}` and `-c beta` | Same steps via the **list** form (`chain run` takes a list, not a file path). Saved-request precedence is step `collection` > run `-c` > discovery, with request and variables from one collection. Ambiguity/missing requests fail softly; `--quiet` suppresses progress and caught-failure diagnostics. |
 | api chain create | `api chain create tmp-chain` | Creates `chains/tmp-chain.nuon`. |
 | api chain list | `api chain list` | Lists chains incl. `example-workflow`. |
 | api chain show | `api chain show example-workflow` | Prints the chain definition. |

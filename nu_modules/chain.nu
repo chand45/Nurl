@@ -2,7 +2,7 @@
 # Execute sequences of requests with variable extraction and passing
 
 use vars.nu ["api vars interpolate", "api vars extract", interpolate-record-values, interpolate-structured-json, referenced-variable-names, resolve-trusted-context, restore-opaque-values]
-use http.nu [execute-encoded-request]
+use http.nu [execute-encoded-request resolve-saved-request]
 use auth.nu [validate-secret-safe-url]
 use resource-path.nu [open-state-record open-state-value path-type-safe resolve-under-base state-base-type validate-resource-name]
 use command-error.nu [fail-command]
@@ -11,18 +11,6 @@ use string-compat.nu [optional-get]
 
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
-}
-
-def get-collections-dir [] {
-    resolve-under-base (get-api-root) "collections" "collections directory" --scope "API workspace"
-}
-
-def resolve-collection-dir [collections_dir: string, collection: string] {
-    resolve-under-base $collections_dir $collection "collection" --scope "API workspace collections" --base-is-canonical
-}
-
-def resolve-requests-dir [collection_dir: string, collection: string] {
-    resolve-under-base $collection_dir "requests" "request directory" --scope $"collection '($collection)'" --base-is-canonical
 }
 
 def get-chains-dir [] {
@@ -37,6 +25,10 @@ def validate-chain-steps [steps: list] {
     for step in $steps {
         if "request" in ($step | columns) {
             validate-resource-name "request" $step.request --nested --scope "<collection>/requests" | ignore
+            let step_collection = ($step | optional-get "collection" | default "")
+            if $step_collection != "" {
+                validate-resource-name "collection" $step_collection | ignore
+            }
         }
     }
 }
@@ -244,23 +236,39 @@ export def "api chain run" [
         $step_num = $step_num + 1
 
         # Get request configuration and determine collection context
-        mut step_collection = $collection
         let saved_request = "request" in ($step | columns)
         let request_name = if $saved_request { $step.request } else { "" }
+        let requested_collection = if $saved_request {
+            let step_collection = ($step | optional-get "collection" | default "")
+            if $step_collection != "" { $step_collection } else { $collection }
+        } else {
+            $collection
+        }
+        mut step_collection = $requested_collection
+        mut resolution_status = "found"
+        mut resolution_candidates = []
         let request_config = if $saved_request {
-            # Load saved request (and get collection name)
-            let loaded = (load-saved-request-with-collection $request_name)
-            if $loaded != null and $step_collection == "" {
-                $step_collection = ($loaded | optional-get "collection" | default "")
+            let resolved = (resolve-saved-request $request_name --collection $requested_collection)
+            $resolution_status = $resolved.status
+            $resolution_candidates = $resolved.candidates
+            if $resolved.status == "found" {
+                $step_collection = $resolved.collection
+                open-state-record $resolved.path $"request '($request_name)' in collection '($step_collection)'"
+            } else {
+                null
             }
-            if $loaded == null { null } else { $loaded | optional-get "request" }
         } else {
             # Use inline request config
             $step
         }
 
         if $request_config == null {
-            let message = $"Request not found: ($request_name)"
+            let message = if $resolution_status == "ambiguous" {
+                let candidates = ($resolution_candidates | str join ", ")
+                $"Request not found: ($request_name) \(ambiguous across collections: ($candidates); set the step collection\)"
+            } else {
+                $"Request not found: ($request_name)"
+            }
             if not $quiet {
                 print -e $message
             }
@@ -521,41 +529,6 @@ export def "api chain exec" [
     }
 
     api chain run $chain.steps --stop-on-error=$stop_on_error --quiet=$quiet
-}
-
-# Load saved request by name (returns just the request)
-def load-saved-request [name: string] {
-    let result = (load-saved-request-with-collection $name)
-    $result.request? | default null
-}
-
-# Load saved request by name and return collection name too
-def load-saved-request-with-collection [name: string] {
-    validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
-    let collections_dir = (get-collections-dir)
-
-    if not ($collections_dir | path exists) {
-        return null
-    }
-
-    # Search through all collections for the request
-    let colls = try { ls $collections_dir | where type == dir | get name } catch { [] }
-    for discovered_path in $colls {
-        let collection = ($discovered_path | path basename)
-        let coll_path = (resolve-collection-dir $collections_dir $collection)
-        let requests_dir = (resolve-requests-dir $coll_path $collection)
-        if ($requests_dir | path exists) {
-            let request_file = (resolve-under-base $requests_dir $name "request" --nested --suffix ".nuon" --always-suffix --scope "<collection>/requests" --base-is-canonical)
-            if ($request_file | path exists) {
-                return {
-                    request: (open-state-record $request_file $"request '($name)' in collection '($collection)'")
-                    collection: $collection
-                }
-            }
-        }
-    }
-
-    null
 }
 
 # Create a chain file

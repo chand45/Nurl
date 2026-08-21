@@ -101,11 +101,12 @@ request, interpolates variables, or touches `.nuon` files.
 - **Root cause:** auto-discovery initialized its request-path accumulator with `null`, then assigned
   a string after finding a request. Nushell 0.114 enforces that mutable variable's inferred runtime
   type and rejected the assignment.
-- **Fix:** the accumulator is explicitly typed as `string` and uses an empty-string sentinel. Search
-  order, first-match behavior, discovered collection environment selection, and the exact missing
-  request error remain unchanged. The supported Nushell floor remains 0.89.
-- **Re-check:** run `tests/run-send-compat.nu` on Nushell 0.89 and 0.114; both discover a request
-  after an earlier nonmatching collection and resolve `{{base_url}}` from the discovered collection.
+- **Fix:** saved requests use the shared structured resolver. A unique request after an earlier
+  nonmatching collection still resolves its collection environment, while duplicate names now fail
+  deterministically with sorted candidates instead of selecting a filesystem-order first match.
+  The exact zero-match behavior and supported Nushell floor remain unchanged.
+- **Re-check:** run `tests/run-send-compat.nu` on Nushell 0.89, 0.113, and 0.114; each runtime must
+  preserve unique/zero behavior and reject duplicate unscoped names before curl output.
 
 ## 13. Curl transport failures exited successfully and binary retries were destructive  (FIXED)
 - **Symptom:** exhausted DNS/connect/TLS/timeout/truncated transfers printed ANSI errors on stdout,

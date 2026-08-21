@@ -269,7 +269,7 @@ export def "api help" [] {
   api head <url>                   HEAD request — returns headers only, no body
   api options <url>                OPTIONS request
   api request -m <method> <url>    Generic request \(any HTTP method\)
-  api send <name> [-c <coll>]      Send saved request; omission searches collections
+  api send <name> [-c <coll>]      Send saved request; ambiguous omission requires -c
 
 (ansi yellow)Common Request Flags:(ansi reset)
   -H, --headers <record>        Extra headers; override same-named defaults case-insensitively
@@ -350,6 +350,7 @@ export def "api help" [] {
   api chain delete <name>       Delete a chain
   api chain run <steps>         Run an inline list of chain steps
   api chain exec <name|path>    Execute a named chain or explicit chain file
+  Saved-request steps accept collection; precedence is step > chain run -c > discovery.
 
 (ansi yellow)Response Helpers \(pass a --raw result record\):(ansi reset)
   api summary <result>          Compact multi-line summary of a --raw result

@@ -103,9 +103,14 @@ api collection env set my-api base_url "http://localhost:3000"
 # Save a request
 api request create get-users GET "{{base_url}}/users" -c my-api
 
-# Send it (the collection is auto-discovered)
+# Send it (the collection is auto-discovered when the name is unique)
 api send get-users
 ```
+
+> **Intentional breaking change for duplicate names:** If two or more collections contain the
+> same saved-request name, unscoped `api send` and `api request show` now fail instead of choosing
+> a filesystem-order match. Pass `--collection <name>` to select one. Zero matches and uniquely
+> named requests retain their existing behavior.
 
 ---
 
@@ -736,10 +741,16 @@ api chain exec auth-workflow
 # Run inline chain
 api chain run [
     { request: "auth/login", extract: { token: "body.access_token" } }
-    { request: "users/profile", use: { bearer_token: "{{token}}" } }
+    { request: "users/profile", collection: "accounts", use: { bearer_token: "{{token}}" } }
     { request: "users/posts", extract: { post_count: "body.total" } }
 ]
 ```
+
+Saved-request steps may set `collection`. Resolution precedence is the step's `collection`, then
+`api chain run --collection`, then global discovery. The selected request and its variables always
+come from that same collection. `chain run --collection` is therefore a strict request-and-variable
+scope: if the request is absent there, the step fails softly rather than borrowing a request from
+another collection. Named `api chain exec` chains use the per-step key for disambiguation.
 
 Without `--stop-on-error`, a transport failure is recorded as a failed step, later steps continue,
 and the returned summary has `success: false`. With `--stop-on-error`, the transport failure exits
