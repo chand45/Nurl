@@ -82,12 +82,12 @@
   { command: "api head",                 kind: command,  group: requests,        test: "api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history  # returns 200; no body/history write" }
   { command: "api options",              kind: command,  group: requests,        test: "api options https://jsonplaceholder.typicode.com/posts --raw --no-history  # status 204; no history write" }
   { command: "api request",              kind: command,  group: requests,        test: "api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r  # generic verb; string bodies pass through (no double-encode)" }
-  { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -r; api send get-post -c jsonplaceholder -r  # auto-discovery and explicit collection; interpolate {{base_url}}" }
+  { command: "api send",                 kind: command,  group: requests,        test: "api send get-post -r; duplicate the name in two collections and require sorted ambiguity failure; api send get-post -c jsonplaceholder -r" }
 
   # ---- saved requests (http.nu) --------------------------------------------
   { command: "api request create",       kind: command,  group: saved-requests,  test: "api request create tmp-req GET '{{base_url}}/posts/1' -c jsonplaceholder  # name/method/url positional, -c collection" }
   { command: "api request list",         kind: command,  group: saved-requests,  test: "api request list -c jsonplaceholder" }
-  { command: "api request show",         kind: command,  group: saved-requests,  test: "api request show tmp-req -c jsonplaceholder" }
+  { command: "api request show",         kind: command,  group: saved-requests,  test: "api request show tmp-req -c jsonplaceholder; duplicate the name and require sorted ambiguity failure without -c" }
   { command: "api request update",       kind: command,  group: saved-requests,  test: "api request update tmp-req --method POST -c jsonplaceholder" }
   { command: "api request delete",       kind: command,  group: saved-requests,  test: "api request delete tmp-req -c jsonplaceholder --force" }
   { command: "api request export",       kind: command,  group: saved-requests,  test: "api request export get-post -c jsonplaceholder  # prints curl dry-run; no network/history mutation" }
@@ -104,8 +104,8 @@
   { command: "api history get",          kind: internal, group: history,         test: "helper: fetch one entry by id; covered via `api history show`/`resend`" }
 
   # ---- chaining (chain.nu) -------------------------------------------------
-  { command: "api chain run",            kind: command,  group: chaining,        test: "api chain run (open chains/example-workflow.nuon | get steps)  # takes a steps LIST, not a file" }
-  { command: "api chain exec",           kind: command,  group: chaining,        test: "api chain exec example-workflow  # extract step guarded; jsonplaceholder GET-after-POST 404 is expected" }
+  { command: "api chain run",            kind: command,  group: chaining,        test: "api chain run (open chains/example-workflow.nuon | get steps); verify soft ambiguity and step collection > -c > discovery" }
+  { command: "api chain exec",           kind: command,  group: chaining,        test: "api chain exec example-workflow; verify a named step collection disambiguates duplicate request names" }
   { command: "api chain create",         kind: command,  group: chaining,        test: "api chain create tmp-chain; api chain delete tmp-chain --force" }
   { command: "api chain list",           kind: command,  group: chaining,        test: "api chain list" }
   { command: "api chain show",           kind: command,  group: chaining,        test: "api chain show example-workflow" }

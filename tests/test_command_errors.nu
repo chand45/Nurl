@@ -932,7 +932,12 @@ def test-public-command-error-contracts [] {
     let server = $server_result.server
     let failure = try {
         setup-command-error-workspace $root $server
+        $env.API_ROOT = $root
         api auth oauth2 configure history-ambiguity --client-id client-id --client-secret CLIENT-SECRET-SENTINEL --token-url $"http://127.0.0.1:($server.port)/token" | ignore
+        for collection in ["z-last" "a-first"] {
+            api collection create $collection | ignore
+            api request create duplicate-saved GET $"http://127.0.0.1:($server.port)/must-not-run" --collection $collection --auth {type: oauth2, ref: history-ambiguity} | ignore
+        }
         let ambiguity_dir = ($root | path join "history" "2026-01-01")
         if not ($ambiguity_dir | path exists) { mkdir $ambiguity_dir }
         for id in ["history-ambiguous-one" "history-ambiguous-two"] {
@@ -953,12 +958,14 @@ def test-public-command-error-contracts [] {
         let index_path = ($root | path join "history" "index.nuon")
         rm $index_path
         let negative_output = ($root | path join "negative-history-export.json")
+        let ambiguous_output = ($root | path join "ambiguous-response.json")
         let cases = [
             {command: "api collection create jsonplaceholder", expected: "Collection 'jsonplaceholder' already exists"}
             {command: "api collection show missing-valid-name", expected: "Collection 'missing-valid-name' not found"}
             {command: "api collection env create jsonplaceholder default", expected: "Environment 'default' already exists in collection 'jsonplaceholder'"}
             {command: "api send missing-valid-name --collection jsonplaceholder --raw --no-history", expected: "Request 'missing-valid-name' not found"}
             {command: "api send missing-auto-discovered --dry-run --no-history", expected: "Request 'missing-auto-discovered' not found"}
+            {command: $"api send duplicate-saved --dry-run --save ($ambiguous_output | to nuon)", expected: "Request 'duplicate-saved' is ambiguous: a-first, z-last. Use --collection."}
             {command: "api chain show missing-valid-name", expected: "Chain 'missing-valid-name' not found"}
             {command: "api history show missing-valid-name", expected: "History entry 'missing-valid-name' not found"}
             {command: "api history show history-ambiguous", expected: "History ID 'history-ambiguous' is ambiguous (2 matches)"}
@@ -974,6 +981,7 @@ def test-public-command-error-contracts [] {
             {command: "api collection env unset jsonplaceholder key --target missing-valid-name", expected: "Environment 'missing-valid-name' not found"}
             {command: "api collection env delete jsonplaceholder missing-valid-name --force", expected: "Environment 'missing-valid-name' not found"}
             {command: "api request show missing-valid-name --collection jsonplaceholder", expected: "Request 'missing-valid-name' not found"}
+            {command: "api request show duplicate-saved", expected: "Request 'duplicate-saved' is ambiguous: a-first, z-last. Use --collection."}
             {command: "api request update missing-valid-name --collection jsonplaceholder", expected: "Request 'missing-valid-name' not found"}
             {command: "api request delete missing-valid-name --collection jsonplaceholder --force", expected: "Request 'missing-valid-name' not found"}
             {command: "api chain create existing", expected: "Chain 'existing' already exists"}
@@ -993,6 +1001,7 @@ def test-public-command-error-contracts [] {
         }
         assert (not ($index_path | path exists)) "history errors rebuilt the missing index"
         assert (not ($negative_output | path exists)) "negative history limit created export output"
+        assert (not ($ambiguous_output | path exists)) "ambiguous saved request created an output file"
         assert equal (open $server.count_file --raw | str trim) "0" "logical failures acquired an OAuth2 token"
         assert equal (command-error-wire-events $server | length) 0 "logical failures reached the local endpoint"
         null

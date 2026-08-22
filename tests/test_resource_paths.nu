@@ -1212,7 +1212,10 @@ def test-symlink-escapes [] {
 
     api collection create demo | ignore
     api collection create real | ignore
+    api request create canonical-shared GET "http://127.0.0.1:1/canonical-shared" --collection real | ignore
     mkdir ($root | path join "chains")
+    mkdir ($outside_collection | path join "requests")
+    {name: "canonical-shared", method: "GET", url: "https://escape.invalid/must-not-resolve"} | to nuon | save -f ($outside_collection | path join "requests" "canonical-shared.nuon")
     {name: "secret", method: "GET", url: "https://example.invalid"} | to nuon | save -f ($outside_requests | path join "secret.nuon")
     "TEST-SECRET-SENTINEL" | save -f ($outside_collection | path join "sentinel.txt")
     "TEST-SECRET-SENTINEL" | save -f ($outside_environment | path join "sentinel.txt")
@@ -1237,8 +1240,21 @@ def test-symlink-escapes [] {
 
     assert (($contained_collections | path join "demo") | path exists) "linked collections base should remain usable"
     assert ((api collection show alias) | describe | str starts-with "record") "contained collection link should be accepted"
+    assert equal (api request show canonical-shared | get url) "http://127.0.0.1:1/canonical-shared" "canonical collection aliases should deduplicate one request"
+    let unscoped_send = (run-module-script $root "api send canonical-shared --dry-run --no-history")
+    let unscoped_send_stderr = try { $unscoped_send.stderr } catch { "" }
+    assert equal $unscoped_send.exit_code 0 "unscoped send should skip an unrelated escaping collection candidate"
+    assert equal ($unscoped_send_stderr | str trim) "" "unscoped send leaked an escaping collection error"
+    assert ($unscoped_send.stdout | str contains "http://127.0.0.1:1/canonical-shared") "unscoped send did not resolve the healthy contained collection"
+    assert (not ($unscoped_send.stdout | str contains "https://escape.invalid/must-not-resolve")) "unscoped send resolved the escaping collection candidate"
+    let unscoped_chain = (api chain run [{request: canonical-shared}] --quiet)
+    assert equal $unscoped_chain.success false "unscoped chain transport failure should remain soft"
+    assert equal ($unscoped_chain.results | length) 1 "unscoped chain did not resolve the healthy contained request"
+    assert equal ($unscoped_chain.results | first | get request) "canonical-shared" "unscoped chain returned the wrong saved request"
+    assert (not (($unscoped_chain | to nuon) | str contains "must-not-resolve")) "unscoped chain leaked the escaping candidate"
     assert equal (api request show "contained/inside" --collection demo | get name) inside
     expect-resource-error { api collection show escape } "existing links cannot escape"
+    expect-resource-error { api request show canonical-shared --collection escape } "existing links cannot escape"
     expect-resource-error { api request show "escape/secret" --collection demo } "existing links cannot escape"
     expect-resource-error { api collection env show demo escape } "existing links cannot escape"
     expect-resource-error { api chain show escape } "existing links cannot escape"

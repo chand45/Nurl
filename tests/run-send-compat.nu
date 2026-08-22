@@ -66,6 +66,18 @@ let failure = try {
     require-check (($missing_stdout | str trim) == "") "Missing auto-discovered request wrote stdout"
     require-check (($missing_stderr | str contains "Request 'missing-auto-discovered' not found")) "Missing auto-discovered request did not return the expected error"
 
+    api request create discovered-request GET "https://wrong.example/x" --collection a-nonmatching | ignore
+    let ambiguous = (run-api-command $repo_root $workspace "api send discovered-request --dry-run --no-history")
+    let ambiguous_stdout = try { $ambiguous.stdout } catch { "" }
+    let ambiguous_stderr = try { $ambiguous.stderr } catch { "" }
+    let normalized_ambiguous_stderr = ($ambiguous_stderr | str replace --all "\r" "" | str replace --all "\n" "")
+    require-check ($ambiguous.exit_code != 0) "Ambiguous auto-discovered request unexpectedly exited successfully"
+    require-check (($ambiguous_stdout | str trim) == "") "Ambiguous auto-discovered request wrote stdout"
+    require-check (not ($ambiguous_stderr | str contains "curl ")) "Ambiguous dry-run emitted curl output"
+    require-check (($normalized_ambiguous_stderr | str contains "a-nonmatching, b-target")) "Ambiguous request candidates were not deterministic and sorted"
+    require-check (($normalized_ambiguous_stderr | str contains "--collection")) "Ambiguous request error did not explain explicit collection selection"
+    api collection delete a-nonmatching --force | ignore
+
     require-check (not (which node | is-empty)) "Node.js is required for the local live-transport compatibility check"
     let port_file = ($workspace | path join "server-port.txt")
     let server_script = ($workspace | path join "server.js")
@@ -154,4 +166,4 @@ if $failure != null {
     exit 1
 }
 
-print "Send compatibility tests: 6, failed: 0, skipped: 0"
+print "Send compatibility tests: 7, failed: 0, skipped: 0"
