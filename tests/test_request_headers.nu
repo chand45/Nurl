@@ -714,7 +714,7 @@ def test-request-header-preview-fidelity [] {
             {label: "body-file", command: ("api post " + (($base + "/preview-file") | to nuon) + " --body-file " + ($body_file | to nuon) + $common)}
             {label: "at-literal", command: ("api post " + (($base + "/preview-at-literal") | to nuon) + " -b " + ("@everyone please review" | to nuon) + $common), expected_body: "@everyone please review"}
             {label: "at-existing-path", command: ("api post " + (($base + "/preview-at-path") | to nuon) + " -b " + ($at_path | to nuon) + $common), expected_body: $at_path}
-            {label: "at-form", command: ("api post " + (($base + "/preview-at-form") | to nuon) + " -F {'@who': team} -H {'content-type': text/plain, 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"), expected_body: "@who=team"}
+            {label: "at-form", command: ("api post " + (($base + "/preview-at-form") | to nuon) + " -F {'@who': team} -H {'content-type': text/plain, 'accept': 'text/csv', 'X-Keep': exact} --raw --no-history"), expected_body: "%40who=team"}
             {label: "at-body-file", command: ("api post " + (($base + "/preview-at-file") | to nuon) + " --body-file " + ($at_body_file | to nuon) + $common), expected_body: $at_path}
         ]
         for case in $cases {
@@ -934,6 +934,138 @@ def test-request-header-compatibility-subset [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def form-encoding-fixture [] {
+    {
+        "a b&=é😀": "AZaz09*-._~ %+&=#;\r\n\t/:?@,$'()[]é漢😀"
+    }
+}
+
+def expected-form-encoding [] {
+    "a+b%26%3D%C3%A9%F0%9F%98%80=AZaz09*-._%7E+%25%2B%26%3D%23%3B%0D%0A%09%2F%3A%3F%40%2C%24%27%28%29%5B%5D%C3%A9%E6%BC%A2%F0%9F%98%80"
+}
+
+def assert-form-event [server: record, path: string, method: string] {
+    let event = (request-header-event $server $path)
+    assert equal $event.method $method $"($method) form request used the wrong method"
+    assert equal $event.body (expected-form-encoding) $"($method) form request changed wire bytes"
+    let content_type = (request-header-values $event "CONTENT-TYPE")
+    assert equal ($content_type | length) 1 $"($method) form request sent duplicate Content-Type headers"
+    assert equal ($content_type | first | get value) "application/x-www-form-urlencoded"
+}
+
+def test-form-encoding-exact-wire [] {
+    let root = (make-temp-dir "form-encoding")
+    let infra = (make-temp-dir "form-encoding-server")
+    let server = (start-request-header-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let form = (form-encoding-fixture)
+
+        let before_history = (request-header-history-ids $root)
+        let post_result = (api post $"($base)/form-post" --form $form --raw)
+        api put $"($base)/form-put" --form $form --raw --no-history | ignore
+        api patch $"($base)/form-patch" --form $form --raw --no-history | ignore
+        api request -m POST $"($base)/form-request" --form $form --raw --no-history | ignore
+        api post $"($base)/form-scalars" --form {count: 42, enabled: true, nullish: null} --raw --no-history | ignore
+
+        assert equal $post_result.request.body (expected-form-encoding) "Form result.request.body differed from wire bytes"
+        let history_id = (request-header-new-history-id $root $before_history)
+        assert equal (api history show $history_id).request.body (expected-form-encoding) "Form history body differed from wire bytes"
+        api history resend $history_id --raw | ignore
+        assert equal (
+            request-header-events $server | where path == "/form-post" | last | get body
+        ) (expected-form-encoding) "Form history resend changed encoded wire bytes"
+        assert-form-event $server "/form-post" "POST"
+        assert-form-event $server "/form-put" "PUT"
+        assert-form-event $server "/form-patch" "PATCH"
+        assert-form-event $server "/form-request" "POST"
+        assert equal (request-header-event $server "/form-scalars").body "count=42&enabled=true&nullish=" "Scalar/null form values changed order or representation"
+
+        let preview_command = (
+            "api post " + (($base + "/form-preview") | to nuon)
+            + " --form " + ($form | to nuon)
+            + " --dry-run --no-history"
+        )
+        let preview = (run-command-process $root $preview_command)
+        assert equal $preview.exit_code 0 $"Form dry-run failed: ($preview.stderr)"
+        assert equal ($preview.stderr | str trim) "" "Form dry-run wrote stderr"
+        assert ($preview.stdout | str contains (expected-form-encoding)) "Form dry-run did not contain the exact encoded body"
+        assert (not ($preview.stdout | str contains "é")) "Form dry-run exposed raw non-ASCII form text"
+        assert (not ($preview.stdout | str contains "\r\n\t")) "Form dry-run exposed raw control characters"
+        assert equal (request-header-events $server | length) 6 "Form dry-run reached the network"
+        null
+    } catch {|error| $error}
+    try { stop-request-header-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
+def assert-form-command-error [root: string, server: record, command: string, expected: string] {
+    let before_state = (request-header-snapshot $root)
+    let before_events = (request-header-events $server | length)
+    let result = (run-command-process $root $command)
+    assert ($result.exit_code != 0) $"Invalid form unexpectedly succeeded: ($command)"
+    assert equal ($result.stdout | str trim) "" $"Invalid form wrote stdout: ($command)"
+    let has_expected = (
+        $result.stderr
+        | ansi strip
+        | lines
+        | any {|line| $line | str contains $expected }
+    )
+    assert $has_expected $"Invalid form error did not contain '($expected)': ($result.stderr)"
+    assert equal $result.stderr ($result.stderr | ansi strip) "Invalid form error emitted ANSI"
+    assert equal (request-header-events $server | length) $before_events "Invalid form reached the network"
+    assert equal (request-header-snapshot $root) $before_state "Invalid form mutated the workspace"
+}
+
+def test-form-validation-errors [] {
+    let root = (make-temp-dir "form-validation")
+    let infra = (make-temp-dir "form-validation-server")
+    let server = (start-request-header-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let surfaces = ["post" "put" "patch" "request"]
+        let invalid_values = [
+            {label: "list", expression: "[one two]", reported_type: "list"}
+            {label: "table", expression: "[[x]; [1]]", reported_type: "list"}
+            {label: "record", expression: "{nested: value}", reported_type: "record"}
+            {label: "binary", expression: "0x[01 02]", reported_type: "binary"}
+            {label: "closure", expression: "{|| true}", reported_type: "closure"}
+        ]
+        for surface in $surfaces {
+            for invalid in $invalid_values {
+                let url = $"($base)/form-($surface)-($invalid.label)"
+                let prefix = if $surface == "request" {
+                    "api request -m POST " + ($url | to nuon)
+                } else {
+                    $"api ($surface) " + ($url | to nuon)
+                }
+                let command = (
+                    $prefix
+                    + " --form {bad: " + $invalid.expression + "}"
+                    + " --auth {type: bearer, ref: missing-form-auth} --output none"
+                )
+                let expected = $"Form field 'bad' must be a scalar value; got ($invalid.reported_type)"
+                assert-form-command-error $root $server $command $expected
+            }
+        }
+        api post $"($base)/form-omitted" --body {ok: true} --raw --no-history | ignore
+        assert equal (
+            request-header-event $server "/form-omitted" | get body | from json | get ok
+        ) true "Omitted --form changed structured body behavior"
+        null
+    } catch {|error| $error}
+    try { stop-request-header-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def run-suite-request-headers []: nothing -> list<record> {
     [
         (run-test "request headers: all transferring surfaces deduplicate on wire" { test-request-header-transferring-surfaces })
@@ -942,11 +1074,15 @@ def run-suite-request-headers []: nothing -> list<record> {
         (run-test "request headers: ambiguous records and legacy history fail safely" { test-request-header-ambiguous-records-and-legacy-history })
         (run-test "request headers: preview and export match execution" { test-request-header-preview-fidelity })
         (run-test "request headers: preview preserves request-affecting flags" { test-request-header-preview-request-flags })
+        (run-test "forms: UTF-8 and reserved bytes are exact across request surfaces" { test-form-encoding-exact-wire })
+        (run-test "forms: non-scalar values fail without side effects" { test-form-validation-errors })
     ]
 }
 
 def run-suite-request-headers-compat []: nothing -> list<record> {
     [
         (run-test "request headers: Nushell 0.89 compatibility subset" { test-request-header-compatibility-subset })
+        (run-test "forms: UTF-8 and reserved bytes are exact across request surfaces" { test-form-encoding-exact-wire })
+        (run-test "forms: non-scalar values fail without side effects" { test-form-validation-errors })
     ]
 }

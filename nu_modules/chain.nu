@@ -353,13 +353,13 @@ export def "api chain run" [
 
         let attempted = if $stop_on_error {
             {
-                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
+                result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string --body-present=$has_body_content)
                 error: null
             }
         } else {
             try {
                 {
-                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string)
+                    result: (execute-encoded-request $method $url $body_resolution.content $headers $auth --resolved-context {vars: $resolved_vars, trusted_raw: $raw_trusted, trusted_cache: $request_result.cache, opaque_values: $opaque_values, single_pass: true} --structured-string=$body_resolution.structured_string --body-present=$has_body_content)
                     error: null
                 }
             } catch {|error|

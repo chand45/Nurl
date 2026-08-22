@@ -254,11 +254,18 @@ def read-body-file [body_file: string] {
     if (path-type-safe $body_file) == "dir" {
         fail-command $"Body file '($body_file)' must be a readable file"
     }
-    try {
-        open $body_file --raw | str trim
+    let read_result = try {
+        {ok: true, content: (open $body_file --raw)}
     } catch {
+        {ok: false, content: null}
+    }
+    if not $read_result.ok {
         fail-command $"Body file '($body_file)' could not be read"
     }
+    if (state-base-type $read_result.content) != "string" {
+        fail-command $"Body file '($body_file)' must contain valid UTF-8 text"
+    }
+    $read_result.content
 }
 
 def encode-query-component [value: string] {
@@ -347,6 +354,15 @@ def serialize-structured-body [content: any] {
     }
 }
 
+def validate-form-record [form: record] {
+    for field in ($form | transpose key value) {
+        let value_type = (state-base-type $field.value)
+        if $value_type not-in ["nothing" "string" "int" "float" "bool" "date" "duration" "filesize"] {
+            fail-command $"Form field '($field.key)' must be a scalar value; got ($value_type)"
+        }
+    }
+}
+
 def resolve-form-body [form: record] {
     {
         kind: "form"
@@ -429,7 +445,7 @@ def build-curl-args [
     method: string
     url: string
     headers: record
-    body?: string
+    body: record
     auth?: record
 ] {
     mut args = [
@@ -472,9 +488,9 @@ def build-curl-args [
         $args = (append-authorization-args $args $auth)
     }
 
-    # Add body if provided
-    if $body != null and $body != "" {
-        $args = ($args | append ["--data-raw" $body])
+    # Body presence is tagged separately from content so an empty file remains a real body.
+    if $body.kind != "none" {
+        $args = ($args | append ["--data-raw" $body.content])
     }
 
     $args
@@ -485,7 +501,7 @@ def build-curl-args-for-display [
     method: string
     url: string
     headers: record
-    body?: string
+    body: record
     auth?: record
     --follow-redirects
 ] {
@@ -523,9 +539,9 @@ def build-curl-args-for-display [
         $args = (append-authorization-args $args $auth --redact)
     }
 
-    # Add body if provided
-    if $body != null and $body != "" {
-        $args = ($args | append ["--data-raw" $body])
+    # Match execution exactly, including an explicitly empty request body.
+    if $body.kind != "none" {
+        $args = ($args | append ["--data-raw" $body.content])
     }
 
     if $follow_redirects {
@@ -560,22 +576,24 @@ def curl-args-to-string [
     $parts | str join " "
 }
 
-# URL-encode a single form value (application/x-www-form-urlencoded)
+# Encode one application/x-www-form-urlencoded component.
 def url-encode-form-value [s: string] {
     $s
-    | str replace --all "%" "%25"
-    | str replace --all "+" "%2B"
-    | str replace --all "&" "%26"
-    | str replace --all "=" "%3D"
-    | str replace --all "#" "%23"
-    | str replace --all " " "+"
+    | url encode --all
+    | str replace --all "%20" "+"
+    | str replace --all "%2A" "*"
+    | str replace --all "%2D" "-"
+    | str replace --all "%2E" "."
+    | str replace --all "%5F" "_"
 }
 
 # Encode a record as application/x-www-form-urlencoded
 def encode-form-data [data: record] {
+    validate-form-record $data
     $data | transpose key value | each {|kv|
         let k = (url-encode-form-value $kv.key)
-        let v = (url-encode-form-value ($kv.value | into string))
+        let value = ($kv.value | default "" | into string)
+        let v = (url-encode-form-value $value)
         $"($k)=($v)"
     } | str join "&"
 }
@@ -586,7 +604,7 @@ def build-curl-args-binary [
     url: string
     headers: record
     output_path: string
-    body?: string
+    body: record
     auth?: record
 ] {
     mut args = [
@@ -615,8 +633,8 @@ def build-curl-args-binary [
         $args = (append-authorization-args $args $auth)
     }
 
-    if $body != null and $body != "" {
-        $args = ($args | append ["--data-raw" $body])
+    if $body.kind != "none" {
+        $args = ($args | append ["--data-raw" $body.content])
     }
 
     $args
@@ -781,19 +799,26 @@ def parse-response-parts [body_raw: string, headers_raw: string, meta_part: stri
     } else { 0 }
 
     # Parse headers
-    let header_lines = ($headers_raw | lines | skip 1)  # Skip status line
-    let headers = $header_lines
-        | each {|line|
-            let parts = ($line | split row ":" | str trim)
-            if ($parts | length) >= 2 {
-                let key = ($parts | first)
-                let value = ($parts | skip 1 | str join ":")
-                { $key: ($value | str trim) }
+    let headers = (
+        $headers_raw
+        | lines
+        | skip 1
+        | reduce -f [] {|line, folded|
+            let parts = ($line | split row ":")
+            if ($parts | length) < 2 {
+                $folded
             } else {
-                {}
+                let key = ($parts | get 0 | str trim)
+                let value = ($parts | skip 1 | str join ":" | str trim)
+                if ($key | is-empty) {
+                    $folded
+                } else {
+                    fold-wire-header $folded $key $value
+                }
             }
         }
-        | reduce -f {} {|it, acc| $acc | merge $it }
+        | wire-header-record
+    )
 
     # Try to parse body as JSON
     let body = try {
@@ -952,12 +977,50 @@ def upsert-wire-header [headers: record, key: string, value: string] {
     $retained | upsert $key $value
 }
 
+def fold-wire-header [headers: list, key: string, value: string] {
+    let matches = (
+        $headers
+        | enumerate
+        | where {|header| ascii-equal-ignore-case $header.item.key $key }
+    )
+    let line_sensitive = (sensitive-header $key $value)
+    if ($matches | is-empty) {
+        $headers | append {
+            key: $key
+            value: (if $line_sensitive { "******" } else { $value })
+            sensitive: $line_sensitive
+        }
+    } else {
+        let matched = ($matches | first)
+        let sensitive = ($matched.item.sensitive or $line_sensitive)
+        let combined = if $sensitive {
+            "******"
+        } else {
+            $"($matched.item.value), ($value)"
+        }
+        $headers
+        | enumerate
+        | each {|header|
+            if $header.index == $matched.index {
+                {key: $key, value: $combined, sensitive: $sensitive}
+            } else {
+                $header.item
+            }
+        }
+    }
+}
+
+def wire-header-record []: list -> record {
+    $in
+    | reduce -f {} {|header, result| $result | upsert $header.key $header.value }
+}
+
 def parse-wire-headers [header_output: string] {
     let final_block = (last-header-block $header_output)
     $final_block
     | lines
     | skip 1
-    | reduce -f {} {|line, headers|
+    | reduce -f [] {|line, headers|
         let parts = ($line | split row ":")
         if ($parts | length) < 2 {
             $headers
@@ -967,10 +1030,11 @@ def parse-wire-headers [header_output: string] {
             if ($key | is-empty) {
                 $headers
             } else {
-                upsert-wire-header $headers $key $value
+                fold-wire-header $headers $key $value
             }
         }
     }
+    | wire-header-record
 }
 
 def parse-wire-trailers [trailer_bytes: binary] {
@@ -988,7 +1052,7 @@ def parse-wire-trailers [trailer_bytes: binary] {
     $output
     | lines
     | where {|line| not ($line | str trim | is-empty) }
-    | reduce -f {} {|line, trailers|
+    | reduce -f [] {|line, trailers|
         let parts = ($line | split row ":")
         if ($parts | length) < 2 {
             fail-command "Curl returned malformed response trailers"
@@ -1008,8 +1072,9 @@ def parse-wire-trailers [trailer_bytes: binary] {
             fail-command "Curl returned malformed response trailers"
         }
         let value = ($parts | skip 1 | str join ":" | str trim)
-        upsert-wire-header $trailers $key $value
+        fold-wire-header $trailers $key $value
     }
+    | wire-header-record
 }
 
 def as-binary [value: any] {
@@ -1347,6 +1412,17 @@ def execute-request [
     }
     assert-unique-header-names $final_headers
 
+    let final_form_body = if $body.kind == "form" {
+        let content = if $no_interpolate {
+            $body.content
+        } else {
+            interpolate-structured $body.content -e $resolved_vars --resolved --single-pass
+        }
+        encode-form-data $content
+    } else {
+        null
+    }
+
     let display_auth_context = (prepare-auth-context $auth_spec --display-only)
     let display_auth = ($display_auth_context.display? | default {})
     assert-safe-auth-headers $auth_spec
@@ -1374,14 +1450,7 @@ def execute-request [
         "none" => ""
         "encoded" => $body.content
         "structured-encoded" => $body.content
-        "form" => {
-            let content = if $no_interpolate {
-                $body.content
-            } else {
-                interpolate-structured $body.content -e $resolved_vars --resolved --single-pass
-            }
-            encode-form-data $content
-        }
+        "form" => $final_form_body
         "text" => {
             if $no_interpolate or $body.content == "" {
                 $body.content
@@ -1408,7 +1477,10 @@ def execute-request [
             $final_url
         }
         let display_args = (
-            build-curl-args-for-display $method $display_url $final_headers $final_body $display_auth
+            build-curl-args-for-display $method $display_url $final_headers {
+                kind: $body.kind
+                content: $final_body
+            } $display_auth
                 --follow-redirects=$follow_redirects
         )
         let curl_command = (curl-args-to-string $display_args $display_url)
@@ -1434,7 +1506,11 @@ def execute-request [
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
         let attempt_path = if $binary_save == "" { "" } else { binary-attempt-path $binary_save }
-        let argument_body = if $body_via_stdin { "" } else { $final_body }
+        let argument_body = if $body_via_stdin {
+            {kind: "none", content: ""}
+        } else {
+            {kind: $body.kind, content: $final_body}
+        }
         let base_args = if $binary_save == "" {
             build-curl-args $method $request_url $final_headers $argument_body $wire_auth
         } else {
@@ -1501,13 +1577,17 @@ def execute-request [
             headers: (redact-sensitive-headers $final_headers)
             body: (if $binary_save != "" {
                 null
-            } else if $final_body != "" {
-                try { $final_body | from json } catch { $final_body }
+            } else if $body.kind != "none" {
+                if $final_body == "" {
+                    ""
+                } else {
+                    try { $final_body | from json } catch { $final_body }
+                }
             } else {
                 null
             })
         }
-        let history_body = if $binary_save != "" or $final_body == "" {
+        let history_body = if $binary_save != "" or $body.kind == "none" {
             null
         } else if ($body.kind == "structured") and ((state-base-type $body.content) in ["record" "list"]) and (not ($public_request_record.body | is-empty)) {
             $public_request_record.body
@@ -1561,8 +1641,15 @@ export def execute-encoded-request [
     auth: record
     --resolved-context: record = {}
     --structured-string
+    --body-present
 ] {
-    let body_kind = if $structured_string { "structured-encoded" } else { "encoded" }
+    let body_kind = if not $body_present {
+        "none"
+    } else if $structured_string {
+        "structured-encoded"
+    } else {
+        "encoded"
+    }
     let result = (execute-request $method $url -H $headers -b {kind: $body_kind, content: $body} --auth-spec $auth --url-resolved --headers-resolved --resolved-context $resolved_context)
     if "_raw_body" in ($result | columns) {
         $result | reject _raw_body
@@ -1776,6 +1863,7 @@ export def "api post" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         # Form encoding takes precedence over --body/--body-file
@@ -1821,6 +1909,7 @@ export def "api put" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
@@ -1864,6 +1953,7 @@ export def "api patch" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
@@ -1936,6 +2026,7 @@ export def "api request" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
@@ -2002,8 +2093,17 @@ export def "api send" [
         let headers = ($request.headers? | default {})
         let body = if $has_body_override {
             $resolved_body_override
-        } else if ($request.body?.content? | default null) != null {
-            {kind: "structured", content: $request.body.content}
+        } else if ($request.body? | default null) != null {
+            let stored_type = ($request.body.type? | default "json")
+            let stored_content = ($request.body.content? | default null)
+            let stored_literal = (($request.body.literal? | default false) == true)
+            if $stored_type == "text" and $stored_literal and $stored_content != null {
+                {kind: "text", content: $stored_content}
+            } else if $stored_content != null {
+                {kind: "structured", content: $stored_content}
+            } else {
+                {kind: "none", content: null}
+            }
         } else {
             {kind: "none", content: null}
         }
@@ -2062,18 +2162,7 @@ export def "api request create" [
 ] {
     validate-resource-name "request" $name --nested --scope "<collection>/requests" | ignore
     validate-resource-name "collection" $collection | ignore
-    let body_content = if $body_file != "" {
-        let file_content = (read-body-file $body_file)
-        try {
-            $file_content | from json
-        } catch {
-            $file_content
-        }
-    } else if not ($body | is-empty) {
-        $body
-    } else {
-        null
-    }
+    let resolved_body = (resolve-body -b $body -f $body_file)
     with-api-debug $debug {
         let collections_dir = (get-collections-dir)
         let collection_path = (resolve-collection-dir $collections_dir $collection)
@@ -2110,7 +2199,13 @@ export def "api request create" [
             method: $method
             url: $url
             headers: $headers
-            body: (if $body_content != null { { type: "json", content: $body_content } } else { null })
+            body: (if $resolved_body.kind == "none" or $resolved_body.content == null {
+                null
+            } else if $resolved_body.kind == "text" {
+                {type: "text", content: $resolved_body.content, literal: true}
+            } else {
+                {type: "json", content: $resolved_body.content}
+            })
             auth: (if ($auth | is-empty) { null } else { $auth })
             pre_request: null
             tests: null
@@ -2222,17 +2317,6 @@ export def "api request update" [
         fail-command $"Request '($name)' not found in collection '($collection)'"
     }
 
-    let file_body_content = if $body_file != null and $body_file != "" {
-        let file_content = (read-body-file $body_file)
-        try {
-            $file_content | from json
-        } catch {
-            $file_content
-        }
-    } else {
-        null
-    }
-
     mut req = (open-state-record $request_file $"request '($name)' in collection '($collection)'")
 
     if $method != null {
@@ -2246,14 +2330,20 @@ export def "api request update" [
     }
     # Handle body update from either inline record or file
     if $body != null or $body_file != null {
-        let body_content = if $body_file != null and $body_file != "" {
-            $file_body_content
+        let resolved_body = if $body_file != null and $body_file != "" {
+            resolve-body -f $body_file
         } else if ($body != null) and (not ($body | is-empty)) {
-            $body
+            resolve-body -b $body
         } else {
-            null
+            {kind: "none", content: null}
         }
-        $req = ($req | upsert body (if $body_content != null { { type: "json", content: $body_content } } else { null }))
+        $req = ($req | upsert body (if $resolved_body.kind == "none" or $resolved_body.content == null {
+            null
+        } else if $resolved_body.kind == "text" {
+            {type: "text", content: $resolved_body.content, literal: true}
+        } else {
+            {type: "json", content: $resolved_body.content}
+        }))
     }
     if $auth != null {
         $req = ($req | upsert auth $auth)

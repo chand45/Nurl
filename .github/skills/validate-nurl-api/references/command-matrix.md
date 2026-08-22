@@ -89,13 +89,13 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | Command | Invocation | Expected |
 |---|---|---|
 | api get | `api get https://jsonplaceholder.typicode.com/posts/1 -r` | `.response.status == 200`. |
-| api post | `api post https://jsonplaceholder.typicode.com/posts -b {title: t, body: b, userId: 1} -r` | `201`. |
-| api put | `api put https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. |
-| api patch | `api patch https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. |
+| api post | `api post https://jsonplaceholder.typicode.com/posts -b {title: t, body: b, userId: 1} -r` | `201`. Exact-wire form coverage includes UTF-8, reserved bytes, controls, and keys. |
+| api put | `api put https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. Shares byte-exact form serialization. |
+| api patch | `api patch https://jsonplaceholder.typicode.com/posts/1 -b {title: t} -r` | `200`. Shares byte-exact form serialization. |
 | api delete | `api delete https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. |
 | api head | `api head https://jsonplaceholder.typicode.com/posts/1 --output status --no-history` | Exit 0, typed status `200`, no body rendering, empty stderr, and no history entry. |
 | api options | `api options https://jsonplaceholder.typicode.com/posts --raw --no-history` | Exit 0 with structured status `204`, empty stderr, and no history write. |
-| api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode). |
+| api request | `api request -m GET https://jsonplaceholder.typicode.com/posts/1 -r` | `200`. Generic verb; a **string** `-b` body is sent as-is (no double-encode), and `--form` shares byte-exact form serialization. |
 | api send | `api send get-post -r`; duplicate `get-post` in two collections and retry; `api send get-post -c jsonplaceholder -r` | Unique discovery and explicit scope return `200` with `{{base_url}}` resolved from the selected collection. Duplicate unscoped names fail nonzero with empty stdout and sorted candidates directing the user to `--collection`; no curl, auth, network, history, or output-file side effect occurs. Try every saved request. |
 
 ### Duplicate saved-request validation scenario
@@ -121,6 +121,14 @@ All HTTP `--output` values are case-sensitive and preflighted before body/auth/n
 work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--output raw` returns only
 the exact undecorated payload text (including JSON scalar syntax and whitespace; nothing for an empty body), while the
 separate `--raw` flag returns the full result record and takes precedence over `--output`.
+
+Repeated response field lines are folded only within their final header or trailer section. Names
+compare ASCII-case-insensitively; values join with exact `, ` in wire order; first-appearance
+position and final spelling are retained. Each original line is classified before joining, so any
+sensitive name or credential-shaped value yields one `******`. `Set-Cookie`/`Set-Cookie2` reveal
+neither values nor count. Trailers continue to override headers, redirect blocks do not mix, and no
+`headers_all` field or other schema member is added. Exercise these contracts with the deterministic
+fixtures in `tests/test_secure_header_capture.nu` and legacy parser case in `tests/test_features.nu`.
 
 For every transferring surface, a framed curl transport failure exits nonzero with empty stdout and
 secret-free, non-ANSI stderr; it creates no history or `--save` output. HTTP 4xx and final 5xx remain

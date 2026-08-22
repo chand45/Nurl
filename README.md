@@ -330,7 +330,7 @@ api get "https://api.example.com/users" -H { "X-Custom-Header": "value" }
 # Using variables (from global or collection environment)
 api get "{{base_url}}/{{api_version}}/users"
 
-# Form-encoded POST (C4)
+# Form-encoded request (UTF-8 keys and scalar values are encoded byte-exactly)
 api post "https://api.example.com/login" --form { username: "alice", password: "secret" }
 
 # Follow redirects automatically (C6)
@@ -399,12 +399,18 @@ Output names are case-sensitive: `pretty`, `raw`, `body`, `json`, `headers`, `st
 whitespace. The separate `--raw` flag takes precedence and returns the complete result record; `--select`
 takes precedence over `--output`. Recognized sensitive response headers are masked in the public
 result before `--raw`, `--output headers|json`, `--select`, or human rendering, while non-sensitive
-header names, values, and result types remain unchanged. With `--dry-run`, the curl preview is returned instead of an
-HTTP response. Dry-run and saved-request export never build secret-bearing wire auth or contact an
-OAuth token endpoint. They render bearer/OAuth/SAML authorization, basic credentials, API-key values,
-and recognized sensitive headers as `******` while preserving non-sensitive headers and API-key
-header/query names. Query API-key names use RFC 3986 query-component encoding in previews, and real
-requests encode both the name and value exactly once while preserving existing queries and fragments.
+header names, values, and result types remain unchanged. Repeated response field lines within one
+header or trailer section are matched with ASCII case-insensitive names and joined in wire order with
+`, `. The field retains its first-appearance position and final wire spelling. Sensitivity is checked
+on every field line before joining; one sensitive name or credential-shaped value makes the public
+field exactly `******`. `Set-Cookie` and `Set-Cookie2` also project as one mask without exposing a
+count. Trailers still override same-named response headers, and redirect blocks remain separate.
+With `--dry-run`, the curl preview is returned instead of an HTTP response. Dry-run and saved-request
+export never build secret-bearing wire auth or contact an OAuth token endpoint. They render
+bearer/OAuth/SAML authorization, basic credentials, API-key values, and recognized sensitive headers
+as `******` while preserving non-sensitive headers and API-key header/query names. Query API-key
+names use RFC 3986 query-component encoding in previews, and real requests encode both the name and
+value exactly once while preserving existing queries and fragments.
 `--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted
@@ -445,6 +451,11 @@ map for static/default/use templates, but extracted response values are treated 
 embedded `{{...}}` text cannot expand again. HTTP header names always remain literal. Structured
 body and form keys do interpolate; if two interpolated keys collide, the request fails before
 network I/O.
+
+Form fields use `application/x-www-form-urlencoded`: spaces become `+`; UTF-8 and every byte except
+ASCII letters, digits, `*`, `-`, `.`, and `_` become uppercase `%XX` escapes. Values must be scalar
+strings, numbers, booleans, dates, durations, or filesizes; null represents an empty value (`key=`).
+Structured form values fail before authentication or network I/O instead of being coerced.
 
 ```nushell
 # Global variables (available to all requests)
@@ -806,6 +817,14 @@ the header retains its first position. A record containing case variants such as
 Managed bearer, SAML, OAuth2, and Basic authentication reserve `Authorization`; header-mode API
 keys reserve their configured header. Supplying the same header through `-H` is an error rather
 than silently dropping either value. Query-mode API keys do not conflict with request headers.
+
+`--body-file` reads UTF-8 text without trimming, so leading/trailing whitespace, LF/CRLF endings,
+and explicitly empty bodies are transmitted exactly. Valid JSON files retain structured variable
+interpolation; other text remains literal. Non-UTF-8 files fail with an actionable error before any
+request is sent. Newly created or updated saved requests retain this distinction. Legacy saved
+entries without the new literal marker keep their existing interpretation until repaired with
+`api request update --body-file`.
+
 `--dry-run` and `api request export` print the deduplicated headers and resolved body exactly as
 execution sends them, with credentials still masked. The command includes every flag that affects
 the request or selects the response: the method form (`-X` or `--head`), headers, body flag and
