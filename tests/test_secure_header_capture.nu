@@ -635,14 +635,14 @@ def test-fileless-header-correctness-and-secrecy [] {
         let duplicate = (run-command-process $root (
             "let result = (api get "
             + (($base + "/duplicate-headers") | to nuon)
-            + " --raw --no-history); let headers = $result.response.headers; if ($headers | get 'X-Duplicate') != 'second' { error make {msg: 'duplicate-header compatibility changed'} }; if ($headers | get 'x-mIxEd-DuPe') != 'second' { error make {msg: 'mixed-case duplicate did not keep final value/spelling'} }; if 'X-Mixed-Dupe' in ($headers | columns) { error make {msg: 'mixed-case duplicate kept the earlier alias'} }; if ($headers | get 'x.tRACE+id') != 'second' { error make {msg: 'metacharacter duplicate did not keep final value/spelling'} }; if 'X.Trace+ID' in ($headers | columns) { error make {msg: 'metacharacter duplicate kept the earlier alias'} }; if ($headers | get 'XxTraceeID') != 'distinct' { error make {msg: 'metacharacter header comparison was not literal'} }; if ($headers | get 'X-Marker-Like') != 'NURL_RESPONSE_META_static_BEGIN' { error make {msg: 'marker-like header changed'} }; print 'duplicate and marker headers parsed'"
+            + " --raw --no-history); let headers = $result.response.headers; if ($headers | get 'X-Duplicate') != 'first, second' { error make {msg: 'duplicate-header values were not folded'} }; if ($headers | get 'x-mIxEd-DuPe') != 'first, second' { error make {msg: 'mixed-case duplicate did not preserve values/spelling'} }; if 'X-Mixed-Dupe' in ($headers | columns) { error make {msg: 'mixed-case duplicate kept the earlier alias'} }; if ($headers | get 'x.tRACE+id') != 'first, second' { error make {msg: 'metacharacter duplicate did not preserve values/spelling'} }; if 'X.Trace+ID' in ($headers | columns) { error make {msg: 'metacharacter duplicate kept the earlier alias'} }; if ($headers | get 'XxTraceeID') != 'distinct' { error make {msg: 'metacharacter header comparison was not literal'} }; if ($headers | get 'X-Marker-Like') != 'NURL_RESPONSE_META_static_BEGIN' { error make {msg: 'marker-like header changed'} }; print 'duplicate and marker headers parsed'"
         ))
         assert equal $duplicate.exit_code 0 $"duplicate response-header parse failed: ($duplicate.stderr)"
 
         let trailers = (run-command-process $root (
             "let result = (api get "
             + (($base + "/trailers") | to nuon)
-            + " --raw); let headers = $result.response.headers; if $result.response.body != 'BODY' { error make {msg: 'trailers contaminated the body'} }; if ($headers | get 'x-TrAiLeR-CaSe') != 'trailer-value' { error make {msg: 'trailer spelling/value changed'} }; if ($headers | get 'x-MiXeD-TrAiLeR') != 'second' { error make {msg: 'mixed-case trailer duplicate changed'} }; if 'X-Mixed-Trailer' in ($headers | columns) { error make {msg: 'mixed-case trailer kept the earlier alias'} }; if ($headers | get 'Set-Cookie') != '******' { error make {msg: 'sensitive trailer was not masked'} }; print 'trailers separated and parsed safely'"
+            + " --raw); let headers = $result.response.headers; if $result.response.body != 'BODY' { error make {msg: 'trailers contaminated the body'} }; if ($headers | get 'x-TrAiLeR-CaSe') != 'trailer-value' { error make {msg: 'trailer spelling/value changed'} }; if ($headers | get 'x-MiXeD-TrAiLeR') != 'first, second' { error make {msg: 'mixed-case trailer duplicate changed'} }; if 'X-Mixed-Trailer' in ($headers | columns) { error make {msg: 'mixed-case trailer kept the earlier alias'} }; if ($headers | get 'X-Trailer-Repeat') != 'one, two' { error make {msg: 'repeated trailer values were not folded'} }; if ($headers | get 'x-Override') != 'trailer-value' { error make {msg: 'trailer did not override the response header'} }; if ($headers | get 'x-Override') == 'header-value, trailer-value' { error make {msg: 'trailer was combined across field sections'} }; if ($headers | get 'Set-Cookie') != '******' { error make {msg: 'sensitive trailer was not masked'} }; print 'trailers separated and parsed safely'"
         ))
         assert equal $trailers.exit_code 0 $"response-trailer parse failed: ($trailers.stderr)"
         let trailer_history_id = (api history list --limit 1 | first | get id)
@@ -785,6 +785,188 @@ def test-fileless-header-correctness-and-secrecy [] {
 
     let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
     assert-no-new-header-artifacts $baseline "correctness teardown"
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+    if $stop_failure != null { error make {msg: $stop_failure.msg} }
+}
+
+def test-repeated-header-folding-and-secrecy [] {
+    let root = (make-temp-dir "repeated-header-folding")
+    let infra = (make-temp-dir "repeated-header-folding-server")
+    let server = (surface-server $infra)
+    let failure = try {
+        surface-workspace $root $server
+        let base = $"http://127.0.0.1:($server.port)"
+        let response = (api get $"($base)/repeated-headers" --raw --no-history)
+        let headers = $response.response.headers
+
+        assert equal ($headers | get "Link") "</a>; rel=\"next\", </b>; rel=\"prev\""
+        assert equal ($headers | get "X-Custom") "one, two, three"
+        assert equal ($headers | get "x-alPHA") "1, 3, 5"
+        assert ("X-Alpha" not-in ($headers | columns)) "non-adjacent duplicate kept its earlier spelling"
+        assert equal ($headers | get "X-Beta") "2"
+        assert equal ($headers | get "X-Gamma") "4"
+        assert equal ($headers | get "Vary") "Accept-Encoding, Origin"
+        assert equal ($headers | get "WWW-Authenticate") "Digest realm=\"one\", Newauth realm=\"two\""
+        assert equal ($headers | get "Proxy-Authenticate") "Digest realm=\"proxy-one\", Newauth realm=\"proxy-two\""
+        assert equal ($headers | get "X-DUP") "a, b, c"
+        assert ("x-dup" not-in ($headers | columns)) "earlier duplicate spelling survived"
+        assert ("X-Dup" not-in ($headers | columns)) "middle duplicate spelling survived"
+        assert equal ($headers | get "X-Empty-Repeat") ", "
+        assert equal ($headers | get "X-Comma") "alpha,beta, gamma"
+        assert equal ($headers | get "X-Colon") "urn:one:two, https://example.test:8443/path"
+        assert equal ($headers | get "x.tRACE+id") "trace-one, trace-two"
+        assert ("X.Trace+ID" not-in ($headers | columns)) "metacharacter duplicate kept its earlier spelling"
+        let stress_expected = (1..25 | each {|index| $"v($index)" } | str join ", ")
+        assert equal ($headers | get "X-Stress") $stress_expected
+
+        for index in 1..15 {
+            let name = $"X-Single-($index)"
+            let value = ($headers | get $name)
+            assert equal ($value | describe) "string" $"single response header type changed: ($name)"
+            assert equal $value $"single-($index)" $"single response header value changed: ($name)"
+        }
+        let tracked_order = (
+            $headers
+            | columns
+            | where {|name| $name in [
+                "Link"
+                "X-Custom"
+                "x-alPHA"
+                "X-Beta"
+                "X-Gamma"
+                "Vary"
+                "WWW-Authenticate"
+                "Proxy-Authenticate"
+                "X-DUP"
+                "X-Empty-Repeat"
+                "X-Comma"
+                "X-Colon"
+                "x.tRACE+id"
+                "Set-Cookie"
+                "Set-Cookie2"
+                "X-Debug-Alpha"
+                "X-Debug-Beta"
+                "X-Stress"
+            ] }
+        )
+        assert equal $tracked_order [
+            "Link"
+            "X-Custom"
+            "x-alPHA"
+            "X-Beta"
+            "X-Gamma"
+            "Vary"
+            "WWW-Authenticate"
+            "Proxy-Authenticate"
+            "X-DUP"
+            "X-Empty-Repeat"
+            "X-Comma"
+            "X-Colon"
+            "x.tRACE+id"
+            "Set-Cookie"
+            "Set-Cookie2"
+            "X-Debug-Alpha"
+            "X-Debug-Beta"
+            "X-Stress"
+        ] "folded headers did not retain first-appearance position with last spelling"
+        for name in ["Set-Cookie" "Set-Cookie2" "X-Debug-Alpha" "X-Debug-Beta"] {
+            assert equal ($headers | get $name) "******" $"sensitive repeated header did not collapse to one mask: ($name)"
+        }
+        assert equal ($headers | columns | where $it == "Set-Cookie" | length) 1
+        assert equal ($headers | columns | where $it == "Set-Cookie2" | length) 1
+        assert equal ($response.response | columns) ["status" "status_text" "headers" "body" "time_ms" "size_bytes"]
+        assert ("headers_all" not-in ($response.response | columns)) "response schema gained headers_all"
+
+        let challenge_response = (api get $"($base)/sensitive-challenges" --raw --no-history)
+        assert equal ($challenge_response.response.headers | get "WWW-Authenticate") "******"
+        assert equal ($challenge_response.response.headers | get "Proxy-Authenticate") "******"
+
+        let redirected = (api get $"($base)/redirect-repeated" --follow-redirects --raw --no-history)
+        assert equal ($redirected.response.headers | get "Link") "</a>; rel=\"next\", </b>; rel=\"prev\""
+        assert (not (($redirected.response.headers | get "Link") | str contains "redirect-only")) "redirect headers were combined with the final block"
+
+        let surface_commands = [
+            $"api get (($base + '/repeated-headers') | to nuon) --raw --no-history | to nuon"
+            $"api get (($base + '/repeated-headers') | to nuon) --select headers.Link --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --include --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output pretty --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output body --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output raw --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output json --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output headers --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output status --no-history"
+            $"api get (($base + '/repeated-headers') | to nuon) --output none --no-history"
+            $"api get (($base + '/sensitive-challenges') | to nuon) --include --no-history"
+        ]
+        mut public_streams = []
+        for command in $surface_commands {
+            let rendered = (run-command-process $root $command)
+            assert equal $rendered.exit_code 0 $"repeated response-header surface failed: ($command): ($rendered.stderr)"
+            $public_streams = ($public_streams | append [$rendered.stdout $rendered.stderr])
+        }
+        let selected = (run-command-process $root $"api get (($base + '/repeated-headers') | to nuon) --select headers.X-Debug-Alpha --no-history")
+        assert equal $selected.exit_code 0
+        assert equal ($selected.stdout | str trim) "******"
+        $public_streams = ($public_streams | append [$selected.stdout $selected.stderr])
+
+        api get $"($base)/repeated-headers" --output none
+        let history_id = (api history list --limit 1 | first | get id)
+        let history_entry = (api history show $history_id)
+        assert equal ($history_entry.response.headers | get "Link") "</a>; rel=\"next\", </b>; rel=\"prev\""
+        assert equal ($history_entry.response.headers | get "X-Debug-Alpha") "******"
+        assert equal ($history_entry.response.headers | get "X-Debug-Beta") "******"
+        assert equal ($history_entry.response.headers | get "Set-Cookie") "******"
+        assert equal ($history_entry.response.headers | get "Set-Cookie2") "******"
+        assert (not (($history_entry | to nuon) | str contains "headers_all")) "history schema gained headers_all"
+
+        let resent = (api history resend $history_id --raw)
+        assert equal ($resent.response.headers | get "Link") "</a>; rel=\"next\", </b>; rel=\"prev\""
+        assert equal ($resent.response.headers | get "X-Debug-Beta") "******"
+
+        let history_json = ($root | path join "repeated-history.json")
+        let history_csv = ($root | path join "repeated-history.csv")
+        api history export --format json --output $history_json | ignore
+        api history export --format csv --output $history_csv | ignore
+        let persisted = (
+            [
+                (command-error-snapshot $root | to nuon)
+                (open $history_json --raw)
+                (open $history_csv --raw)
+                ($history_entry | to nuon)
+                ($resent | to nuon)
+            ]
+            | str join "\n"
+        )
+        let reader_commands = [
+            $"api history show ($history_id | to nuon) | to nuon"
+            $"api history get ($history_id | to nuon) | to nuon"
+            "api history export --format json"
+        ]
+        for command in $reader_commands {
+            let reader = (run-command-process $root $command)
+            assert equal $reader.exit_code 0 $"history repeated-header reader failed: ($command): ($reader.stderr)"
+            $public_streams = ($public_streams | append [$reader.stdout $reader.stderr])
+        }
+        let exposed = ($public_streams | str join "\n")
+        for secret in [
+            "COOKIE-FIRST-SENTINEL"
+            "COOKIE-SECOND-SENTINEL"
+            "COOKIE2-FIRST-SENTINEL"
+            "COOKIE2-SECOND-SENTINEL"
+            "SENSITIVE-LAST-SENTINEL"
+            "SENSITIVE-FIRST-SENTINEL"
+            "AUTH-LAST-SENTINEL"
+            "AUTH-FIRST-SENTINEL"
+        ] {
+            assert (not ($exposed | str contains $secret)) $"repeated response header leaked through a public stream: ($secret)"
+            assert (not ($persisted | str contains $secret)) $"repeated response header leaked through history/export bytes: ($secret)"
+        }
+        null
+    } catch {|error| $error }
+
+    let stop_failure = try { stop-command-error-server $server; null } catch {|error| $error }
     cleanup $root
     cleanup $infra
     if $failure != null { error make {msg: $failure.msg} }
@@ -1256,6 +1438,7 @@ export def run-suite-secure-header-capture [] {
     print "\n=== Fileless Response-Header Transport Tests ==="
     [
         (run-test "fileless headers preserve structured responses without secret/frame leaks" { test-fileless-header-correctness-and-secrecy })
+        (run-test "repeated response headers preserve values while masking each field line" { test-repeated-header-folding-and-secrecy })
         (run-test "fileless failures, retries, capability checks, and malformed frames create no artifacts" { test-fileless-failure-retry-and-capability-contracts })
         (run-test "unsupported curl fails before OAuth, files, history, or network side effects" { test-unsupported-curl-precedes-oauth-and-state })
         (run-test "fileless parallel, interruption, and redirected-temp paths create no artifacts" { test-fileless-parallel-interruption-and-redirected-temp })

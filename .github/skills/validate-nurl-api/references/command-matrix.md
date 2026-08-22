@@ -111,6 +111,14 @@ work: `pretty`, `raw`, `body`, `json`, `headers`, `status`, and `none`. `--outpu
 the exact undecorated payload text (including JSON scalar syntax and whitespace; nothing for an empty body), while the
 separate `--raw` flag returns the full result record and takes precedence over `--output`.
 
+Repeated response field lines are folded only within their final header or trailer section. Names
+compare ASCII-case-insensitively; values join with exact `, ` in wire order; first-appearance
+position and final spelling are retained. Each original line is classified before joining, so any
+sensitive name or credential-shaped value yields one `******`. `Set-Cookie`/`Set-Cookie2` reveal
+neither values nor count. Trailers continue to override headers, redirect blocks do not mix, and no
+`headers_all` field or other schema member is added. Exercise these contracts with the deterministic
+fixtures in `tests/test_secure_header_capture.nu` and legacy parser case in `tests/test_features.nu`.
+
 For every transferring surface, a framed curl transport failure exits nonzero with empty stdout and
 secret-free, non-ANSI stderr; it creates no history or `--save` output. HTTP 4xx and final 5xx remain
 typed exit-0 responses. `--retries N` means exactly `N+1` maximum attempts, and negative retry count
