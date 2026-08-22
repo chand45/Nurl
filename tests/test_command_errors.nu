@@ -307,7 +307,7 @@ try {
                 [System.Text.Encoding]::UTF8.GetBytes($payload)
             }
             $crlf = \"`r`n\"
-            $statusLine = if ($requestPath -like '/token*') { 'HTTP/1.1 ' + $tokenStatus + ' OAuth Response' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -eq '/redirect') { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
+            $statusLine = if ($requestPath -like '/token*') { 'HTTP/1.1 ' + $tokenStatus + ' OAuth Response' } elseif ($requestPath -eq '/http-error') { 'HTTP/1.1 503 Service Unavailable' } elseif ($requestPath -in @('/redirect', '/redirect-repeated')) { 'HTTP/1.1 302 Found' } elseif ($requestPath -eq '/empty-headers') { 'HTTP/1.1 204 No Content' } else { 'HTTP/1.1 200 OK' }
             $extraHeaders = if ($requestPath -eq '/sensitive-headers') {
                 'Set-Cookie: session=RESPONSE-COOKIE-SENTINEL; HttpOnly' + $crlf +
                 'X-Session-Token: RESPONSE-TOKEN-SENTINEL' + $crlf +
@@ -332,8 +332,55 @@ try {
                 'XxTraceeID: distinct' + $crlf +
                 'x.tRACE+id: second' + $crlf +
                 'X-Marker-Like: NURL_RESPONSE_META_static_BEGIN' + $crlf
+            } elseif ($requestPath -eq '/repeated-headers') {
+                $stress = ((1..25 | ForEach-Object { 'X-Stress: v' + $_ + $crlf }) -join '')
+                $singles = ((1..15 | ForEach-Object { 'X-Single-' + $_ + ': single-' + $_ + $crlf }) -join '')
+                'Link: </a>; rel=\"next\"' + $crlf +
+                'Link: </b>; rel=\"prev\"' + $crlf +
+                'X-Custom: one' + $crlf +
+                'X-Custom: two' + $crlf +
+                'X-Custom: three' + $crlf +
+                'X-Alpha: 1' + $crlf +
+                'X-Beta: 2' + $crlf +
+                'X-Alpha: 3' + $crlf +
+                'X-Gamma: 4' + $crlf +
+                'x-alPHA: 5' + $crlf +
+                'Vary: Accept-Encoding' + $crlf +
+                'Vary: Origin' + $crlf +
+                'WWW-Authenticate: Digest realm=\"one\"' + $crlf +
+                'WWW-Authenticate: Newauth realm=\"two\"' + $crlf +
+                'Proxy-Authenticate: Digest realm=\"proxy-one\"' + $crlf +
+                'Proxy-Authenticate: Newauth realm=\"proxy-two\"' + $crlf +
+                'x-dup: a' + $crlf +
+                'X-Dup: b' + $crlf +
+                'X-DUP: c' + $crlf +
+                'X-Empty-Repeat:' + $crlf +
+                'X-Empty-Repeat:' + $crlf +
+                'X-Comma: alpha,beta' + $crlf +
+                'X-Comma: gamma' + $crlf +
+                'X-Colon: urn:one:two' + $crlf +
+                'X-Colon: https://example.test:8443/path' + $crlf +
+                'X.Trace+ID: trace-one' + $crlf +
+                'x.tRACE+id: trace-two' + $crlf +
+                'Set-Cookie: session=COOKIE-FIRST-SENTINEL' + $crlf +
+                'Set-Cookie: session=COOKIE-SECOND-SENTINEL' + $crlf +
+                'Set-Cookie2: session=COOKIE2-FIRST-SENTINEL' + $crlf +
+                'Set-Cookie2: session=COOKIE2-SECOND-SENTINEL' + $crlf +
+                'X-Debug-Alpha: info' + $crlf +
+                'X-Debug-Alpha: Bearer SENSITIVE-LAST-SENTINEL' + $crlf +
+                'X-Debug-Beta: Bearer SENSITIVE-FIRST-SENTINEL' + $crlf +
+                'X-Debug-Beta: info' + $crlf +
+                $stress + $singles
+            } elseif ($requestPath -eq '/sensitive-challenges') {
+                'WWW-Authenticate: Digest realm=\"safe\"' + $crlf +
+                'WWW-Authenticate: Basic realm=\"AUTH-LAST-SENTINEL\"' + $crlf +
+                'Proxy-Authenticate: Bearer AUTH-FIRST-SENTINEL' + $crlf +
+                'Proxy-Authenticate: Newauth realm=\"safe\"' + $crlf
             } elseif ($requestPath -eq '/redirect') {
                 'Location: /sensitive-headers' + $crlf
+            } elseif ($requestPath -eq '/redirect-repeated') {
+                'Location: /repeated-headers' + $crlf +
+                'Link: </redirect-only>; rel=\"next\"' + $crlf
             } elseif ($requestPath -eq '/early-hints') {
                 'X-Final: final-value' + $crlf
             } elseif ($requestPath -eq '/case-headers') {
@@ -356,13 +403,17 @@ try {
                     $statusLine + $crlf +
                     'Content-Type: text/plain' + $crlf +
                     'Transfer-Encoding: chunked' + $crlf +
-                    'Trailer: x-TrAiLeR-CaSe, Set-Cookie' + $crlf + $crlf
+                    'X-Override: header-value' + $crlf +
+                    'Trailer: x-TrAiLeR-CaSe, Set-Cookie, X-Override' + $crlf + $crlf
                 )
                 $chunked = [System.Text.Encoding]::ASCII.GetBytes(
                     '4' + $crlf + 'BODY' + $crlf + '0' + $crlf +
                     'X-Mixed-Trailer: first' + $crlf +
                     'x-MiXeD-TrAiLeR: second' + $crlf +
+                    'X-Trailer-Repeat: one' + $crlf +
+                    'X-Trailer-Repeat: two' + $crlf +
                     'x-TrAiLeR-CaSe: trailer-value' + $crlf +
+                    'x-Override: trailer-value' + $crlf +
                     'Set-Cookie: trailer-secret-sentinel' + $crlf + $crlf
                 )
                 $stream.Write($trailerHeader, 0, $trailerHeader.Length)
@@ -648,11 +699,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 b'HTTP/1.1 200 OK\\r\\n'
                 b'Content-Type: text/plain\\r\\n'
                 b'Transfer-Encoding: chunked\\r\\n'
-                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie\\r\\n\\r\\n'
+                b'X-Override: header-value\\r\\n'
+                b'Trailer: x-TrAiLeR-CaSe, Set-Cookie, X-Override\\r\\n\\r\\n'
                 b'4\\r\\nBODY\\r\\n0\\r\\n'
                 b'X-Mixed-Trailer: first\\r\\n'
                 b'x-MiXeD-TrAiLeR: second\\r\\n'
+                b'X-Trailer-Repeat: one\\r\\n'
+                b'X-Trailer-Repeat: two\\r\\n'
                 b'x-TrAiLeR-CaSe: trailer-value\\r\\n'
+                b'x-Override: trailer-value\\r\\n'
                 b'Set-Cookie: trailer-secret-sentinel\\r\\n\\r\\n'
             )
             return
@@ -664,7 +719,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/empty-headers':
             self.connection.sendall(b'HTTP/1.1 204 No Content\\r\\n\\r\\n')
             return
-        status = 503 if self.path == '/http-error' else (302 if self.path == '/redirect' else 200)
+        status = 503 if self.path == '/http-error' else (302 if self.path in ['/redirect', '/redirect-repeated'] else 200)
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         if self.path == '/duplicate-headers':
@@ -676,8 +731,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('XxTraceeID', 'distinct')
             self.send_header('x.tRACE+id', 'second')
             self.send_header('X-Marker-Like', 'NURL_RESPONSE_META_static_BEGIN')
+        elif self.path == '/repeated-headers':
+            repeated = [
+                ('Link', '</a>; rel=\"next\"'),
+                ('Link', '</b>; rel=\"prev\"'),
+                ('X-Custom', 'one'),
+                ('X-Custom', 'two'),
+                ('X-Custom', 'three'),
+                ('X-Alpha', '1'),
+                ('X-Beta', '2'),
+                ('X-Alpha', '3'),
+                ('X-Gamma', '4'),
+                ('x-alPHA', '5'),
+                ('Vary', 'Accept-Encoding'),
+                ('Vary', 'Origin'),
+                ('WWW-Authenticate', 'Digest realm=\"one\"'),
+                ('WWW-Authenticate', 'Newauth realm=\"two\"'),
+                ('Proxy-Authenticate', 'Digest realm=\"proxy-one\"'),
+                ('Proxy-Authenticate', 'Newauth realm=\"proxy-two\"'),
+                ('x-dup', 'a'),
+                ('X-Dup', 'b'),
+                ('X-DUP', 'c'),
+                ('X-Empty-Repeat', ''),
+                ('X-Empty-Repeat', ''),
+                ('X-Comma', 'alpha,beta'),
+                ('X-Comma', 'gamma'),
+                ('X-Colon', 'urn:one:two'),
+                ('X-Colon', 'https://example.test:8443/path'),
+                ('X.Trace+ID', 'trace-one'),
+                ('x.tRACE+id', 'trace-two'),
+                ('Set-Cookie', 'session=COOKIE-FIRST-SENTINEL'),
+                ('Set-Cookie', 'session=COOKIE-SECOND-SENTINEL'),
+                ('Set-Cookie2', 'session=COOKIE2-FIRST-SENTINEL'),
+                ('Set-Cookie2', 'session=COOKIE2-SECOND-SENTINEL'),
+                ('X-Debug-Alpha', 'info'),
+                ('X-Debug-Alpha', 'Bearer SENSITIVE-LAST-SENTINEL'),
+                ('X-Debug-Beta', 'Bearer SENSITIVE-FIRST-SENTINEL'),
+                ('X-Debug-Beta', 'info'),
+            ]
+            repeated += [('X-Stress', 'v' + str(index)) for index in range(1, 26)]
+            repeated += [('X-Single-' + str(index), 'single-' + str(index)) for index in range(1, 16)]
+            for name, value in repeated:
+                self.send_header(name, value)
+        elif self.path == '/sensitive-challenges':
+            self.send_header('WWW-Authenticate', 'Digest realm=\"safe\"')
+            self.send_header('WWW-Authenticate', 'Basic realm=\"AUTH-LAST-SENTINEL\"')
+            self.send_header('Proxy-Authenticate', 'Bearer AUTH-FIRST-SENTINEL')
+            self.send_header('Proxy-Authenticate', 'Newauth realm=\"safe\"')
         elif self.path == '/redirect':
             self.send_header('Location', '/sensitive-headers')
+        elif self.path == '/redirect-repeated':
+            self.send_header('Location', '/repeated-headers')
+            self.send_header('Link', '</redirect-only>; rel=\"next\"')
         elif self.path == '/early-hints':
             self.send_header('X-Final', 'final-value')
         elif self.path == '/case-headers':
