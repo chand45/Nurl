@@ -259,6 +259,15 @@ def serialize-structured-body [content: any] {
     }
 }
 
+def validate-form-record [form: record] {
+    for field in ($form | transpose key value) {
+        let value_type = (state-base-type $field.value)
+        if $value_type not-in ["nothing" "string" "int" "float" "bool" "date" "duration" "filesize"] {
+            fail-command $"Form field '($field.key)' must be a scalar value; got ($value_type)"
+        }
+    }
+}
+
 def resolve-form-body [form: record] {
     {
         kind: "form"
@@ -472,22 +481,24 @@ def curl-args-to-string [
     $parts | str join " "
 }
 
-# URL-encode a single form value (application/x-www-form-urlencoded)
+# Encode one application/x-www-form-urlencoded component.
 def url-encode-form-value [s: string] {
     $s
-    | str replace --all "%" "%25"
-    | str replace --all "+" "%2B"
-    | str replace --all "&" "%26"
-    | str replace --all "=" "%3D"
-    | str replace --all "#" "%23"
-    | str replace --all " " "+"
+    | url encode --all
+    | str replace --all "%20" "+"
+    | str replace --all "%2A" "*"
+    | str replace --all "%2D" "-"
+    | str replace --all "%2E" "."
+    | str replace --all "%5F" "_"
 }
 
 # Encode a record as application/x-www-form-urlencoded
 def encode-form-data [data: record] {
+    validate-form-record $data
     $data | transpose key value | each {|kv|
         let k = (url-encode-form-value $kv.key)
-        let v = (url-encode-form-value ($kv.value | into string))
+        let value = ($kv.value | default "" | into string)
+        let v = (url-encode-form-value $value)
         $"($k)=($v)"
     } | str join "&"
 }
@@ -1306,6 +1317,17 @@ def execute-request [
     }
     assert-unique-header-names $final_headers
 
+    let final_form_body = if $body.kind == "form" {
+        let content = if $no_interpolate {
+            $body.content
+        } else {
+            interpolate-structured $body.content -e $resolved_vars --resolved --single-pass
+        }
+        encode-form-data $content
+    } else {
+        null
+    }
+
     let display_auth_context = (prepare-auth-context $auth_spec --display-only)
     let display_auth = ($display_auth_context.display? | default {})
     assert-safe-auth-headers $auth_spec
@@ -1333,14 +1355,7 @@ def execute-request [
         "none" => ""
         "encoded" => $body.content
         "structured-encoded" => $body.content
-        "form" => {
-            let content = if $no_interpolate {
-                $body.content
-            } else {
-                interpolate-structured $body.content -e $resolved_vars --resolved --single-pass
-            }
-            encode-form-data $content
-        }
+        "form" => $final_form_body
         "text" => {
             if $no_interpolate or $body.content == "" {
                 $body.content
@@ -1753,6 +1768,7 @@ export def "api post" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         # Form encoding takes precedence over --body/--body-file
@@ -1798,6 +1814,7 @@ export def "api put" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
@@ -1841,6 +1858,7 @@ export def "api patch" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {
@@ -1913,6 +1931,7 @@ export def "api request" [
     validate-output-mode $output
     validate-retry-options $retries $retry_delay
     require-curl-capability --dry-run=$dry_run
+    validate-form-record $form
     if $body_file != "" { read-body-file $body_file | ignore }
     with-api-debug $debug {
         let final_body = if not ($form | is-empty) {

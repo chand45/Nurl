@@ -323,7 +323,7 @@ api get "https://api.example.com/users" -H { "X-Custom-Header": "value" }
 # Using variables (from global or collection environment)
 api get "{{base_url}}/{{api_version}}/users"
 
-# Form-encoded POST (C4)
+# Form-encoded request (UTF-8 keys and scalar values are encoded byte-exactly)
 api post "https://api.example.com/login" --form { username: "alice", password: "secret" }
 
 # Follow redirects automatically (C6)
@@ -444,6 +444,11 @@ map for static/default/use templates, but extracted response values are treated 
 embedded `{{...}}` text cannot expand again. HTTP header names always remain literal. Structured
 body and form keys do interpolate; if two interpolated keys collide, the request fails before
 network I/O.
+
+Form fields use `application/x-www-form-urlencoded`: spaces become `+`; UTF-8 and every byte except
+ASCII letters, digits, `*`, `-`, `.`, and `_` become uppercase `%XX` escapes. Values must be scalar
+strings, numbers, booleans, dates, durations, or filesizes; null represents an empty value (`key=`).
+Structured form values fail before authentication or network I/O instead of being coerced.
 
 ```nushell
 # Global variables (available to all requests)
