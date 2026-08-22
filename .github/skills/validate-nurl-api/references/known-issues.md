@@ -334,3 +334,18 @@ bulk changes.
 - **Re-check:** run `tests/run-header-compat.nu` and `tests/run-body-compat.nu`. The local-server
   cases assert absolute wire bytes for literal, existing-path, body-file, form, binary, history,
   inline-chain, and remote-extracted-chain bodies, plus redirect and HEAD preview replay.
+
+## 29. FIXED: File-sourced request bodies lost significant bytes or changed after saving
+- **Old symptom:** `--body-file` trimmed leading/trailing whitespace and CRLF terminators, omitted
+  whitespace-only or empty bodies, and let non-UTF-8 input escape as a low-level Nushell type error.
+  Saved non-JSON files were tagged as JSON and gained quotes when later sent.
+- **Fix:** body files preserve exact UTF-8 text and body presence is tracked separately from content,
+  so an empty file still emits an explicit zero-length body. Saved requests now retain whether file
+  content is structured JSON or literal text. Non-UTF-8 files use the shared clean error contract
+  before network or state mutation.
+- **Compatibility:** valid JSON files keep structured interpolation. Existing saved entries without
+  the new literal marker are not migrated because string content is ambiguous; update one with
+  `api request update --body-file` to record the new discriminator.
+- **Re-check:** run `tests/run-body-compat.nu`. Its local-server matrix covers whitespace, LF/CRLF,
+  empty bodies, direct/saved/update parity, JSON interpolation, history replay, dry-run/export, and
+  clean non-UTF-8 rejection.

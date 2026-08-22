@@ -336,6 +336,246 @@ def test-request-body-literal-at-boundary [] {
     if $failure != null { error make {msg: $failure.msg} }
 }
 
+def test-request-body-file-fidelity [] {
+    let root = (make-temp-dir "request-body-file-fidelity")
+    let infra = (make-temp-dir "request-body-file-fidelity-server")
+    let server = (start-request-body-server $infra)
+    let failure = try {
+        $env.API_ROOT = $root
+        api init | ignore
+        let base = $"http://127.0.0.1:($server.port)"
+        let cases = [
+            {name: "post-spaces", method: "POST", content: "  alpha \r\n"}
+            {name: "put-whitespace", method: "PUT", content: " \t\r\n"}
+            {name: "patch-crlf", method: "PATCH", content: "line1\r\nline2\r\n"}
+            {name: "request-tabs", method: "REQUEST", content: "\tvalue\t"}
+        ]
+        for case in $cases {
+            let body_path = ($root | path join $"($case.name).txt")
+            $case.content | save -f $body_path
+            let url = $"($base)/($case.name)"
+            match $case.method {
+                "POST" => { api post $url --body-file $body_path --raw --no-history | ignore }
+                "PUT" => { api put $url --body-file $body_path --raw --no-history | ignore }
+                "PATCH" => { api patch $url --body-file $body_path --raw --no-history | ignore }
+                _ => { api request -m DELETE $url --body-file $body_path --raw --no-history | ignore }
+            }
+            assert equal (request-body-event $server $"/($case.name)").body $case.content $"($case.name): body-file bytes changed"
+        }
+
+        let empty_path = ($root | path join "empty.txt")
+        "" | save -f $empty_path
+        let before_empty_history = (request-body-history-ids $root)
+        let empty_result = (api post $"($base)/empty-file" --body-file $empty_path --raw)
+        let empty_event = (request-body-event $server "/empty-file")
+        assert equal $empty_event.body "" "Empty body file changed on the wire"
+        assert equal $empty_result.request.body "" "Empty body file was reported as an absent body"
+        assert equal (
+            $empty_event.headers | where name == "Content-Length" | first | get value
+        ) "0" "Empty body file was omitted instead of sent with zero length"
+        let empty_history_id = (request-body-new-history-id $root $before_empty_history)
+        assert equal (api history get $empty_history_id).request.body "" "Empty body file was omitted from history"
+        api history resend $empty_history_id --raw | ignore
+        let empty_events = (request-body-events $server | where path == "/empty-file")
+        assert equal ($empty_events | get body) ["" ""] "Empty body file history replay lost the explicit body"
+        for event in $empty_events {
+            assert equal (
+                $event.headers | where name == "Content-Length" | first | get value
+            ) "0" "Empty body-file execution or history replay omitted the explicit body"
+        }
+
+        assert-request-body-preview-case $root $server $infra (
+            $"api post (($base + '/empty-preview') | to nuon) --body-file ($empty_path | to nuon) --raw --no-history"
+        )
+        for event in (request-body-events $server | where path == "/empty-preview") {
+            assert equal (
+                $event.headers | where name == "Content-Length" | first | get value
+            ) "0" "Empty body-file dry-run or execution omitted the explicit body"
+        }
+
+        api vars set payload "saved-value" | ignore
+        let plain_path = ($root | path join "body.txt")
+        "alpha" | save -f $plain_path
+        api post $"($base)/saved-text" --body-file $plain_path --raw --no-history | ignore
+        api request create exact-file POST $"($base)/saved-text" --body-file $plain_path -c body-files | ignore
+        let saved_path = ($root | path join "collections" "body-files" "requests" "exact-file.nuon")
+        assert equal (open $saved_path | get body.type) "text" "Saved non-JSON body was not tagged as text"
+        assert equal (open $saved_path | get body.literal) true "Saved non-JSON body omitted its literal discriminator"
+        api send exact-file -c body-files --raw --no-history | ignore
+        assert equal (
+            request-body-events $server | where path == "/saved-text" | get body
+        ) ["alpha" "alpha"] "Saved non-JSON body diverged from direct --body-file execution"
+
+        let updated_path = ($root | path join "updated.txt")
+        let updated_body = "\tupdated\r\n"
+        $updated_body | save -f $updated_path
+        api request update exact-file --body-file $updated_path -c body-files | ignore
+        assert equal (open $saved_path | get body.type) "text" "Updated non-JSON body was not tagged as text"
+        api send exact-file -c body-files --raw --no-history | ignore
+        assert equal (request-body-event $server "/saved-text").body $updated_body "Updated body-file bytes changed"
+
+        let json_path = ($root | path join "saved.json")
+        '{"value":"{{payload}}"}' | save -f $json_path
+        api request create json-file POST $"($base)/saved-json" --body-file $json_path -c body-files | ignore
+        let saved_json_path = ($root | path join "collections" "body-files" "requests" "json-file.nuon")
+        assert equal (open $saved_json_path | get body.type) "json" "Saved JSON body changed its compatible type tag"
+        api send json-file -c body-files --raw --no-history | ignore
+        assert equal (
+            request-body-event $server "/saved-json" | get body | from json | get value
+        ) "saved-value" "Saved JSON body-file lost structured interpolation"
+
+        let json_string_path = ($root | path join "saved-string.json")
+        '"hello"' | save -f $json_string_path
+        api request create json-string-file POST $"($base)/saved-json-string" --body-file $json_string_path -c body-files | ignore
+        api send json-string-file -c body-files --raw --no-history | ignore
+        let json_string_chain = (api chain run [{request: json-string-file}] --quiet)
+        assert equal $json_string_chain.success true "Saved JSON-string chain failed"
+        assert equal (
+            request-body-events $server | where path == "/saved-json-string" | get body
+        ) ['"hello"' '"hello"'] "Saved JSON-string body diverged between send and chain execution"
+
+        let legacy_path = ($root | path join "collections" "body-files" "requests" "legacy.nuon")
+        {
+            name: legacy
+            collection: body-files
+            method: POST
+            url: $"($base)/legacy-json-string"
+            headers: {}
+            body: {type: json, content: "<legacy/>"}
+            auth: null
+        } | to nuon --indent 4 | save -f $legacy_path
+        api send legacy -c body-files --raw --no-history | ignore
+        assert equal (
+            request-body-event $server "/legacy-json-string" | get body
+        ) '"<legacy/>"' "Legacy ambiguous JSON-string request behavior changed"
+
+        let legacy_text_path = ($root | path join "collections" "body-files" "requests" "legacy-text.nuon")
+        {
+            name: legacy-text
+            collection: body-files
+            method: POST
+            url: $"($base)/legacy-text"
+            headers: {}
+            body: {type: text, content: "<legacy-text/>"}
+            auth: null
+        } | to nuon --indent 4 | save -f $legacy_text_path
+        api send legacy-text -c body-files --raw --no-history | ignore
+        assert equal (
+            request-body-event $server "/legacy-text" | get body
+        ) '"<legacy-text/>"' "Legacy unmarked text request behavior changed"
+
+        let legacy_null_path = ($root | path join "collections" "body-files" "requests" "legacy-null.nuon")
+        {
+            name: legacy-null
+            collection: body-files
+            method: POST
+            url: $"($base)/legacy-json-null"
+            headers: {}
+            body: {type: json, content: null}
+            auth: null
+        } | to nuon --indent 4 | save -f $legacy_null_path
+        api send legacy-null -c body-files --raw --no-history | ignore
+        assert equal (
+            request-body-event $server "/legacy-json-null" | get headers | where name == "Content-Length" | length
+        ) 0 "Legacy JSON-null request changed from absent to explicit null body"
+
+        let no_body_chain = (api chain run [{
+            method: GET
+            url: $"($base)/chain-no-body"
+        }] --quiet)
+        assert equal $no_body_chain.success true "Bodiless chain request failed"
+        assert equal (
+            request-body-event $server "/chain-no-body" | get headers | where name == "Content-Length" | length
+        ) 0 "Bodiless chain request gained an explicit empty body"
+
+        let preview_path = ($root | path join "preview.txt")
+        let preview_body = "  preview\t  "
+        $preview_body | save -f $preview_path
+        assert-request-body-preview-case $root $server $infra (
+            $"api post (($base + '/preview-file') | to nuon) --body-file ($preview_path | to nuon) --raw --no-history"
+        )
+        assert equal (
+            request-body-events $server | where path == "/preview-file" | get body
+        ) [$preview_body $preview_body] "Body-file dry-run changed whitespace-significant bytes"
+
+        api request create export-file POST $"($base)/export-file" --body-file $preview_path -c body-files | ignore
+        let before_export = (request-body-events $server | length)
+        let exported = (run-command-process $root "api request export export-file -c body-files")
+        assert equal $exported.exit_code 0 $"Body-file export failed: ($exported.stderr)"
+        assert equal ($exported.stderr | str trim) "" "Body-file export wrote stderr"
+        let export_line = ($exported.stdout | str trim)
+        let rendering = (request-body-preview-rendering $server $export_line $infra)
+        let export_replay = if $nu.os-info.name == "windows" {
+            test-complete-result (do { ^curl ...$rendering.args } | complete)
+        } else {
+            test-complete-result (do {
+                cd $infra
+                ^sh -c $export_line
+            } | complete)
+        }
+        assert equal $export_replay.exit_code 0 $"Body-file exported curl failed: ($export_replay.stderr)"
+        api send export-file -c body-files --raw --no-history | ignore
+        let export_events = (request-body-events $server | skip $before_export)
+        assert equal ($export_events | length) 2 "Exported curl and saved send did not both execute"
+        assert equal ($export_events | get body) [$preview_body $preview_body] "Request export changed body-file bytes"
+
+        api request create empty-export POST $"($base)/empty-export" --body-file $empty_path -c body-files | ignore
+        let before_empty_export = (request-body-events $server | length)
+        let empty_exported = (run-command-process $root "api request export empty-export -c body-files")
+        assert equal $empty_exported.exit_code 0 $"Empty body-file export failed: ($empty_exported.stderr)"
+        let empty_export_line = ($empty_exported.stdout | str trim)
+        let empty_rendering = (request-body-preview-rendering $server $empty_export_line $infra)
+        let empty_export_replay = if $nu.os-info.name == "windows" {
+            test-complete-result (do { ^curl ...$empty_rendering.args } | complete)
+        } else {
+            test-complete-result (do {
+                cd $infra
+                ^sh -c $empty_export_line
+            } | complete)
+        }
+        assert equal $empty_export_replay.exit_code 0 $"Empty exported curl failed: ($empty_export_replay.stderr)"
+        api send empty-export -c body-files --raw --no-history | ignore
+        let empty_export_events = (request-body-events $server | skip $before_empty_export)
+        assert equal ($empty_export_events | length) 2 "Empty exported curl and saved send did not both execute"
+        for event in $empty_export_events {
+            assert equal (
+                $event.headers | where name == "Content-Length" | first | get value
+            ) "0" "Empty body-file export or saved send omitted the explicit body"
+        }
+        let empty_chain = (api chain run [{request: empty-export}] --quiet)
+        assert equal $empty_chain.success true "Saved empty body-file chain failed"
+        assert equal (
+            request-body-event $server "/empty-export" | get headers | where name == "Content-Length" | first | get value
+        ) "0" "Saved empty body-file chain omitted the explicit body"
+
+        let binary_path = ($root | path join "binary.bin")
+        0x[ff fe 00 41 0d 0a] | save -f $binary_path
+        let before_binary = (request-body-events $server | length)
+        let binary_result = (run-command-process $root (
+            $"api post (($base + '/binary-file') | to nuon) --body-file ($binary_path | to nuon) --raw --no-history"
+        ))
+        assert ($binary_result.exit_code != 0) "Non-UTF-8 body file unexpectedly succeeded"
+        assert equal ($binary_result.stdout | str trim) "" "Non-UTF-8 body-file failure wrote stdout"
+        assert ($binary_result.stderr | str contains "must contain valid UTF-8 text") $"Non-UTF-8 body-file error was not actionable: ($binary_result.stderr)"
+        assert equal $binary_result.stderr ($binary_result.stderr | ansi strip) "Non-UTF-8 body-file error emitted ANSI"
+        assert equal (request-body-events $server | length) $before_binary "Non-UTF-8 body file reached the network"
+
+        let before_update = (open $saved_path --raw)
+        let binary_update = (run-command-process $root (
+            $"api request update exact-file --body-file ($binary_path | to nuon) -c body-files"
+        ))
+        assert ($binary_update.exit_code != 0) "Non-UTF-8 saved-request update unexpectedly succeeded"
+        assert equal ($binary_update.stdout | str trim) "" "Non-UTF-8 update failure wrote stdout"
+        assert ($binary_update.stderr | str contains "must contain valid UTF-8 text") "Non-UTF-8 update error was not actionable"
+        assert equal (open $saved_path --raw) $before_update "Rejected binary update mutated the saved request"
+        null
+    } catch {|error| $error}
+    try { stop-request-body-server $server } catch {}
+    cleanup $root
+    cleanup $infra
+    if $failure != null { error make {msg: $failure.msg} }
+}
+
 def test-request-body-json-boundary [] {
     let root = (make-temp-dir "request-body-json")
     let infra = (make-temp-dir "request-body-json-server")
@@ -1217,6 +1457,7 @@ def test-request-body-interpolated-header-safety [] {
 def run-suite-request-body []: nothing -> list<record> {
     [
         (run-test "request body: @-leading data is always literal" { test-request-body-literal-at-boundary })
+        (run-test "request body: body files preserve exact text and fail cleanly on binary" { test-request-body-file-fidelity })
         (run-test "request body: JSON interpolation precedes serialization" { test-request-body-json-boundary })
         (run-test "request body: form interpolation precedes URL encoding" { test-request-body-form-boundary })
         (run-test "request body: tables survive vars, history, and chain flows" { test-request-body-table-flows })
