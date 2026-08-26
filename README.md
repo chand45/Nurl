@@ -418,13 +418,18 @@ dropped, entity headers such as `Content-Type`, `Content-Length`, and `Transfer-
 dropped too. Same-origin hops preserve caller headers and managed auth. A scheme, host, or port
 change strips all managed auth and every caller header recognized by the shared sensitive-header
 policy, while retaining non-sensitive headers. Redirect targets must remain credential-free HTTP
-or HTTPS URLs.
+or HTTPS URLs. `api head` and `api options` support the same `--follow-redirects` policy. Nurl
+passes curl `-q` first on every transfer so user curl configuration cannot silently enable
+curl-managed redirects or trusted credential forwarding.
 
 Raw/JSON redirected results add ordered `redirects: [{status, url}]` metadata and
 `effective_url`; non-redirected result schemas and history keep the original request URL. Verbose
 pretty output prints each hop. Dry-run keeps `-L` last and omits `-X` where curl can infer the same
 GET/POST behavior. For methods whose full multi-hop semantics cannot be represented by one curl
-command, the preview is first-hop-equivalent; live Nurl execution remains authoritative.
+command, the preview is first-hop-equivalent; live Nurl execution remains authoritative. A
+replayed dry-run/export command is **not credential-safe beyond its first hop** because one curl
+process cannot enforce Nurl's custom cross-origin sensitive-header policy. Do not execute an
+authenticated preview/export against an untrusted redirect chain.
 `--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted

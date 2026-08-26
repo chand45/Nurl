@@ -268,7 +268,15 @@ export def url-origin [url: string] {
 }
 
 export def same-origin [left: string, right: string] {
-    (url-origin $left) == (url-origin $right)
+    let left_origin = try { {value: (url-origin $left), error: null} } catch { {value: null, error: true} }
+    if $left_origin.error != null {
+        return false
+    }
+    let right_origin = try { {value: (url-origin $right), error: null} } catch { {value: null, error: true} }
+    if $right_origin.error != null {
+        return false
+    }
+    $left_origin.value == $right_origin.value
 }
 
 def strip-sensitive-request-headers [headers: record] {
@@ -555,6 +563,12 @@ def assert-safe-auth-headers [auth: any] {
             }
             assert-unique-header-names {Authorization: $"($SAML_AUTH_SCHEME) ($token)"}
         }
+        "basic" => {
+            let username = ($auth.username? | default "" | into string)
+            let password = ($auth.password? | default "" | into string)
+            let encoded = $"($username):($password)" | encode base64
+            assert-unique-header-names {Authorization: $"Basic ($encoded)"}
+        }
         "apikey_header" => {
             let name = ($auth.header_name? | default "" | into string)
             let value = ($auth.key? | default "" | into string)
@@ -575,6 +589,7 @@ def build-curl-args [
 ] {
     let max_time = if $timeout == "" { get-timeout | into string } else { $timeout }
     mut args = [
+        "-q"                    # Disable curlrc; must be curl's first option
         "-s"                    # Silent mode
         "-S"                    # Show errors
         "--globoff"             # Treat literal braces/brackets in URLs as data
@@ -632,7 +647,7 @@ def build-curl-args-for-display [
     auth?: record
     --follow-redirects
 ] {
-    mut args = ["--globoff"]
+    mut args = ["-q" "--globoff"]
     let normalized_method = ($method | ascii-upcase)
 
     if $normalized_method == "HEAD" {
@@ -741,6 +756,7 @@ def build-curl-args-binary [
 ] {
     let max_time = if $timeout == "" { get-timeout | into string } else { $timeout }
     mut args = [
+        "-q"
         "-s"
         "-S"
         "--globoff"
@@ -974,6 +990,8 @@ def parse-response-parts [body_raw: string, headers_raw: string, meta_part: stri
 def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_code: int] {
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
     let ending = $"NURL_RESPONSE_META_($token)_END"
+    let redirect_begin = $"NURL_RESPONSE_REDIRECT_($token)_BEGIN"
+    let redirect_end = $"NURL_RESPONSE_REDIRECT_($token)_END"
     let begin_parts = ($stderr | split row $begin)
     if ($begin_parts | length) != 2 {
         fail-command "Curl did not return trusted response metadata"
@@ -985,12 +1003,22 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     if not (($end_parts | get 1 | str trim) | is-empty) {
         fail-command "Curl returned malformed response metadata framing"
     }
+    let framed = ($end_parts | get 0)
+    let redirect_parts = ($framed | split row $redirect_begin)
+    if ($redirect_parts | length) != 2 {
+        fail-command "Curl returned malformed redirect metadata framing"
+    }
+    let redirect_end_parts = ($redirect_parts | get 1 | split row $redirect_end)
+    if ($redirect_end_parts | length) != 2 or (not (($redirect_end_parts | get 1 | str trim | is-empty))) {
+        fail-command "Curl returned malformed redirect metadata framing"
+    }
+    let redirect_url = ($redirect_end_parts | get 0 | str trim)
     let metadata = try {
-        $end_parts | get 0 | str trim | from json
+        $redirect_parts | get 0 | str trim | from json
     } catch {
         fail-command "Curl returned malformed structured response metadata"
     }
-    let required = ["status" "time_total" "size_download" "size_header" "exit_code" "redirect_url" "num_redirects"]
+    let required = ["status" "time_total" "size_download" "size_header" "exit_code" "num_redirects"]
     for field in $required {
         if $field not-in ($metadata | columns) {
             fail-command "Curl returned incomplete structured response metadata"
@@ -1004,9 +1032,6 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     if $metadata_exit != $expected_exit_code {
         fail-command "Curl response metadata did not match the transfer result"
     }
-    if ($metadata.redirect_url | describe) != "string" {
-        fail-command "Curl returned an invalid redirect target"
-    }
     let redirect_count = try {
         $metadata.num_redirects | into int
     } catch {
@@ -1017,7 +1042,7 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     }
     {
         diagnostics: ($begin_parts | get 0 | str trim)
-        metadata: $metadata
+        metadata: ($metadata | insert redirect_url $redirect_url)
     }
 }
 
@@ -1037,10 +1062,16 @@ def curl-with-fileless-metadata [
     let token = (random uuid | str replace --all "-" "")
     let begin = $"NURL_RESPONSE_META_($token)_BEGIN"
     let ending = $"NURL_RESPONSE_META_($token)_END"
+    let redirect_begin = $"NURL_RESPONSE_REDIRECT_($token)_BEGIN"
+    let redirect_end = $"NURL_RESPONSE_REDIRECT_($token)_END"
     let write_out = (
         "%{stderr}\n"
         + $begin
-        + "\n{\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"size_header\":\"%{size_header}\",\"exit_code\":\"%{exitcode}\",\"redirect_url\":\"%{redirect_url}\",\"num_redirects\":\"%{num_redirects}\"}\n"
+        + "\n{\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"size_header\":\"%{size_header}\",\"exit_code\":\"%{exitcode}\",\"num_redirects\":\"%{num_redirects}\"}\n"
+        + $redirect_begin
+        + "\n%{redirect_url}\n"
+        + $redirect_end
+        + "\n"
         + $ending
         + "\n"
     )
@@ -1378,8 +1409,14 @@ def transport-secret-values [headers: record, auth: any] {
         | where {|field| $field.key =~ '(?i)(token|secret|password|key)' }
         | each {|field| try { $field.value | into string } catch { "" } }
     }
+    let derived_basic = if $auth != null and ($auth.type? | default "none") == "basic" {
+        [$"($auth.username):($auth.password)" | encode base64]
+    } else {
+        []
+    }
     $header_values
     | append $auth_values
+    | append $derived_basic
     | where {|value| not ($value | str trim | is-empty) }
     | uniq
 }
@@ -2651,12 +2688,13 @@ export def "api head" [
     --select (-s): string = ""           # Select a field (dot-path)
     --verbose (-v)                       # Show request + response headers
     --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
     require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let result = (execute-request "HEAD" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run)
+        let result = (execute-request "HEAD" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects)
         if $result == null { return null }
         if $raw or $output != "pretty" or $select != "" {
             apply-output-selection $result $output $select $raw $verbose $include $save
@@ -2680,12 +2718,13 @@ export def "api options" [
     --select (-s): string = ""           # Select a field (dot-path)
     --verbose (-v)                       # Show request + response headers
     --include (-I)                       # Include response headers above body
+    --follow-redirects (-L)              # Follow HTTP redirects
     --save (-S): string = ""             # Save response body to file
 ] {
     validate-output-mode $output
     require-curl-capability --dry-run=$dry_run
     with-api-debug $debug {
-        let result = (execute-request "OPTIONS" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run)
+        let result = (execute-request "OPTIONS" $url -H $headers --auth-spec $auth --no-history=$no_history --dry-run=$dry_run --follow-redirects=$follow_redirects)
         if $result == null { return null }
         apply-output-selection $result $output $select $raw $verbose $include $save
     }

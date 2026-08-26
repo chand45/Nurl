@@ -310,7 +310,7 @@ def acquire-oauth2-token [
     } else { "" }
 
     let output = (do {
-        curl -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $"($body)($scope_param)" --write-out "\n%{http_code}"
+        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $"($body)($scope_param)" --write-out "\n%{http_code}"
     } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 token request failed")
@@ -361,7 +361,7 @@ def refresh-oauth2-token [name: string] {
     let body = $"grant_type=refresh_token&refresh_token=($refresh_token)&client_id=($config.client_id)&client_secret=($config.client_secret)"
 
     let output = (do {
-        curl -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $body --write-out "\n%{http_code}"
+        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $body --write-out "\n%{http_code}"
     } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 refresh failed")

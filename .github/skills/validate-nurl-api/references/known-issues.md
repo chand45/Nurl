@@ -382,6 +382,11 @@ bulk changes.
 - **Compatibility:** final response/output/history behavior is preserved. Redirected raw/JSON
   results conditionally add ordered hop metadata and an effective URL. Dry-run remains a single
   curl command and is first-hop-equivalent where curl cannot represent Nurl's full custom-method
-  redirect policy.
+  redirect policy. Live Basic auth now synthesizes the Authorization header directly so curl
+  cannot copy userinfo into redirect metadata. ASCII, colon, empty, and special-character
+  credentials are wire-equivalent. Non-ASCII credentials use UTF-8 (recommended by RFC 7617 and
+  consistent with UTF-8 Unix locales) instead of the active Windows ANSI code page. Dry-run/export
+  retain their masked `-u` rendering, but replayed single-curl commands cannot enforce Nurl's
+  custom cross-origin header stripping and are not credential-safe beyond the first hop.
 - **Re-check:** run `tests/run-redirect-compat.nu` on Nushell 0.89 and current, then
   `tests/run-header-compat.nu`, `tests/run-body-compat.nu`, and the full `tests/run.nu`.

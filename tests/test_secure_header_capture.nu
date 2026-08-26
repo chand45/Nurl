@@ -213,7 +213,7 @@ public static class FakeCurl
     {
         string version = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_VERSION") ?? "8.13.0";
         string log = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_LOG");
-        if (args.Length > 0 && args[0] == "--version")
+        if ((args.Length > 0 && args[0] == "--version") || (args.Length > 1 && args[0] == "-q" && args[1] == "--version"))
         {
             if (!String.IsNullOrEmpty(log))
             {
@@ -567,7 +567,7 @@ exit 0' | str replace "TRAILER_TEXT" $trailer
 exit 99'
         }
         $"#!/bin/sh
-if [ \"x$1\" = \"x--version\" ]; then
+if [ \"x$1\" = \"x--version\" ] || { [ \"x$1\" = \"x-q\" ] && [ \"x$2\" = \"x--version\" ]; }; then
   echo version >> \"$NURL_FAKE_CURL_LOG\"
   if [ -n \"$NURL_FAKE_CURL_VERSION_LINE\" ]; then
     printf \"%s\\n\" \"$NURL_FAKE_CURL_VERSION_LINE\"

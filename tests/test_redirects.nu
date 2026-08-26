@@ -106,6 +106,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.redirect(status, 'http://user:REDIRECT-SECRET@127.0.0.1:%d/final' % servers['b'].server_port)
             elif target == 'credential-query':
                 self.redirect(status, '/final?api_key=REDIRECT-QUERY-SECRET')
+            elif target == 'inject-quote':
+                self.redirect(status, '/final\",\"status\":\"599')
+            elif target == 'inject-backslash':
+                self.redirect(status, r'/final\\redirect')
+            elif target == 'inject-size':
+                self.redirect(status, '/final\",\"size_header\":\"9999\",\"size_download\":\"9999')
+            elif target == 'bare-quote':
+                self.redirect(status, '/final\"')
             else:
                 self.redirect(status, '/final' + suffix)
             return
@@ -170,6 +178,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_PATCH = handle_request
     do_DELETE = handle_request
     do_HEAD = handle_request
+    do_OPTIONS = handle_request
 
 servers['a'] = http.server.HTTPServer(('127.0.0.1', 0), Handler)
 servers['b'] = http.server.HTTPServer(('127.0.0.1', 0), Handler)
@@ -357,6 +366,9 @@ def test-redirect-method-body-matrix [] {
         assert equal (redirect-events-for $server body-file | last | get body) "FILE-BODY"
         api patch $"($base)/r/307/same?case=form" --form {a: "1 2"} -L --raw --no-history | ignore
         assert equal (redirect-events-for $server form | last | get body) "a=1+2"
+        let long_body = (0..8200 | each { "x" } | str join)
+        api post $"($base)/r/307/same?case=stdin-body" -b $long_body -L --raw --no-history | ignore
+        assert equal (redirect-events-for $server stdin-body | get body) [$long_body $long_body]
         api post $"($base)/r/302/same?case=entity-drop" -b body -H {
             Content-Encoding: identity
             Content-Language: en
@@ -442,6 +454,49 @@ def test-redirect-credential-boundaries [] {
             assert equal (redirect-header-values $final X-Keep) [KEEP-REDIRECT-SENTINEL]
         }
 
+        for credentials in [
+            {name: ascii, username: "user", password: "p:a ss"}
+            {name: utf8, username: "ユーザー", password: "päss:密"}
+        ] {
+            let expected = $"Basic ($"($credentials.username):($credentials.password)" | encode base64)"
+            let direct_label = $"basic-bytes-($credentials.name)"
+            api get $"($base)/final?case=($direct_label)" --auth {
+                type: basic
+                username: $credentials.username
+                password: $credentials.password
+            } --raw --no-history | ignore
+            assert equal (redirect-header-values (redirect-events-for $server $direct_label | last) Authorization) [$expected]
+            for status in [301 302 303 307 308] {
+                let label = $"basic-($credentials.name)-($status)"
+                api get $"($base)/r/($status)/same?case=($label)" --auth {
+                    type: basic
+                    username: $credentials.username
+                    password: $credentials.password
+                } -L --raw --no-history | ignore
+                assert equal (redirect-header-values (redirect-events-for $server $label | last) Authorization) [$expected]
+            }
+            let cross_label = $"basic-cross-($credentials.name)"
+            api get $"($base)/r/307/cross?case=($cross_label)" --auth {
+                type: basic
+                username: $credentials.username
+                password: $credentials.password
+            } -L --raw --no-history | ignore
+            assert (redirect-header-values (redirect-events-for $server $cross_label | last) Authorization | is-empty)
+        }
+        let basic_binary = ($root | path join "basic-binary.bin")
+        api get $"($base)/r/307/same?case=basic-binary" --auth {
+            type: basic
+            username: binary-user
+            password: "binary:password"
+        } -L --binary-save $basic_binary --output none --no-history
+        assert equal (redirect-header-values (redirect-events-for $server basic-binary | last) Authorization) [
+            $"Basic ($"binary-user:binary:password" | encode base64)"
+        ]
+        let basic_preview = (run-command-process $root $"api get (($base + '/final') | to nuon) --auth {type: basic, username: user, password: secret} --dry-run")
+        assert equal $basic_preview.exit_code 0
+        assert ($basic_preview.stdout | str contains "-u '******:******'")
+        assert (not ($basic_preview.stdout | str contains "Basic "))
+
         let persisted_secret = "CROSS-HISTORY-REDIRECT-SENTINEL"
         let guarded = (run-command-process $root (
             "api get "
@@ -473,6 +528,53 @@ def test-redirect-safety-limit-and-retries [] {
             let request_count = ((redirect-events $server | length) - $before)
             assert equal $request_count 1 $"fatal redirect refusal was retried: ($target), requests=($request_count)"
         }
+        for target in [inject-quote inject-backslash inject-size bare-quote] {
+            let before = (redirect-events $server | length)
+            let one_hop = (api get $"($base)/r/302/($target)" --retries 1 --raw --no-history)
+            assert equal $one_hop.response.status 302 $"metadata injection changed status without follow: ($target)"
+            assert equal ((redirect-events $server | length) - $before) 1 $"metadata injection triggered retry: ($target)"
+            let followed = (api get $"($base)/r/302/($target)" -L --raw --no-history)
+            assert equal $followed.response.status 200 $"escaped redirect target did not follow: ($target)"
+            assert equal $followed.request.url $"($base)/r/302/($target)"
+        }
+        let injected_history = (api get $"($base)/r/302/inject-size" --raw)
+        assert equal $injected_history.response.status 302
+        assert equal (api history list --limit 1 | first | get status) 302
+        let injected_output = (run-command-process $root $"api get (($base + '/r/302/inject-size') | to nuon) --output status --no-history")
+        assert equal $injected_output.exit_code 0
+        assert equal ($injected_output.stdout | str trim) "302"
+
+        let schemeless_label = "schemeless-cross"
+        let schemeless = (api get $"127.0.0.1:($server.ports.a)/r/307/cross?case=($schemeless_label)" -H {
+            X-Internal-Token: SCHEMELESS-SECRET
+            X-Keep: retained
+        } -L --raw --no-history)
+        assert equal $schemeless.response.status 200
+        let schemeless_final = (redirect-events-for $server $schemeless_label | last)
+        assert (redirect-header-values $schemeless_final X-Internal-Token | is-empty)
+        assert equal (redirect-header-values $schemeless_final X-Keep) [retained]
+
+        let curl_home = ($root | path join "curl-home")
+        mkdir $curl_home
+        "location\nlocation-trusted\n" | save -f ($curl_home | path join ".curlrc")
+        let config_no_follow = (with-env {CURL_HOME: $curl_home} {
+            api get $"($base)/r/302/same?case=curlrc-no-follow" --raw --no-history
+        })
+        assert equal $config_no_follow.response.status 302
+        assert equal (redirect-events-for $server curlrc-no-follow | length) 1
+        let config_follow = (with-env {CURL_HOME: $curl_home} {
+            api get $"($base)/r/302/cross?case=curlrc-follow" -H {
+                X-Internal-Token: CURLRC-SECRET
+                X-Keep: retained
+            } -L --raw --no-history
+        })
+        assert equal $config_follow.response.status 200
+        let config_final = (redirect-events-for $server curlrc-follow | last)
+        assert (redirect-header-values $config_final X-Internal-Token | is-empty)
+        assert equal (redirect-header-values $config_final X-Keep) [retained]
+        let preview = (run-command-process $root $"api get (($base + '/r/302/same') | to nuon) -L --dry-run")
+        assert equal $preview.exit_code 0
+        assert (($preview.stdout | str trim) | str starts-with "curl -q ")
 
         let loop_before = (redirect-events $server | length)
         let loop = (run-command-process $root $"api get (($base + '/loop/1') | to nuon) -L --retries 2 --raw --no-history")
@@ -557,12 +659,43 @@ def test-redirect-results-history-output-and-binary [] {
     }
 }
 
+def test-redirect-head-and-options [] {
+    redirect-fixture "redirect-method-surfaces" {|root, server|
+        let base = $"http://127.0.0.1:($server.ports.a)"
+        for status in [301 302 303 307 308] {
+            let head_label = $"head-($status)"
+            let head = (api head $"($base)/r/($status)/same?case=($head_label)" -L --raw --no-history)
+            assert equal $head.response.status 200
+            assert equal $head.response.body null
+            assert equal (redirect-events-for $server $head_label | get method) [HEAD HEAD]
+
+            let options_label = $"options-($status)"
+            let options = (api options $"($base)/r/($status)/same?case=($options_label)" -L --raw --no-history)
+            assert equal $options.response.status 200
+            assert equal (redirect-events-for $server $options_label | get method) (
+                if $status == 303 { [OPTIONS GET] } else { [OPTIONS OPTIONS] }
+            )
+        }
+        let head_control = (api head $"($base)/r/302/same?case=head-control" --raw --no-history)
+        assert equal $head_control.response.status 302
+        assert equal (redirect-events-for $server head-control | length) 1
+        let options_control = (api options $"($base)/r/302/same?case=options-control" --raw --no-history)
+        assert equal $options_control.response.status 302
+        assert equal (redirect-events-for $server options-control | length) 1
+        let unsafe = (run-command-process $root $"api options (($base + '/r/302/userinfo') | to nuon) -L --raw --no-history")
+        assert ($unsafe.exit_code != 0)
+        assert equal ($unsafe.stdout | str trim) ""
+        assert (not ($unsafe.stderr | str contains "REDIRECT-SECRET"))
+    }
+}
+
 export def run-suite-redirects []: nothing -> list<record> {
     [
         (run-test "redirect helpers enforce RFC methods, entity headers, and origins" { test-redirect-pure-contracts })
         (run-test "redirect methods and bodies follow 301/302/303/307/308 semantics" { test-redirect-method-body-matrix })
         (run-test "redirect credentials stay same-origin and are stripped cross-origin" { test-redirect-credential-boundaries })
         (run-test "redirect targets, hop limits, retries, and deadlines fail safely" { test-redirect-safety-limit-and-retries })
+        (run-test "direct HEAD and OPTIONS expose the managed redirect policy" { test-redirect-head-and-options })
         (run-test "redirect results, history, output modes, timing, and binary saves stay compatible" { test-redirect-results-history-output-and-binary })
     ]
 }

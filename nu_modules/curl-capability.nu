@@ -10,7 +10,7 @@ export def require-curl-capability [--dry-run] {
     }
 
     let version_result = try {
-        {value: (do { curl --version } | complete), error: null}
+        {value: (do { curl -q --version } | complete), error: null}
     } catch {|error|
         {value: null, error: $error}
     }
