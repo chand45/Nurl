@@ -368,3 +368,20 @@ bulk changes.
   empty `application/x-www-form-urlencoded` body.
 - **Status:** retained for backward compatibility. Empty-form semantics require a separate public
   flag contract decision; this release changes only non-empty form serialization and validation.
+
+## 32. FIXED: Redirects could send empty custom-method requests and leak credentials cross-origin
+- **Old symptom:** `--follow-redirects` combined curl `-L` with unconditional `-X`. On
+  301/302/303, POST/PUT/PATCH/DELETE could reach the target with the original method but an empty
+  body. Curl removed Authorization and Cookie when the origin changed, but forwarded custom
+  credential headers such as API keys and internal tokens to the new origin.
+- **Fix:** Nurl now walks redirects one curl invocation per hop. RFC method/body and entity-header
+  transitions are explicit, retries replay the original chain with a fresh whole-chain timeout,
+  and the shared sensitive-header classifier strips caller credentials plus all managed auth on
+  scheme/host/port changes. Redirect targets are restricted to credential-free HTTP(S) URLs and
+  each attempt stops after exactly 50 requests.
+- **Compatibility:** final response/output/history behavior is preserved. Redirected raw/JSON
+  results conditionally add ordered hop metadata and an effective URL. Dry-run remains a single
+  curl command and is first-hop-equivalent where curl cannot represent Nurl's full custom-method
+  redirect policy.
+- **Re-check:** run `tests/run-redirect-compat.nu` on Nushell 0.89 and current, then
+  `tests/run-header-compat.nu`, `tests/run-body-compat.nu`, and the full `tests/run.nu`.

@@ -39,6 +39,7 @@ source test_packaging.nu
 source test_state_durability.nu
 source test_request_headers.nu
 source test_request_body.nu
+source test_redirects.nu
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,7 @@ let all_results = (
         ...(run-suite-state-durability)
         ...(run-suite-request-headers)
         ...(run-suite-request-body)
+        ...(run-suite-redirects)
     ]
 )
 

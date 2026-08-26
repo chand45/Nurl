@@ -291,7 +291,7 @@ Requests: 3 successful, 0 failed
 - **Beautiful Output** — Nushell's native tables make responses easy to read
 - **Output Control** — `--output status/body/json/headers`, `--select dot.path` for scripting
 - **Form Encoding** — `--form` for `application/x-www-form-urlencoded` POST bodies
-- **Redirect Handling** — `--follow-redirects` to follow HTTP 3xx responses
+- **Redirect Handling** — `--follow-redirects` applies RFC method/body rules and contains credentials at origin boundaries
 - **Retry Logic** — nonnegative `--retries N` makes at most `N+1` attempts, with `--retry-delay` between attempts
 - **HEAD & OPTIONS** — `api head` and `api options` commands
 - **File Saving** — `--save` for text, `--binary-save` for binary downloads
@@ -411,6 +411,20 @@ bearer/OAuth/SAML authorization, basic credentials, API-key values, and recogniz
 as `******` while preserving non-sensitive headers and API-key header/query names. Query API-key
 names use RFC 3986 query-component encoding in previews, and real requests encode both the name and
 value exactly once while preserving existing queries and fragments.
+With `--follow-redirects`, Nurl follows at most 50 requests per attempt and applies redirect
+semantics to the current request at each hop: 301/302 change POST to GET, 303 changes every
+non-HEAD method to GET, and 307/308 preserve method and body byte-for-byte. When a body is
+dropped, entity headers such as `Content-Type`, `Content-Length`, and `Transfer-Encoding` are
+dropped too. Same-origin hops preserve caller headers and managed auth. A scheme, host, or port
+change strips all managed auth and every caller header recognized by the shared sensitive-header
+policy, while retaining non-sensitive headers. Redirect targets must remain credential-free HTTP
+or HTTPS URLs.
+
+Raw/JSON redirected results add ordered `redirects: [{status, url}]` metadata and
+`effective_url`; non-redirected result schemas and history keep the original request URL. Verbose
+pretty output prints each hop. Dry-run keeps `-L` last and omits `-X` where curl can infer the same
+GET/POST behavior. For methods whose full multi-hop semantics cannot be represented by one curl
+command, the preview is first-hop-equivalent; live Nurl execution remains authoritative.
 `--save` may be combined with data modes, and `--binary-save` writes the response
 bytes while returning a safe saved-file marker for `--output raw`. Binary attempts are written to
 unique sibling temporary files and replace the destination only after a complete transfer; exhausted
@@ -909,7 +923,7 @@ Run `api help` for the full command list, or:
 |----------|----------|
 | **HTTP** | `api get`, `api post`, `api put`, `api patch`, `api delete`, `api head`, `api options`, `api request` |
 | **Output control** | `--output pretty\|body\|raw\|json\|headers\|status\|none`, `--select <dot.path>`, `--verbose`, `--include`, `--save <file>`, `--binary-save <file>` |
-| **Request options** | `--form <record>`, `--follow-redirects`, `--retries <n>`, `--retry-delay <s>`, `--no-history`, `--no-interpolate` (`api request`), `--dry-run` |
+| **Request options** | `--form <record>`, `--follow-redirects` (50-request cap; cross-origin credentials stripped), `--retries <n>`, `--retry-delay <s>`, `--no-history`, `--no-interpolate` (`api request`), `--dry-run` |
 | **Collections** | `api collection create/list/show/delete/copy` |
 | **Environments** | `api collection env create/use/show/set/unset/delete/list` |
 | **Requests** | `api request create/list/show/update/delete/export`, `api send` |

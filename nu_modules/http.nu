@@ -10,6 +10,8 @@ use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
 use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
 
+const MAX_REDIRECTS = 50
+
 def get-api-root [] {
     $env.API_ROOT? | default (pwd)
 }
@@ -220,6 +222,123 @@ def get-timeout [] {
         (open-state-record $config_path "config.nuon").timeout_seconds? | default 30
     } else {
         30
+    }
+}
+
+def redirect-time-budget [started: datetime, timeout_seconds: float] {
+    if $timeout_seconds <= 0 {
+        return {expired: false, value: "0"}
+    }
+    let elapsed_seconds = ((((date now) - $started) | into int | into float) / 1_000_000_000)
+    let remaining = ($timeout_seconds - $elapsed_seconds)
+    let bounded = if $remaining < 0.001 { 0.001 } else { $remaining }
+    let formatted = (((($bounded * 1000) | math floor) / 1000) | into string)
+    {
+        expired: ($remaining <= 0)
+        value: $formatted
+    }
+}
+
+export def url-origin [url: string] {
+    let parsed = try {
+        $url | url parse
+    } catch {
+        fail-command "Redirect target must be an absolute HTTP or HTTPS URL"
+    }
+    let scheme = ($parsed.scheme? | default "" | into string)
+    if not ((ascii-equal-ignore-case $scheme "http") or (ascii-equal-ignore-case $scheme "https")) {
+        fail-command "Redirect target must use HTTP or HTTPS"
+    }
+    let host = ($parsed.host? | default "" | into string)
+    if ($host | str trim | is-empty) {
+        fail-command "Redirect target must include a host"
+    }
+    let port = if not ($parsed.port? | default "" | into string | is-empty) {
+        $parsed.port | into string
+    } else if (ascii-equal-ignore-case $scheme "https") {
+        "443"
+    } else {
+        "80"
+    }
+    {
+        scheme: ($scheme | ascii-upcase)
+        host: ($host | ascii-upcase)
+        port: $port
+    }
+}
+
+export def same-origin [left: string, right: string] {
+    (url-origin $left) == (url-origin $right)
+}
+
+def strip-sensitive-request-headers [headers: record] {
+    $headers
+    | transpose key value
+    | where {|header| not (sensitive-header $header.key $header.value) }
+    | reduce -f {} {|header, retained| $retained | upsert $header.key $header.value }
+}
+
+def drop-entity-headers [headers: record] {
+    let entity_names = [
+        "Content-Type"
+        "Content-Length"
+        "Content-Encoding"
+        "Content-Language"
+        "Content-Location"
+        "Transfer-Encoding"
+        "Expect"
+    ]
+    $headers
+    | transpose key value
+    | where {|header|
+        not ($entity_names | any {|name| ascii-equal-ignore-case $header.key $name })
+    }
+    | reduce -f {} {|header, retained| $retained | upsert $header.key $header.value }
+}
+
+export def redirect-follow-target [
+    redirect_url: string
+    --follow
+] {
+    if not $follow or ($redirect_url | str trim | is-empty) {
+        return null
+    }
+    url-origin $redirect_url | ignore
+    validate-secret-safe-url $redirect_url
+}
+
+export def redirect-next-request [
+    status: int
+    method: string
+    url: string
+    target: string
+    headers: record
+    body: record
+    auth: record
+] {
+    let normalized_method = ($method | ascii-upcase)
+    let drops_body = (
+        (($status in [301 302]) and $normalized_method == "POST")
+        or ($status == 303 and $normalized_method != "HEAD")
+    )
+    let cross_origin = not (same-origin $url $target)
+    let body_headers = if $drops_body {
+        drop-entity-headers $headers
+    } else {
+        $headers
+    }
+    let next_headers = if $cross_origin {
+        strip-sensitive-request-headers $body_headers
+    } else {
+        $body_headers
+    }
+    {
+        method: (if $drops_body { "GET" } else { $method })
+        url: $target
+        headers: $next_headers
+        body: (if $drops_body { {kind: "none", content: ""} } else { $body })
+        auth: (if $cross_origin { {} } else { $auth })
+        cross_origin: $cross_origin
     }
 }
 
@@ -447,12 +566,14 @@ def build-curl-args [
     headers: record
     body: record
     auth?: record
+    --timeout: string = ""
 ] {
+    let max_time = if $timeout == "" { get-timeout | into string } else { $timeout }
     mut args = [
         "-s"                    # Silent mode
         "-S"                    # Show errors
         "--globoff"             # Treat literal braces/brackets in URLs as data
-        "--max-time" (get-timeout | into string)
+        "--max-time" $max_time
     ]
 
     # HEAD: use --head so curl stops after receiving headers (avoids timeout waiting for body)
@@ -506,10 +627,14 @@ def build-curl-args-for-display [
     --follow-redirects
 ] {
     mut args = ["--globoff"]
+    let normalized_method = ($method | ascii-upcase)
 
-    if $method == "HEAD" {
+    if $normalized_method == "HEAD" {
         $args = ($args | append ["--head"])
-    } else {
+    } else if not (
+        ($normalized_method == "GET" and $body.kind == "none")
+        or ($normalized_method == "POST" and $body.kind != "none")
+    ) {
         $args = ($args | append ["-X" $method])
     }
 
@@ -606,13 +731,15 @@ def build-curl-args-binary [
     output_path: string
     body: record
     auth?: record
+    --timeout: string = ""
 ] {
+    let max_time = if $timeout == "" { get-timeout | into string } else { $timeout }
     mut args = [
         "-s"
         "-S"
         "--globoff"
         "-X" $method
-        "--max-time" (get-timeout | into string)
+        "--max-time" $max_time
         "-o" $output_path
     ]
 
@@ -857,7 +984,7 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     } catch {
         fail-command "Curl returned malformed structured response metadata"
     }
-    let required = ["status" "time_total" "size_download" "size_header" "exit_code"]
+    let required = ["status" "time_total" "size_download" "size_header" "exit_code" "redirect_url" "num_redirects"]
     for field in $required {
         if $field not-in ($metadata | columns) {
             fail-command "Curl returned incomplete structured response metadata"
@@ -870,6 +997,17 @@ def parse-fileless-curl-stderr [stderr: string, token: string, expected_exit_cod
     }
     if $metadata_exit != $expected_exit_code {
         fail-command "Curl response metadata did not match the transfer result"
+    }
+    if ($metadata.redirect_url | describe) != "string" {
+        fail-command "Curl returned an invalid redirect target"
+    }
+    let redirect_count = try {
+        $metadata.num_redirects | into int
+    } catch {
+        fail-command "Curl returned an invalid redirect count"
+    }
+    if $redirect_count != 0 {
+        fail-command "Curl unexpectedly followed redirects internally"
     }
     {
         diagnostics: ($begin_parts | get 0 | str trim)
@@ -896,7 +1034,7 @@ def curl-with-fileless-metadata [
     let write_out = (
         "%{stderr}\n"
         + $begin
-        + "\n{\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"size_header\":\"%{size_header}\",\"exit_code\":\"%{exitcode}\"}\n"
+        + "\n{\"status\":\"%{http_code}\",\"time_total\":\"%{time_total}\",\"size_download\":\"%{size_download}\",\"size_header\":\"%{size_header}\",\"exit_code\":\"%{exitcode}\",\"redirect_url\":\"%{redirect_url}\",\"num_redirects\":\"%{num_redirects}\"}\n"
         + $ending
         + "\n"
     )
@@ -1493,144 +1631,233 @@ def execute-request [
     } else {
         $final_url
     }
-    let body_via_stdin = (
-        (($body.kind in ["structured" "structured-encoded"]) or (($final_body | str length) > 8000))
-        and $final_body != ""
-    )
-
-    # Normal and binary requests share one retry policy. Binary attempts are isolated until commit.
+    # Each retry restarts the original request and gets a fresh whole-chain timeout budget.
     let start_time = (date now)
+    let timeout_seconds = (get-timeout | into float)
     let max_attempts = ($retries + 1)
     mut attempt = 0
+    mut completed_attempt = []
 
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
-        let attempt_path = if $binary_save == "" { "" } else { binary-attempt-path $binary_save }
-        let argument_body = if $body_via_stdin {
-            {kind: "none", content: ""}
-        } else {
-            {kind: $body.kind, content: $final_body}
-        }
-        let base_args = if $binary_save == "" {
-            build-curl-args $method $request_url $final_headers $argument_body $wire_auth
-        } else {
-            build-curl-args-binary $method $request_url $final_headers $attempt_path $argument_body $wire_auth
-        }
-        let body_args = if $body_via_stdin {
-            $base_args | append ["--data-binary" "@-"]
-        } else {
-            $base_args
-        }
-        let curl_args = if $follow_redirects { $body_args | append "-L" } else { $body_args }
-        let capture = try {
-            {
-                value: (curl-with-fileless-metadata $curl_args $request_url --include-response=($binary_save == "") --stdin-body=(if $body_via_stdin { $final_body } else { null }))
-                error: null
-            }
-        } catch {|error|
-            {value: null, error: $error}
-        }
-        if $capture.error != null {
-            remove-binary-attempt $attempt_path
-            error make {msg: $capture.error.msg}
-        }
-        let captured = $capture.value
-        let output = $captured.output
+        let attempt_started = (date now)
+        mut current_method = $method
+        mut current_url = $request_url
+        mut current_public_url = $final_url
+        mut current_headers = $final_headers
+        mut current_body = {kind: $body.kind, content: $final_body}
+        mut current_auth = ($wire_auth | default {})
+        mut redirects = []
+        mut chain_time_ms = 0
+        mut retry_failure = []
 
-        if $output.exit_code != 0 {
-            remove-binary-attempt $attempt_path
-            if $attempt < $max_attempts {
-                if $retry_delay > 0 { sleep ($retry_delay | into duration --unit sec) }
+        loop {
+            let budget = (redirect-time-budget $attempt_started $timeout_seconds)
+            if $budget.expired {
+                $retry_failure = [{
+                    exit_code: 28
+                    diagnostics: "Operation timed out"
+                    headers: $current_headers
+                    auth: $current_auth
+                }]
+                break
+            }
+            let body_via_stdin = (
+                (($current_body.kind in ["structured" "structured-encoded"]) or (($current_body.content | str length) > 8000))
+                and $current_body.content != ""
+            )
+            let attempt_path = if $binary_save == "" { "" } else { binary-attempt-path $binary_save }
+            let argument_body = if $body_via_stdin {
+                {kind: "none", content: ""}
+            } else {
+                $current_body
+            }
+            let base_args = if $binary_save == "" {
+                build-curl-args $current_method $current_url $current_headers $argument_body $current_auth --timeout $budget.value
+            } else {
+                build-curl-args-binary $current_method $current_url $current_headers $attempt_path $argument_body $current_auth --timeout $budget.value
+            }
+            let curl_args = if $body_via_stdin {
+                $base_args | append ["--data-binary" "@-"]
+            } else {
+                $base_args
+            }
+            let capture = try {
+                {
+                    value: (curl-with-fileless-metadata $curl_args $current_url --include-response=($binary_save == "") --stdin-body=(if $body_via_stdin { $current_body.content } else { null }))
+                    error: null
+                }
+            } catch {|error|
+                {value: null, error: $error}
+            }
+            if $capture.error != null {
+                remove-binary-attempt $attempt_path
+                error make {msg: $capture.error.msg}
+            }
+            let captured = $capture.value
+            let output = $captured.output
+
+            if $output.exit_code != 0 {
+                remove-binary-attempt $attempt_path
+                $retry_failure = [{
+                    exit_code: $output.exit_code
+                    diagnostics: $output.stderr
+                    headers: $current_headers
+                    auth: $current_auth
+                }]
+                break
+            }
+
+            let parse_result = try {
+                {
+                    value: (if $binary_save == "" {
+                        parse-curl-response-fileless $output.stdout $captured.metadata
+                    } else {
+                        parse-binary-response $captured.metadata $attempt_path $binary_save
+                    })
+                    error: null
+                }
+            } catch {|error|
+                {value: null, error: $error}
+            }
+            if $parse_result.error != null {
+                remove-binary-attempt $attempt_path
+                error make {msg: $parse_result.error.msg}
+            }
+            let parsed = $parse_result.value
+            $chain_time_ms = ($chain_time_ms + $parsed.time_ms)
+
+            let raw_target = ($captured.metadata.redirect_url | into string)
+            if $follow_redirects and (not ($raw_target | str trim | is-empty)) {
+                remove-binary-attempt $attempt_path
+                let target = (redirect-follow-target $raw_target --follow)
+                $redirects = ($redirects | append {status: $parsed.status, url: $current_public_url})
+                if ($redirects | length) >= $MAX_REDIRECTS {
+                    fail-command $"Redirect limit reached after ($MAX_REDIRECTS) requests"
+                }
+                let next = (
+                    redirect-next-request $parsed.status $current_method $current_public_url $target $current_headers $current_body $current_auth
+                )
+                assert-unique-header-names $next.headers
+                assert-safe-auth-headers $next.auth
+                $current_method = $next.method
+                $current_public_url = $next.url
+                $current_headers = $next.headers
+                $current_body = $next.body
+                $current_auth = $next.auth
+                $current_url = if ($current_auth.type? | default "none") == "apikey_query" {
+                    append-query-auth $current_public_url $current_auth.param_name $current_auth.key
+                } else {
+                    $current_public_url
+                }
                 continue
             }
-            fail-transport $output.exit_code $attempt $max_attempts $output.stderr $final_headers $wire_auth
-        }
 
-        let parse_result = try {
-            {
-                value: (if $binary_save == "" {
-                    parse-curl-response-fileless $output.stdout $captured.metadata
-                } else {
-                    parse-binary-response $captured.metadata $attempt_path $binary_save
-                })
-                error: null
+            let terminal = ($parsed | update time_ms $chain_time_ms)
+            if $terminal.status >= 500 and $attempt < $max_attempts {
+                remove-binary-attempt $attempt_path
+                $retry_failure = [{
+                    exit_code: 0
+                    diagnostics: ""
+                    headers: $current_headers
+                    auth: $current_auth
+                }]
+                break
             }
-        } catch {|error|
-            {value: null, error: $error}
+            $completed_attempt = [{
+                parsed: $terminal
+                attempt_path: $attempt_path
+                redirects: $redirects
+                effective_url: $current_public_url
+            }]
+            break
         }
-        if $parse_result.error != null {
-            remove-binary-attempt $attempt_path
-            error make {msg: $parse_result.error.msg}
-        }
-        let parsed = $parse_result.value
 
-        # Retry on 5xx if attempts remain
-        if $parsed.status >= 500 and $attempt < $max_attempts {
-            remove-binary-attempt $attempt_path
+        if not ($completed_attempt | is-empty) {
+            break
+        }
+        if $attempt < $max_attempts {
             if $retry_delay > 0 { sleep ($retry_delay | into duration --unit sec) }
             continue
         }
-
-        let public_request_record = {
-            method: $method
-            url: $final_url
-            headers: (redact-sensitive-headers $final_headers)
-            body: (if $binary_save != "" {
-                null
-            } else if $body.kind != "none" {
-                if $final_body == "" {
-                    ""
-                } else {
-                    try { $final_body | from json } catch { $final_body }
-                }
-            } else {
-                null
-            })
+        if not ($retry_failure | is-empty) and ($retry_failure | first | get exit_code) != 0 {
+            let failure = ($retry_failure | first)
+            fail-transport $failure.exit_code $attempt $max_attempts $failure.diagnostics $failure.headers $failure.auth
         }
-        let history_body = if $binary_save != "" or $body.kind == "none" {
-            null
-        } else if ($body.kind == "structured") and ((state-base-type $body.content) in ["record" "list"]) and (not ($public_request_record.body | is-empty)) {
-            $public_request_record.body
-        } else {
-            $final_body
-        }
-        let history_request_record = if $history_auth == null {
-            $public_request_record | update body $history_body
-        } else {
-            $public_request_record | update body $history_body | insert auth $history_auth
-        }
-        let history_request_record = if $has_sensitive_request_headers {
-            $history_request_record | insert headers_replayable false
-        } else {
-            $history_request_record
-        }
-        let response = if $binary_save == "" { $parsed | reject _raw_body } else { $parsed }
-        let public_response = (
-            $response | update headers (redact-sensitive-headers $response.headers)
-        )
-        if $binary_save != "" {
-            commit-binary-response $attempt_path $binary_save
-        }
-
-        if not $no_history {
-            api history save $history_request_record $public_response | ignore
-        }
-
-        let result = {
-            request: $public_request_record
-            response: $public_response
-            timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
-        }
-        if $binary_save != "" {
-            if not $quiet_binary_status {
-                print ((ansi green) + "Downloaded: " + $binary_save + " (" + ($response.size_bytes | into string) + "B)" + (ansi reset))
-            }
-            return $result
-        }
-        return ($result | insert _raw_body $parsed._raw_body)
+        fail-command "Request retry loop ended without a result"
     }
 
-    fail-command "Request retry loop ended without a result"
+    if ($completed_attempt | is-empty) {
+        fail-command "Request retry loop ended without a result"
+    }
+    let completed = ($completed_attempt | first)
+    let parsed = $completed.parsed
+    let attempt_path = $completed.attempt_path
+
+    let public_request_record = {
+        method: $method
+        url: $final_url
+        headers: (redact-sensitive-headers $final_headers)
+        body: (if $binary_save != "" {
+            null
+        } else if $body.kind != "none" {
+            if $final_body == "" {
+                ""
+            } else {
+                try { $final_body | from json } catch { $final_body }
+            }
+        } else {
+            null
+        })
+    }
+    let history_body = if $binary_save != "" or $body.kind == "none" {
+        null
+    } else if ($body.kind == "structured") and ((state-base-type $body.content) in ["record" "list"]) and (not ($public_request_record.body | is-empty)) {
+        $public_request_record.body
+    } else {
+        $final_body
+    }
+    let history_request_record = if $history_auth == null {
+        $public_request_record | update body $history_body
+    } else {
+        $public_request_record | update body $history_body | insert auth $history_auth
+    }
+    let history_request_record = if $has_sensitive_request_headers {
+        $history_request_record | insert headers_replayable false
+    } else {
+        $history_request_record
+    }
+    let response = if $binary_save == "" { $parsed | reject _raw_body } else { $parsed }
+    let public_response = (
+        $response | update headers (redact-sensitive-headers $response.headers)
+    )
+    if $binary_save != "" {
+        commit-binary-response $attempt_path $binary_save
+    }
+
+    if not $no_history {
+        api history save $history_request_record $public_response | ignore
+    }
+
+    let base_result = {
+        request: $public_request_record
+        response: $public_response
+        timestamp: ($start_time | format date "%Y-%m-%dT%H:%M:%SZ")
+    }
+    let result = if ($completed.redirects | is-empty) {
+        $base_result
+    } else {
+        $base_result
+        | insert redirects $completed.redirects
+        | insert effective_url $completed.effective_url
+    }
+    if $binary_save != "" {
+        if not $quiet_binary_status {
+            print ((ansi green) + "Downloaded: " + $binary_save + " (" + ($response.size_bytes | into string) + "B)" + (ansi reset))
+        }
+        return $result
+    }
+    $result | insert _raw_body $parsed._raw_body
 }
 
 export def execute-encoded-request [
@@ -1724,6 +1951,12 @@ def display-response [
     if $verbose {
         print ""
         print $"(ansi dark_gray)> ($method) ($url)(ansi reset)"
+        for redirect in ($result.redirects? | default []) {
+            print $"(ansi dark_gray)↳ ($redirect.status) ($redirect.url)(ansi reset)"
+        }
+        if not ($result.redirects? | default [] | is-empty) {
+            print $"(ansi dark_gray)↳ ($response.status) ($result.effective_url)(ansi reset)"
+        }
         for hdr in ($result.request?.headers? | default {} | transpose key value) {
             print $"(ansi dark_gray)> ($hdr.key): ($hdr.value)(ansi reset)"
         }
