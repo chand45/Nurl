@@ -530,6 +530,11 @@ def append-authorization-args [
     }
 }
 
+def append-basic-authorization-args [args: list, auth: record] {
+    let credentials = $"($auth.username):($auth.password)" | encode base64
+    $args | append ["-H" $"Authorization: Basic ($credentials)"]
+}
+
 def assert-safe-auth-headers [auth: any] {
     if $auth == null {
         return
@@ -592,7 +597,8 @@ def build-curl-args [
     if $auth != null {
         match ($auth.type? | default "none") {
             "basic" => {
-                $args = ($args | append ["-u" $"($auth.username):($auth.password)"])
+                # curl may inject -u credentials into %{redirect_url}; keep target metadata credential-free.
+                $args = (append-basic-authorization-args $args $auth)
             }
             "apikey_header" => {
                 $args = ($args | append ["-H" $"($auth.header_name): ($auth.key)"])
@@ -749,7 +755,7 @@ def build-curl-args-binary [
 
     if $auth != null {
         match ($auth.type? | default "none") {
-            "basic" => { $args = ($args | append ["-u" $"($auth.username):($auth.password)"]) }
+            "basic" => { $args = (append-basic-authorization-args $args $auth) }
             "apikey_header" => { $args = ($args | append ["-H" $"($auth.header_name): ($auth.key)"]) }
             _ => {}
         }
