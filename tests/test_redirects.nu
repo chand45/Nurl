@@ -327,6 +327,15 @@ def test-redirect-pure-contracts [] {
     let cross = (redirect-next-request 307 POST "http://example.com/a" "http://example.com:81/b" $headers {kind: text, content: body} {type: bearer, token: secret})
     assert equal ($cross.headers | columns) [Content-Type content-length Content-Encoding Expect Accept X-Keep]
     assert ($cross.auth | is-empty)
+    let downgrade = (redirect-next-request 307 GET "https://example.com/a" "http://example.com/b" {
+        X-Hub-Signature: sha1=secret
+        X-Amz-Content-Sha256: digest
+        X-Internal-Signature: signature
+        X-Keep: retained
+    } {kind: none, content: ""} {type: bearer, token: secret})
+    assert $downgrade.cross_origin
+    assert equal $downgrade.headers {X-Keep: retained}
+    assert ($downgrade.auth | is-empty)
 }
 
 def test-redirect-method-body-matrix [] {
@@ -445,10 +454,20 @@ def test-redirect-credential-boundaries [] {
                 Authorization: "Bearer CALLER-REDIRECT-SENTINEL"
                 Cookie: "session=COOKIE-REDIRECT-SENTINEL"
                 X-Internal-Token: TOKEN-REDIRECT-SENTINEL
+                X-Hub-Signature: HUB-SIGNATURE-SENTINEL
+                X-Amz-Content-Sha256: AMZ-SHA-SENTINEL
+                X-Internal-Signature: INTERNAL-SIGNATURE-SENTINEL
                 X-Keep: KEEP-REDIRECT-SENTINEL
             } -L --raw --no-history | ignore
             let final = (redirect-events-for $server $label | last)
-            for sensitive in [Authorization Cookie X-Internal-Token] {
+            for sensitive in [
+                Authorization
+                Cookie
+                X-Internal-Token
+                X-Hub-Signature
+                X-Amz-Content-Sha256
+                X-Internal-Signature
+            ] {
                 assert equal (redirect-header-values $final $sensitive | is-empty) ($target == cross)
             }
             assert equal (redirect-header-values $final X-Keep) [KEEP-REDIRECT-SENTINEL]
@@ -623,6 +642,9 @@ def test-redirect-results-history-output-and-binary [] {
         assert equal ($redirected | columns) [request response timestamp redirects effective_url]
         assert equal ($redirected.redirects | get status) [302]
         assert equal ($redirected.redirects | first | get url) $"($base)/r/302/relative?case=result-shape"
+        assert equal ($redirected.redirects | first | get method) GET
+        assert equal ($redirected.redirects | first | get next_method) GET
+        assert equal ($redirected.redirects | first | get target) $redirected.effective_url
         assert ($redirected.effective_url | str contains "/final")
         let history = (open ($root | path join "history" "index.nuon"))
         assert equal ($history | length) 1
@@ -655,6 +677,38 @@ def test-redirect-results-history-output-and-binary [] {
             let result = (run-command-process $root $"api get (($base + '/r/302/same?case=' + $case.name) | to nuon) -L --no-history ($case.options)")
             assert equal $result.exit_code 0 $"redirect output mode failed: ($case.name)"
             assert ($result.stdout | str contains $case.expected) $"redirect output mode returned the wrong final data: ($case.name)"
+        }
+
+        let pretty_plain = (run-command-process $root $"api get (($base + '/final?case=pretty-plain') | to nuon) --no-history")
+        assert equal $pretty_plain.exit_code 0
+        assert (not ($pretty_plain.stdout | str contains "Redirected:"))
+        let pretty_redirect = (run-command-process $root $"api post (($base + '/r/302/same?case=pretty-redirect') | to nuon) -b body -L --no-history")
+        assert equal $pretty_redirect.exit_code 0
+        assert ($pretty_redirect.stdout | str contains $"Redirected: 1 hop -> ($base)/final?case=pretty-redirect")
+        let verbose_redirect = (run-command-process $root $"api post (($base + '/r/302/same?case=verbose-transition') | to nuon) -b body -L --verbose --no-history")
+        assert equal $verbose_redirect.exit_code 0
+        assert ($verbose_redirect.stdout | str contains $"↳ 302 POST -> GET ($base)/final?case=verbose-transition")
+        assert ($verbose_redirect.stdout | str contains $"↳ 200 GET ($base)/final?case=verbose-transition")
+
+        let normalized = (api request -m post $"($base)/final?case=normalized-method" -b body --raw --no-history)
+        assert equal $normalized.request.method POST
+        assert equal (redirect-events-for $server normalized-method | last | get method) POST
+
+        api collection create preview-methods | ignore
+        api request create preview-get GET $"($base)/final" --collection preview-methods | ignore
+        api request create preview-post POST $"($base)/final" --collection preview-methods --body {ok: true} | ignore
+        let previews = [
+            (run-command-process $root $"api get (($base + '/final') | to nuon) --dry-run")
+            (run-command-process $root $"api post (($base + '/final') | to nuon) -b body --dry-run")
+            (run-command-process $root $"api request -m get (($base + '/final') | to nuon) --dry-run")
+            (run-command-process $root $"api request -m post (($base + '/final') | to nuon) -b body --dry-run")
+            (run-command-process $root "api request export preview-get --collection preview-methods")
+            (run-command-process $root "api request export preview-post --collection preview-methods")
+        ]
+        for preview in $previews {
+            assert equal $preview.exit_code 0
+            assert (not ($preview.stdout | str contains "-X GET"))
+            assert (not ($preview.stdout | str contains "-X POST"))
         }
     }
 }

@@ -416,16 +416,20 @@ semantics to the current request at each hop: 301/302 change POST to GET, 303 ch
 non-HEAD method to GET, and 307/308 preserve method and body byte-for-byte. When a body is
 dropped, entity headers such as `Content-Type`, `Content-Length`, and `Transfer-Encoding` are
 dropped too. Same-origin hops preserve caller headers and managed auth. A scheme, host, or port
-change strips all managed auth and every caller header recognized by the shared sensitive-header
-policy, while retaining non-sensitive headers. Redirect targets must remain credential-free HTTP
+change strips all managed auth plus credential, token, cookie, API-key, and request-signature
+headers (including `X-Hub-Signature`, `X-Amz-Content-Sha256`, and internal signature headers),
+while retaining non-sensitive headers. HTTPS-to-HTTP redirects follow only after this stripping.
+Redirect targets must remain credential-free HTTP
 or HTTPS URLs. `api head` and `api options` support the same `--follow-redirects` policy. Nurl
 passes curl `-q` first on every transfer so user curl configuration cannot silently enable
 curl-managed redirects or trusted credential forwarding.
 
 Raw/JSON redirected results add ordered `redirects: [{status, url}]` metadata and
-`effective_url`; non-redirected result schemas and history keep the original request URL. Verbose
-pretty output prints each hop. Dry-run keeps `-L` last and omits `-X` where curl can infer the same
-GET/POST behavior. For methods whose full multi-hop semantics cannot be represented by one curl
+`effective_url`; non-redirected result schemas and history keep the original request URL. Default
+pretty output prints the hop count and effective target only when a redirect occurred. Verbose
+output identifies every redirect status, target, and method transition. Dry-run and saved-request
+export keep `-L` last and omit redundant `-X GET` and body-implied `-X POST` where curl infers the
+same method. For methods whose full multi-hop semantics cannot be represented by one curl
 command, the preview is first-hop-equivalent; live Nurl execution remains authoritative. A
 replayed dry-run/export command is **not credential-safe beyond its first hop** because one curl
 process cannot enforce Nurl's custom cross-origin sensitive-header policy. Do not execute an
@@ -845,11 +849,11 @@ entries without the new literal marker keep their existing interpretation until 
 `api request update --body-file`.
 
 `--dry-run` and `api request export` print the deduplicated headers and resolved body exactly as
-execution sends them, with credentials still masked. The command includes every flag that affects
-the request or selects the response: the method form (`-X` or `--head`), headers, body flag and
-value, and `-L` when redirects are enabled. Output-only flags such as silence, timeout, and response
-file handling remain omitted so the preview stays copy-friendly. Request bodies are always passed
-as literal data; use `--body-file` when file contents should be sent.
+execution sends them, with credentials still masked. Curl-inferred GET and body-implied POST omit
+redundant `-X`; other methods use `-X`, HEAD uses `--head`, and `-L` remains last when redirects are
+enabled. Output-only flags such as silence, timeout, and response file handling remain omitted so
+the preview stays copy-friendly. Request bodies are always passed as literal data; use
+`--body-file` when file contents should be sent.
 
 ---
 

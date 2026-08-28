@@ -279,10 +279,28 @@ export def same-origin [left: string, right: string] {
     $left_origin.value == $right_origin.value
 }
 
-def strip-sensitive-request-headers [headers: record] {
+def redirect-sensitive-header [name: string, value: any] {
+    let normalized = (
+        $name
+        | ascii-upcase
+        | str replace --all --regex '[-.\s]+' "_"
+    )
+    (
+        (sensitive-header $name $value)
+        or ($normalized in [
+            "X_HUB_SIGNATURE"
+            "X_HUB_SIGNATURE_256"
+            "X_AMZ_CONTENT_SHA256"
+            "X_AMZ_SECURITY_TOKEN"
+        ])
+        or ($normalized =~ '(^|_)(SIGNATURE|CREDENTIAL|CONTENT_SHA256)(_|$)')
+    )
+}
+
+def strip-redirect-sensitive-request-headers [headers: record] {
     $headers
     | transpose key value
-    | where {|header| not (sensitive-header $header.key $header.value) }
+    | where {|header| not (redirect-sensitive-header $header.key $header.value) }
     | reduce -f {} {|header, retained| $retained | upsert $header.key $header.value }
 }
 
@@ -336,12 +354,12 @@ export def redirect-next-request [
         $headers
     }
     let next_headers = if $cross_origin {
-        strip-sensitive-request-headers $body_headers
+        strip-redirect-sensitive-request-headers $body_headers
     } else {
         $body_headers
     }
     {
-        method: (if $drops_body { "GET" } else { $method })
+        method: (if $drops_body { "GET" } else { $normalized_method })
         url: $target
         headers: $next_headers
         body: (if $drops_body { {kind: "none", content: ""} } else { $body })
@@ -1527,12 +1545,13 @@ def execute-request [
     --dry-run (-d)     # Output curl command instead of executing
     --collection (-c): string = ""   # Collection context for variable resolution
     --extra-vars (-v): record = {}   # Extra variables for interpolation
-    --follow-redirects (-L)          # Follow HTTP redirects (curl -L)
+    --follow-redirects (-L)          # Follow HTTP redirects with Nurl-managed per-hop policy
     --retries: int = 0               # Additional attempts after 5xx or transport failure
     --retry-delay: int = 0           # Seconds to wait between attempts
     --binary-save (-B): string = ""  # Save binary response bytes to a file
     --quiet-binary-status             # Suppress download status in data output modes
 ] {
+    let request_method = ($method | ascii-upcase)
     let default_headers = (get-default-headers)
     let applicable_defaults = (
         $default_headers
@@ -1658,7 +1677,7 @@ def execute-request [
             $final_url
         }
         let display_args = (
-            build-curl-args-for-display $method $display_url $final_headers {
+            build-curl-args-for-display $request_method $display_url $final_headers {
                 kind: $body.kind
                 content: $final_body
             } $display_auth
@@ -1684,7 +1703,7 @@ def execute-request [
     while $attempt < $max_attempts {
         $attempt = $attempt + 1
         let attempt_started = (date now)
-        mut current_method = $method
+        mut current_method = $request_method
         mut current_url = $request_url
         mut current_public_url = $final_url
         mut current_headers = $final_headers
@@ -1774,13 +1793,19 @@ def execute-request [
             if $follow_redirects and (not ($raw_target | str trim | is-empty)) {
                 remove-binary-attempt $attempt_path
                 let target = (redirect-follow-target $raw_target --follow)
-                $redirects = ($redirects | append {status: $parsed.status, url: $current_public_url})
-                if ($redirects | length) >= $MAX_REDIRECTS {
-                    fail-command $"Redirect limit reached after ($MAX_REDIRECTS) requests"
-                }
                 let next = (
                     redirect-next-request $parsed.status $current_method $current_public_url $target $current_headers $current_body $current_auth
                 )
+                $redirects = ($redirects | append {
+                    status: $parsed.status
+                    url: $current_public_url
+                    target: $target
+                    method: $current_method
+                    next_method: $next.method
+                })
+                if ($redirects | length) >= $MAX_REDIRECTS {
+                    fail-command $"Redirect limit reached after ($MAX_REDIRECTS) requests"
+                }
                 assert-unique-header-names $next.headers
                 assert-safe-auth-headers $next.auth
                 $current_method = $next.method
@@ -1838,7 +1863,7 @@ def execute-request [
     let attempt_path = $completed.attempt_path
 
     let public_request_record = {
-        method: $method
+        method: $request_method
         url: $final_url
         headers: (redact-sensitive-headers $final_headers)
         body: (if $binary_save != "" {
@@ -1989,16 +2014,28 @@ def display-response [
 
     # Status line
     print (format-status-line $response $method $url)
+    let redirects = ($result.redirects? | default [])
+    if not ($redirects | is-empty) {
+        let count = ($redirects | length)
+        let label = if $count == 1 { "hop" } else { "hops" }
+        print $"(ansi dark_gray)Redirected: ($count) ($label) -> ($result.effective_url)(ansi reset)"
+    }
 
     # Verbose: print request info in curl-like > style
     if $verbose {
         print ""
         print $"(ansi dark_gray)> ($method) ($url)(ansi reset)"
-        for redirect in ($result.redirects? | default []) {
-            print $"(ansi dark_gray)↳ ($redirect.status) ($redirect.url)(ansi reset)"
+        for redirect in $redirects {
+            let transition = if $redirect.method == $redirect.next_method {
+                $redirect.method
+            } else {
+                $"($redirect.method) -> ($redirect.next_method)"
+            }
+            print $"(ansi dark_gray)↳ ($redirect.status) ($transition) ($redirect.target)(ansi reset)"
         }
-        if not ($result.redirects? | default [] | is-empty) {
-            print $"(ansi dark_gray)↳ ($response.status) ($result.effective_url)(ansi reset)"
+        if not ($redirects | is-empty) {
+            let final_method = ($redirects | last | get next_method)
+            print $"(ansi dark_gray)↳ ($response.status) ($final_method) ($result.effective_url)(ansi reset)"
         }
         for hdr in ($result.request?.headers? | default {} | transpose key value) {
             print $"(ansi dark_gray)> ($hdr.key): ($hdr.value)(ansi reset)"

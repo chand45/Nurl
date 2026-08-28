@@ -376,9 +376,9 @@ bulk changes.
   credential headers such as API keys and internal tokens to the new origin.
 - **Fix:** Nurl now walks redirects one curl invocation per hop. RFC method/body and entity-header
   transitions are explicit, retries replay the original chain with a fresh whole-chain timeout,
-  and the shared sensitive-header classifier strips caller credentials plus all managed auth on
-  scheme/host/port changes. Redirect targets are restricted to credential-free HTTP(S) URLs and
-  each attempt stops after exactly 50 requests.
+  and a dedicated redirect boundary strips caller credentials, signing headers, and all managed
+  auth on scheme/host/port changes. Redirect targets are restricted to credential-free HTTP(S)
+  URLs and each attempt stops after exactly 50 requests.
 - **Compatibility:** final response/output/history behavior is preserved. Redirected raw/JSON
   results conditionally add ordered hop metadata and an effective URL. Dry-run remains a single
   curl command and is first-hop-equivalent where curl cannot represent Nurl's full custom-method
