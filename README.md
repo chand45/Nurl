@@ -424,7 +424,8 @@ or HTTPS URLs. `api head` and `api options` support the same `--follow-redirects
 passes curl `-q` first on every transfer so user curl configuration cannot silently enable
 curl-managed redirects or trusted credential forwarding.
 
-Raw/JSON redirected results add ordered `redirects: [{status, url}]` metadata and
+Raw/JSON redirected results add ordered
+`redirects: [{status, url, target, method, next_method}]` metadata and
 `effective_url`; non-redirected result schemas and history keep the original request URL. Default
 pretty output prints the hop count and effective target only when a redirect occurred. Verbose
 output identifies every redirect status, target, and method transition. Dry-run and saved-request

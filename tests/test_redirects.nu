@@ -16,6 +16,34 @@ def redirect-process-running [pid: int] {
     try { (ps | where pid == $pid | length) > 0 } catch { false }
 }
 
+def redirect-startup-output [path: string] {
+    if not ($path | path exists) {
+        return ""
+    }
+    try { open $path --raw | str trim } catch { "" }
+}
+
+def redirect-startup-ports [path: string] {
+    if not ($path | path exists) {
+        return {ready: false, ports: {}}
+    }
+    let parsed = try {
+        {value: (open $path), error: null}
+    } catch {
+        {value: null, error: true}
+    }
+    if $parsed.error != null or (not (($parsed.value | describe) | str starts-with "record")) {
+        return {ready: false, ports: {}}
+    }
+    let a = try { $parsed.value.a? | default 0 | into int } catch { 0 }
+    let b = try { $parsed.value.b? | default 0 | into int } catch { 0 }
+    let valid = ($a > 0 and $a <= 65535 and $b > 0 and $b <= 65535 and $a != $b)
+    {
+        ready: $valid
+        ports: (if $valid { {a: $a, b: $b} } else { {}})
+    }
+}
+
 def start-redirect-server [tmp: string] {
     let python = (redirect-python)
     let server_script = ($tmp | path join "redirect-server.py")
@@ -23,6 +51,8 @@ def start-redirect-server [tmp: string] {
     let ports_file = ($tmp | path join "redirect-ports.json")
     let event_file = ($tmp | path join "redirect-events.jsonl")
     let stop_file = ($tmp | path join "redirect-stop")
+    let stdout_file = ($tmp | path join "redirect-server.stdout")
+    let stderr_file = ($tmp | path join "redirect-server.stderr")
     let server_source = "import http.server
 import json
 import os
@@ -186,8 +216,12 @@ servers['a'].label = 'a'
 servers['b'].label = 'b'
 for server in servers.values():
     server.timeout = 0.05
-with open(ports_file, 'w', encoding='utf-8') as handle:
+ports_temp = ports_file + '.tmp'
+with open(ports_temp, 'w', encoding='utf-8') as handle:
     json.dump({'a': servers['a'].server_port, 'b': servers['b'].server_port}, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(ports_temp, ports_file)
 with open(event_file, 'w', encoding='utf-8') as handle:
     handle.write('')
 deadline = time.time() + 240
@@ -200,18 +234,23 @@ for server in servers.values():
     let launcher_source = "import os
 import subprocess
 import sys
-options = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+stdout_file, stderr_file = sys.argv[1:3]
+options = {
+    'stdin': subprocess.DEVNULL,
+    'stdout': open(stdout_file, 'ab', buffering=0),
+    'stderr': open(stderr_file, 'ab', buffering=0),
+}
 if os.name == 'nt':
     options['creationflags'] = subprocess.CREATE_NO_WINDOW
 else:
     options['start_new_session'] = True
-process = subprocess.Popen(sys.argv[1:], **options)
+process = subprocess.Popen(sys.argv[3:], **options)
 print(process.pid)
 "
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
     let launched = (test-complete-result (do {
-        ^$python $launcher_script $python $server_script $ports_file $event_file $stop_file
+        ^$python $launcher_script $stdout_file $stderr_file $python $server_script $ports_file $event_file $stop_file
     } | complete))
     assert equal $launched.exit_code 0 $"Redirect server launcher failed: ($launched.stderr)"
     let base = {
@@ -219,13 +258,34 @@ print(process.pid)
         ports: {}
         event_file: $event_file
         stop_file: $stop_file
+        stdout_file: $stdout_file
+        stderr_file: $stderr_file
     }
-    for _ in 1..100 {
-        if ($ports_file | path exists) and (redirect-process-running $base.pid) { break }
-        sleep 50ms
+    mut readiness = {ready: false, ports: {}}
+    let startup_deadline = ((date now) + 30sec)
+    while (date now) < $startup_deadline {
+        if not (redirect-process-running $base.pid) {
+            break
+        }
+        $readiness = (redirect-startup-ports $ports_file)
+        if $readiness.ready {
+            break
+        }
+        sleep 100ms
     }
-    assert ($ports_file | path exists) "Redirect server did not publish ports"
-    let server = ($base | update ports (open $ports_file))
+    if not $readiness.ready {
+        let running = (redirect-process-running $base.pid)
+        let stderr = (redirect-startup-output $stderr_file)
+        let reason = if $running {
+            "did not publish two valid ports within 30 seconds"
+        } else {
+            "exited before publishing two valid ports"
+        }
+        try { stop-redirect-server $base } catch {}
+        let detail = if ($stderr | is-empty) { "" } else { $": ($stderr)" }
+        error make {msg: $"Redirect server ($reason)($detail)"}
+    }
+    let server = ($base | update ports $readiness.ports)
     for port in [$server.ports.a $server.ports.b] {
         let ready = (test-complete-result (^curl -s --max-time 2 $"http://127.0.0.1:($port)/ready" | complete))
         assert equal $ready.exit_code 0 $"Redirect server readiness failed: ($ready.stderr)"
