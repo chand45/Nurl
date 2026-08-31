@@ -625,6 +625,61 @@ def test-pretty-table-contract [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-runner-skip-summary-contract [] {
+    let passed = {name: "pass", status: "pass", error: ""}
+    let failed = {name: "fail", status: "fail", error: "expected failure"}
+    let network_skip = {name: "network", status: "skip", error: "network unavailable"}
+    let capability_skip = {name: "capability", status: "skip", error: "node unavailable"}
+    let duplicate_capability_skip = {name: "capability duplicate", status: "skip", error: "node unavailable"}
+    let platform_skip = {name: "platform", status: "skip", error: "POSIX permission fixture"}
+    let blank_skip = {name: "blank", status: "skip", error: "  "}
+    let null_skip = {name: "null", status: "skip", error: null}
+    let missing_skip = {name: "missing", status: "skip"}
+
+    let zero = (summarize-test-results [$passed])
+    assert equal $zero.total 1
+    assert equal $zero.passed 1
+    assert equal $zero.failed 0
+    assert equal $zero.skipped 0
+    assert equal $zero.skip_reasons []
+    assert equal $zero.skip_note "" "zero-skip success note changed"
+
+    let capability = (summarize-test-results [$passed $capability_skip $duplicate_capability_skip])
+    assert equal $capability.skipped 2
+    assert equal $capability.skip_reasons [{reason: "node unavailable", count: 2}]
+    assert equal $capability.skip_note "2 skipped"
+    assert (not ($capability.skip_note | str contains "network")) "capability skip was mislabeled as network-related"
+
+    let offline = (summarize-test-results [$passed $network_skip])
+    assert equal $offline.skip_reasons [{reason: "network unavailable", count: 1}]
+    assert equal $offline.skip_note "1 skipped"
+
+    let mixed = (
+        summarize-test-results [
+            $passed
+            $failed
+            $network_skip
+            $capability_skip
+            $duplicate_capability_skip
+            $platform_skip
+            $blank_skip
+            $null_skip
+            $missing_skip
+        ]
+    )
+    assert equal $mixed.total 9
+    assert equal $mixed.passed 1
+    assert equal $mixed.failed 1 "failure accounting changed"
+    assert equal $mixed.skipped 7
+    assert equal $mixed.skip_reasons [
+        {reason: "POSIX permission fixture", count: 1}
+        {reason: "network unavailable", count: 1}
+        {reason: "node unavailable", count: 2}
+        {reason: "unspecified", count: 3}
+    ] "mixed skip reasons were not grouped and sorted deterministically"
+    assert equal $mixed.skip_note "7 skipped"
+}
+
 def run-suite-surface-contracts []: nothing -> list<record> {
     print $"\n(ansi yellow)── Public command surface contracts ──(ansi reset)"
     [
@@ -635,5 +690,6 @@ def run-suite-surface-contracts []: nothing -> list<record> {
         (run-test "human and typed history readers preserve streams and schemas" { test-history-read-stream-contracts })
         (run-test "collection show returns metadata, requests, and environments safely" { test-collection-show-schema })
         (run-test "api pretty serializes table and nested JSON bodies" { test-pretty-table-contract })
+        (run-test "runner summaries group truthful skip causes deterministically" { test-runner-skip-summary-contract })
     ]
 }

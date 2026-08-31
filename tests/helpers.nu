@@ -105,6 +105,39 @@ def skip-test [name: string, reason: string] {
     {name: $name, status: "skip", error: $reason}
 }
 
+# Build deterministic totals and skip-reason counts for runner summaries.
+def summarize-test-results [results: list<record>] {
+    let skipped_results = ($results | where status == "skip")
+    let reasons = (
+        $skipped_results
+        | each {|result|
+            let reason = ($result.error? | default "" | into string | str trim)
+            if ($reason | is-empty) { "unspecified" } else { $reason }
+        }
+    )
+    let skip_reasons = (
+        $reasons
+        | uniq
+        | sort
+        | each {|reason|
+            {
+                reason: $reason
+                count: ($reasons | where {|candidate| $candidate == $reason } | length)
+            }
+        }
+    )
+    let skipped = ($skipped_results | length)
+
+    {
+        total: ($results | length)
+        passed: ($results | where status == "pass" | length)
+        failed: ($results | where status == "fail" | length)
+        skipped: $skipped
+        skip_reasons: $skip_reasons
+        skip_note: (if $skipped == 0 { "" } else { $"($skipped) skipped" })
+    }
+}
+
 # ── Network check ─────────────────────────────────────────────────────────────
 
 # Return true if jsonplaceholder.typicode.com is reachable.

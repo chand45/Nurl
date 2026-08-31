@@ -85,10 +85,11 @@ let all_results = (
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-let passed  = ($all_results | where status == "pass"  | length)
-let failed  = ($all_results | where status == "fail"  | length)
-let skipped = ($all_results | where status == "skip"  | length)
-let total   = ($all_results | length)
+let summary = (summarize-test-results $all_results)
+let passed  = $summary.passed
+let failed  = $summary.failed
+let skipped = $summary.skipped
+let total   = $summary.total
 
 print ""
 print $"(ansi blue)══════════════════════════════════════(ansi reset)"
@@ -98,6 +99,10 @@ print $"  Total:   ($total)"
 print $"  (ansi green)Passed:  ($passed)(ansi reset)"
 if $skipped > 0 {
     print $"  (ansi yellow)Skipped: ($skipped)(ansi reset)"
+    print $"  (ansi yellow)Skip reasons:(ansi reset)"
+    for reason in $summary.skip_reasons {
+        print $"    ($reason.count) x ($reason.reason)"
+    }
 }
 if $failed > 0 {
     print $"  (ansi red)Failed:  ($failed)(ansi reset)"
@@ -112,8 +117,7 @@ if $failed > 0 {
 } else {
     print ""
     if $skipped > 0 {
-        let skip_note = $"($skipped) skipped, no network"
-        print $"(ansi green_bold)✓ All ($passed) tests passed(ansi reset) (ansi yellow)($skip_note)(ansi reset)"
+        print $"(ansi green_bold)✓ All ($passed) tests passed(ansi reset) (ansi yellow)($summary.skip_note)(ansi reset)"
     } else {
         print $"(ansi green_bold)✓ All ($total) tests passed(ansi reset)"
     }
