@@ -636,28 +636,38 @@ def test-runner-skip-summary-contract [] {
     let null_skip = {name: "null", status: "skip", error: null}
     let missing_skip = {name: "missing", status: "skip"}
 
-    let zero = (summarize-test-results [$passed])
-    assert equal $zero.total 1
-    assert equal $zero.passed 1
-    assert equal $zero.failed 0
-    assert equal $zero.skipped 0
-    assert equal $zero.skip_reasons []
-    assert equal $zero.skip_note "" "zero-skip success note changed"
+    let zero = (render-test-summary [$passed])
+    assert equal $zero.exit_code 0
+    assert equal ($zero.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   1"
+        "  Passed:  1"
+        ""
+        "✓ All 1 tests passed"
+    ] "zero-skip runner output changed"
 
-    let capability = (summarize-test-results [$passed $capability_skip $duplicate_capability_skip])
-    assert equal $capability.skipped 2
-    assert equal $capability.skip_reasons [{reason: "node unavailable", count: 2}]
-    assert equal $capability.skip_note "2 skipped"
-    assert (not ($capability.skip_note | str contains "network")) "capability skip was mislabeled as network-related"
+    let network_only = (render-test-summary [$passed $network_skip $network_skip])
+    assert equal $network_only.exit_code 0
+    assert equal ($network_only.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   3"
+        "  Passed:  1"
+        "  Skipped: 2"
+        "  Skip reasons:"
+        "    2 x network unavailable"
+        ""
+        "✓ All 1 tests passed 2 skipped"
+    ] "network-only skips were not rendered from their recorded reason"
 
-    let offline = (summarize-test-results [$passed $network_skip])
-    assert equal $offline.skip_reasons [{reason: "network unavailable", count: 1}]
-    assert equal $offline.skip_note "1 skipped"
-
-    let mixed = (
-        summarize-test-results [
+    let skipped = (
+        render-test-summary [
             $passed
-            $failed
             $network_skip
             $capability_skip
             $duplicate_capability_skip
@@ -667,17 +677,45 @@ def test-runner-skip-summary-contract [] {
             $missing_skip
         ]
     )
-    assert equal $mixed.total 9
-    assert equal $mixed.passed 1
-    assert equal $mixed.failed 1 "failure accounting changed"
-    assert equal $mixed.skipped 7
-    assert equal $mixed.skip_reasons [
-        {reason: "POSIX permission fixture", count: 1}
-        {reason: "network unavailable", count: 1}
-        {reason: "node unavailable", count: 2}
-        {reason: "unspecified", count: 3}
-    ] "mixed skip reasons were not grouped and sorted deterministically"
-    assert equal $mixed.skip_note "7 skipped"
+    assert equal $skipped.exit_code 0
+    let skipped_lines = ($skipped.lines | each {|line| $line | ansi strip })
+    assert equal $skipped_lines [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   8"
+        "  Passed:  1"
+        "  Skipped: 7"
+        "  Skip reasons:"
+        "    1 x POSIX permission fixture"
+        "    1 x network unavailable"
+        "    2 x node unavailable"
+        "    3 x unspecified"
+        ""
+        "✓ All 1 tests passed 7 skipped"
+    ] "runner did not render grouped skip reasons and the neutral final line"
+    assert (not (($skipped_lines | str join "\n") | str contains "no network")) "runner mislabeled mixed skips as network-only"
+
+    let failure = (render-test-summary [$passed $failed $capability_skip])
+    assert equal $failure.exit_code 1 "failure exit code changed"
+    assert equal ($failure.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   3"
+        "  Passed:  1"
+        "  Skipped: 1"
+        "  Skip reasons:"
+        "    1 x node unavailable"
+        "  Failed:  1"
+        ""
+        "Failed tests:"
+        "  • fail"
+        "    expected failure"
+        ""
+    ] "failure summary or exit behavior changed"
 }
 
 def run-suite-surface-contracts []: nothing -> list<record> {

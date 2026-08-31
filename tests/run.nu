@@ -85,40 +85,10 @@ let all_results = (
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-let summary = (summarize-test-results $all_results)
-let passed  = $summary.passed
-let failed  = $summary.failed
-let skipped = $summary.skipped
-let total   = $summary.total
-
-print ""
-print $"(ansi blue)══════════════════════════════════════(ansi reset)"
-print $"(ansi blue)Results(ansi reset)"
-print $"(ansi blue)══════════════════════════════════════(ansi reset)"
-print $"  Total:   ($total)"
-print $"  (ansi green)Passed:  ($passed)(ansi reset)"
-if $skipped > 0 {
-    print $"  (ansi yellow)Skipped: ($skipped)(ansi reset)"
-    print $"  (ansi yellow)Skip reasons:(ansi reset)"
-    for reason in $summary.skip_reasons {
-        print $"    ($reason.count) x ($reason.reason)"
-    }
+let report = (render-test-summary $all_results)
+for line in $report.lines {
+    print $line
 }
-if $failed > 0 {
-    print $"  (ansi red)Failed:  ($failed)(ansi reset)"
-    print ""
-    print $"(ansi red)Failed tests:(ansi reset)"
-    for r in ($all_results | where status == "fail") {
-        print $"  • ($r.name)"
-        print $"    ($r.error)"
-    }
-    print ""
-    exit 1
-} else {
-    print ""
-    if $skipped > 0 {
-        print $"(ansi green_bold)✓ All ($passed) tests passed(ansi reset) (ansi yellow)($summary.skip_note)(ansi reset)"
-    } else {
-        print $"(ansi green_bold)✓ All ($total) tests passed(ansi reset)"
-    }
+if $report.exit_code != 0 {
+    exit $report.exit_code
 }
