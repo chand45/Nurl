@@ -105,6 +105,82 @@ def skip-test [name: string, reason: string] {
     {name: $name, status: "skip", error: $reason}
 }
 
+# Build deterministic totals and skip-reason counts for runner summaries.
+def summarize-test-results [results: list<record>] {
+    let skipped_results = ($results | where status == "skip")
+    let reasons = (
+        $skipped_results
+        | each {|result|
+            let reason = ($result.error? | default "" | into string | str trim)
+            if ($reason | is-empty) { "unspecified" } else { $reason }
+        }
+    )
+    let skip_reasons = (
+        $reasons
+        | uniq
+        | sort
+        | each {|reason|
+            {
+                reason: $reason
+                count: ($reasons | where {|candidate| $candidate == $reason } | length)
+            }
+        }
+    )
+    let skipped = ($skipped_results | length)
+
+    {
+        total: ($results | length)
+        passed: ($results | where status == "pass" | length)
+        failed: ($results | where status == "fail" | length)
+        skipped: $skipped
+        skip_reasons: $skip_reasons
+    }
+}
+
+# Render the main runner's summary and select its exit code.
+def render-test-summary [results: list<record>] {
+    let summary = (summarize-test-results $results)
+    mut lines = [
+        ""
+        $"(ansi blue)══════════════════════════════════════(ansi reset)"
+        $"(ansi blue)Results(ansi reset)"
+        $"(ansi blue)══════════════════════════════════════(ansi reset)"
+        $"  Total:   ($summary.total)"
+        $"  (ansi green)Passed:  ($summary.passed)(ansi reset)"
+    ]
+
+    if $summary.skipped > 0 {
+        $lines = ($lines | append $"  (ansi yellow)Skipped: ($summary.skipped)(ansi reset)")
+        $lines = ($lines | append $"  (ansi yellow)Skip reasons:(ansi reset)")
+        for reason in $summary.skip_reasons {
+            $lines = ($lines | append $"    ($reason.count) x ($reason.reason)")
+        }
+    }
+
+    if $summary.failed > 0 {
+        $lines = ($lines | append $"  (ansi red)Failed:  ($summary.failed)(ansi reset)")
+        $lines = ($lines | append "")
+        $lines = ($lines | append $"(ansi red)Failed tests:(ansi reset)")
+        for result in ($results | where status == "fail") {
+            $lines = ($lines | append $"  • ($result.name)")
+            $lines = ($lines | append $"    ($result.error)")
+        }
+        $lines = ($lines | append "")
+    } else {
+        $lines = ($lines | append "")
+        if $summary.skipped > 0 {
+            $lines = (
+                $lines
+                | append $"(ansi green_bold)✓ All ($summary.passed) tests passed(ansi reset) (ansi yellow)($summary.skipped) skipped(ansi reset)"
+            )
+        } else {
+            $lines = ($lines | append $"(ansi green_bold)✓ All ($summary.total) tests passed(ansi reset)")
+        }
+    }
+
+    {lines: $lines, exit_code: (if $summary.failed > 0 { 1 } else { 0 })}
+}
+
 # ── Network check ─────────────────────────────────────────────────────────────
 
 # Return true if jsonplaceholder.typicode.com is reachable.

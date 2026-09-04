@@ -14,8 +14,9 @@ Or from a Nushell session:
 source tests/run.nu
 ```
 
-The runner prints a colour-coded PASS/FAIL summary and exits with code 0 (all
-passed) or 1 (one or more failures).
+The runner prints a colour-coded PASS/FAIL summary with deterministic counts for
+each recorded skip reason. It exits with code 0 (all passed) or 1 (one or more
+failures).
 
 Credential-safety gates can also run independently without external services:
 

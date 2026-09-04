@@ -625,6 +625,99 @@ def test-pretty-table-contract [] {
     if $stop_failure != null { error make {msg: $stop_failure.msg} }
 }
 
+def test-runner-skip-summary-contract [] {
+    let passed = {name: "pass", status: "pass", error: ""}
+    let failed = {name: "fail", status: "fail", error: "expected failure"}
+    let network_skip = {name: "network", status: "skip", error: "network unavailable"}
+    let capability_skip = {name: "capability", status: "skip", error: "node unavailable"}
+    let duplicate_capability_skip = {name: "capability duplicate", status: "skip", error: "node unavailable"}
+    let platform_skip = {name: "platform", status: "skip", error: "POSIX permission fixture"}
+    let blank_skip = {name: "blank", status: "skip", error: "  "}
+    let null_skip = {name: "null", status: "skip", error: null}
+    let missing_skip = {name: "missing", status: "skip"}
+
+    let zero = (render-test-summary [$passed])
+    assert equal $zero.exit_code 0
+    assert equal ($zero.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   1"
+        "  Passed:  1"
+        ""
+        "✓ All 1 tests passed"
+    ] "zero-skip runner output changed"
+
+    let network_only = (render-test-summary [$passed $network_skip $network_skip])
+    assert equal $network_only.exit_code 0
+    assert equal ($network_only.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   3"
+        "  Passed:  1"
+        "  Skipped: 2"
+        "  Skip reasons:"
+        "    2 x network unavailable"
+        ""
+        "✓ All 1 tests passed 2 skipped"
+    ] "network-only skips were not rendered from their recorded reason"
+
+    let skipped = (
+        render-test-summary [
+            $passed
+            $network_skip
+            $capability_skip
+            $duplicate_capability_skip
+            $platform_skip
+            $blank_skip
+            $null_skip
+            $missing_skip
+        ]
+    )
+    assert equal $skipped.exit_code 0
+    let skipped_lines = ($skipped.lines | each {|line| $line | ansi strip })
+    assert equal $skipped_lines [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   8"
+        "  Passed:  1"
+        "  Skipped: 7"
+        "  Skip reasons:"
+        "    1 x POSIX permission fixture"
+        "    1 x network unavailable"
+        "    2 x node unavailable"
+        "    3 x unspecified"
+        ""
+        "✓ All 1 tests passed 7 skipped"
+    ] "runner did not render grouped skip reasons and the neutral final line"
+    assert (not (($skipped_lines | str join "\n") | str contains "no network")) "runner mislabeled mixed skips as network-only"
+
+    let failure = (render-test-summary [$passed $failed $capability_skip])
+    assert equal $failure.exit_code 1 "failure exit code changed"
+    assert equal ($failure.lines | each {|line| $line | ansi strip }) [
+        ""
+        "══════════════════════════════════════"
+        "Results"
+        "══════════════════════════════════════"
+        "  Total:   3"
+        "  Passed:  1"
+        "  Skipped: 1"
+        "  Skip reasons:"
+        "    1 x node unavailable"
+        "  Failed:  1"
+        ""
+        "Failed tests:"
+        "  • fail"
+        "    expected failure"
+        ""
+    ] "failure summary or exit behavior changed"
+}
+
 def run-suite-surface-contracts []: nothing -> list<record> {
     print $"\n(ansi yellow)── Public command surface contracts ──(ansi reset)"
     [
@@ -635,5 +728,6 @@ def run-suite-surface-contracts []: nothing -> list<record> {
         (run-test "human and typed history readers preserve streams and schemas" { test-history-read-stream-contracts })
         (run-test "collection show returns metadata, requests, and environments safely" { test-collection-show-schema })
         (run-test "api pretty serializes table and nested JSON bodies" { test-pretty-table-contract })
+        (run-test "runner summaries group truthful skip causes deterministically" { test-runner-skip-summary-contract })
     ]
 }

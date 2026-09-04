@@ -87,36 +87,10 @@ let all_results = (
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-let passed  = ($all_results | where status == "pass"  | length)
-let failed  = ($all_results | where status == "fail"  | length)
-let skipped = ($all_results | where status == "skip"  | length)
-let total   = ($all_results | length)
-
-print ""
-print $"(ansi blue)══════════════════════════════════════(ansi reset)"
-print $"(ansi blue)Results(ansi reset)"
-print $"(ansi blue)══════════════════════════════════════(ansi reset)"
-print $"  Total:   ($total)"
-print $"  (ansi green)Passed:  ($passed)(ansi reset)"
-if $skipped > 0 {
-    print $"  (ansi yellow)Skipped: ($skipped)(ansi reset)"
+let report = (render-test-summary $all_results)
+for line in $report.lines {
+    print $line
 }
-if $failed > 0 {
-    print $"  (ansi red)Failed:  ($failed)(ansi reset)"
-    print ""
-    print $"(ansi red)Failed tests:(ansi reset)"
-    for r in ($all_results | where status == "fail") {
-        print $"  • ($r.name)"
-        print $"    ($r.error)"
-    }
-    print ""
-    exit 1
-} else {
-    print ""
-    if $skipped > 0 {
-        let skip_note = $"($skipped) skipped, no network"
-        print $"(ansi green_bold)✓ All ($passed) tests passed(ansi reset) (ansi yellow)($skip_note)(ansi reset)"
-    } else {
-        print $"(ansi green_bold)✓ All ($total) tests passed(ansi reset)"
-    }
+if $report.exit_code != 0 {
+    exit $report.exit_code
 }
