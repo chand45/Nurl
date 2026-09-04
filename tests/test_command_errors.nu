@@ -547,7 +547,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with open(count_file, 'w', encoding='utf-8') as handle:
             handle.write(str(count))
         with open(token_body_file, 'a', encoding='utf-8') as handle:
-            handle.write(self.path + '\t' + body + '\n')
+            handle.write(self.path + '\\t' + body + '\\n')
         status = 200
         raw_payload = None
         if self.path == '/token-error-initial':
