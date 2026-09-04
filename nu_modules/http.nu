@@ -8,7 +8,7 @@ use history.nu ["api history save"]
 use resource-path.nu [commit-state-replace list-contained-resource-files open-state-record path-type-safe resolve-under-base save-state-replace state-base-type state-replacement-temp-path validate-resource-name]
 use command-error.nu [fail-command]
 use curl-capability.nu [require-curl-capability]
-use string-compat.nu [ascii-equal-ignore-case ascii-upcase]
+use string-compat.nu [ascii-equal-ignore-case ascii-upcase form-encode-record]
 
 const MAX_REDIRECTS = 50
 
@@ -740,26 +740,10 @@ def curl-args-to-string [
     $parts | str join " "
 }
 
-# Encode one application/x-www-form-urlencoded component.
-def url-encode-form-value [s: string] {
-    $s
-    | url encode --all
-    | str replace --all "%20" "+"
-    | str replace --all "%2A" "*"
-    | str replace --all "%2D" "-"
-    | str replace --all "%2E" "."
-    | str replace --all "%5F" "_"
-}
-
 # Encode a record as application/x-www-form-urlencoded
 def encode-form-data [data: record] {
     validate-form-record $data
-    $data | transpose key value | each {|kv|
-        let k = (url-encode-form-value $kv.key)
-        let value = ($kv.value | default "" | into string)
-        let v = (url-encode-form-value $value)
-        $"($k)=($v)"
-    } | str join "&"
+    form-encode-record $data
 }
 
 # Build curl arguments for binary file download (no response headers, writes to a sibling temp)

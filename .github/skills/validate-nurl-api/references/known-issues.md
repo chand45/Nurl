@@ -390,3 +390,16 @@ bulk changes.
   custom cross-origin header stripping and are not credential-safe beyond the first hop.
 - **Re-check:** run `tests/run-redirect-compat.nu` on Nushell 0.89 and current, then
   `tests/run-header-compat.nu`, `tests/run-body-compat.nu`, and the full `tests/run.nu`.
+
+## 33. FIXED: OAuth token forms corrupted reserved and non-ASCII credential bytes
+- **Old symptom:** client IDs, client secrets, scopes, and refresh tokens were concatenated into
+  OAuth token request bodies without form encoding. Spaces, `+`, `&`, `=`, `%`, `~`, and non-ASCII
+  text reached providers as different field names or values, so valid credentials could fail.
+- **Fix:** OAuth client-credentials and refresh grants use the same UTF-8
+  `application/x-www-form-urlencoded` serializer as regular Nurl form requests. Simple ASCII values
+  retain their existing wire bytes and field order.
+- **Compatibility:** values remain raw in `secrets.nuon` and are encoded only for transport.
+  Pre-encoded workaround values now encode `%` as `%25`; store the original unencoded value instead.
+- **Re-check:** run the OAuth stream/persistence case in `tests/test_command_errors.nu`. Its local
+  endpoint captures exact request bodies for simple and reserved-character values across both grant
+  types.

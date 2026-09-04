@@ -80,15 +80,17 @@ def start-windows-oauth-server [tmp: string] {
     let port_file = ($tmp | path join "oauth-port.txt")
     let count_file = ($tmp | path join "oauth-count.txt")
     let wire_file = ($tmp | path join "oauth-wire.txt")
+    let token_body_file = ($tmp | path join "oauth-token-bodies.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
 
-    let server_source = "param($PortFile, $CountFile, $WireFile, $StopFile)
+    let server_source = "param($PortFile, $CountFile, $WireFile, $TokenBodyFile, $StopFile)
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 [System.IO.File]::WriteAllText($PortFile, [string]$port)
 [System.IO.File]::WriteAllText($CountFile, '0')
 [System.IO.File]::WriteAllText($WireFile, '')
+[System.IO.File]::WriteAllText($TokenBodyFile, '')
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 try {
     while (-not (Test-Path -LiteralPath $StopFile) -and $clock.Elapsed.TotalSeconds -lt 180) {
@@ -140,6 +142,7 @@ try {
                 $requestPath = ($requestLine -split ' ')[1]
                 $count = [int]([System.IO.File]::ReadAllText($CountFile)) + 1
                 [System.IO.File]::WriteAllText($CountFile, [string]$count)
+                [System.IO.File]::AppendAllText($TokenBodyFile, $requestPath + \"`t\" + $body + [Environment]::NewLine)
                 $tokenStatus = 200
                 if ($requestPath -eq '/token-error-initial') {
                     $tokenStatus = 400
@@ -231,6 +234,18 @@ try {
                         refresh_token = 'VALID-SHAPED-REFRESH'
                         token_type = 'Bearer'
                         expires_in = 1800
+                    }
+                } elseif ($requestPath -eq '/token-encoded' -and $body -match 'grant_type=refresh_token') {
+                    $response = @{
+                        access_token = 'ACCESS-TOKEN-REFRESHED-SENTINEL'
+                        refresh_token = 'REFRESH-TOKEN-REFRESHED-SENTINEL'
+                        expires_in = 3600
+                    }
+                } elseif ($requestPath -eq '/token-encoded') {
+                    $response = @{
+                        access_token = 'ACCESS-TOKEN-SENTINEL'
+                        refresh_token = 'refresh +/=&%~value=='
+                        expires_in = 3600
                     }
                 } elseif ($body -match 'grant_type=refresh_token') {
                     $response = @{
@@ -451,7 +466,7 @@ try {
 } finally {
     $listener.Stop()
 }"
-    let launcher_source = "param($ServerScript, $PortFile, $CountFile, $WireFile, $StopFile)
+    let launcher_source = "param($ServerScript, $PortFile, $CountFile, $WireFile, $TokenBodyFile, $StopFile)
 $arguments = @(
     '-NoProfile',
     '-NonInteractive',
@@ -462,6 +477,7 @@ $arguments = @(
     ('\"{0}\"' -f $PortFile),
     ('\"{0}\"' -f $CountFile),
     ('\"{0}\"' -f $WireFile),
+    ('\"{0}\"' -f $TokenBodyFile),
     ('\"{0}\"' -f $StopFile)
 )
 $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden
@@ -469,7 +485,7 @@ $process.Id"
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (test-complete-result (do { ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $stop_file } | complete))
+    let launched = (test-complete-result (do { ^powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher_script $server_script $port_file $count_file $wire_file $token_body_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -477,6 +493,7 @@ $process.Id"
         port_file: $port_file
         count_file: $count_file
         wire_file: $wire_file
+        token_body_file: $token_body_file
         stop_file: $stop_file
     }
 }
@@ -487,6 +504,7 @@ def start-posix-oauth-server [tmp: string] {
     let port_file = ($tmp | path join "oauth-port.txt")
     let count_file = ($tmp | path join "oauth-count.txt")
     let wire_file = ($tmp | path join "oauth-wire.txt")
+    let token_body_file = ($tmp | path join "oauth-token-bodies.txt")
     let stop_file = ($tmp | path join "oauth-stop.txt")
     let python = if not (which python3 | is-empty) {
         "python3"
@@ -502,7 +520,7 @@ import os
 import sys
 import time
 
-port_file, count_file, wire_file, stop_file = sys.argv[1:5]
+port_file, count_file, wire_file, token_body_file, stop_file = sys.argv[1:6]
 count = 0
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -528,6 +546,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         count += 1
         with open(count_file, 'w', encoding='utf-8') as handle:
             handle.write(str(count))
+        with open(token_body_file, 'a', encoding='utf-8') as handle:
+            handle.write(self.path + '\\t' + body + '\\n')
         status = 200
         raw_payload = None
         if self.path == '/token-error-initial':
@@ -616,6 +636,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'refresh_token': 'VALID-SHAPED-REFRESH',
                 'token_type': 'Bearer',
                 'expires_in': 1800,
+            }
+        elif self.path == '/token-encoded' and 'grant_type=refresh_token' in body:
+            payload = {
+                'access_token': 'ACCESS-TOKEN-REFRESHED-SENTINEL',
+                'refresh_token': 'REFRESH-TOKEN-REFRESHED-SENTINEL',
+                'expires_in': 3600,
+            }
+        elif self.path == '/token-encoded':
+            payload = {
+                'access_token': 'ACCESS-TOKEN-SENTINEL',
+                'refresh_token': 'refresh +/=&%~value==',
+                'expires_in': 3600,
             }
         elif 'grant_type=refresh_token' in body:
             payload = {
@@ -818,6 +850,8 @@ with open(count_file, 'w', encoding='utf-8') as handle:
     handle.write('0')
 with open(wire_file, 'w', encoding='utf-8') as handle:
     handle.write('')
+with open(token_body_file, 'w', encoding='utf-8') as handle:
+    handle.write('')
 deadline = time.time() + 180
 while not os.path.exists(stop_file) and time.time() < deadline:
     server.handle_request()
@@ -838,7 +872,7 @@ print(process.pid)
     $server_source | save -f $server_script
     $launcher_source | save -f $launcher_script
 
-    let launched = (test-complete-result (do { ^$python $launcher_script $python $server_script $port_file $count_file $wire_file $stop_file } | complete))
+    let launched = (test-complete-result (do { ^$python $launcher_script $python $server_script $port_file $count_file $wire_file $token_body_file $stop_file } | complete))
     assert equal $launched.exit_code 0 $"OAuth server launcher failed: ($launched.stderr)"
     {
         pid: ($launched.stdout | str trim | into int)
@@ -846,6 +880,7 @@ print(process.pid)
         port_file: $port_file
         count_file: $count_file
         wire_file: $wire_file
+        token_body_file: $token_body_file
         stop_file: $stop_file
     }
 }
@@ -1057,6 +1092,7 @@ def test-oauth2-success-streams-and-persistence [] {
         assert equal $first_secrets.oauth.tmpoauth.refresh_token "REFRESH-TOKEN-SENTINEL"
         assert (($first_secrets.oauth.tmpoauth.expires_at? | default "") | is-not-empty) "OAuth2 expiry should be persisted"
         assert equal (open $server.count_file --raw | str trim) "1"
+        assert equal (command-error-token-bodies $server | get 0.body) "grant_type=client_credentials&client_id=client-id&client_secret=CLIENT-SECRET-SENTINEL"
 
         let auth_config = (api auth get-config {type: oauth2, ref: tmpoauth})
         assert equal $auth_config.type "bearer"
@@ -1075,6 +1111,41 @@ def test-oauth2-success-streams-and-persistence [] {
         assert equal $refreshed_secrets.oauth.tmpoauth.access_token "ACCESS-TOKEN-REFRESHED-SENTINEL"
         assert equal $refreshed_secrets.oauth.tmpoauth.refresh_token "REFRESH-TOKEN-REFRESHED-SENTINEL"
         assert equal (open $server.count_file --raw | str trim) "2"
+
+        let client_id = "client id+&=%~世界"
+        let client_secret = "secret value+&=%~世界"
+        let scope = "read write+&=%~世界"
+        let refresh_token = "refresh +/=&%~value=="
+        api auth oauth2 configure encoded --client-id $client_id --client-secret $client_secret --scope $scope --token-url $"http://127.0.0.1:($server.port)/token-encoded" | ignore
+
+        let encoded_obtain = (run-command-process $root "api auth oauth2 token encoded")
+        assert equal $encoded_obtain.exit_code 0 $"OAuth2 encoded token obtain failed: ($encoded_obtain.stderr)"
+        let encoded_secrets = (open ($root | path join "secrets.nuon"))
+        assert equal $encoded_secrets.oauth.encoded.refresh_token $refresh_token "provider refresh token was not stored raw"
+
+        let encoded_refresh = (run-command-process $root "api auth oauth2 refresh encoded")
+        assert equal $encoded_refresh.exit_code 0 $"OAuth2 encoded refresh failed: ($encoded_refresh.stderr)"
+        assert equal (open $server.count_file --raw | str trim) "4"
+        assert equal (open ($root | path join "secrets.nuon") | get oauth.encoded.refresh_token) "REFRESH-TOKEN-REFRESHED-SENTINEL"
+
+        let token_bodies = (command-error-token-bodies $server)
+        assert equal ($token_bodies | get 1.body) "grant_type=refresh_token&refresh_token=REFRESH-TOKEN-SENTINEL&client_id=client-id&client_secret=CLIENT-SECRET-SENTINEL"
+        assert equal ($token_bodies | get 2.body) "grant_type=client_credentials&client_id=client+id%2B%26%3D%25%7E%E4%B8%96%E7%95%8C&client_secret=secret+value%2B%26%3D%25%7E%E4%B8%96%E7%95%8C&scope=read+write%2B%26%3D%25%7E%E4%B8%96%E7%95%8C"
+        assert equal ($token_bodies | get 3.body) "grant_type=refresh_token&refresh_token=refresh+%2B%2F%3D%26%25%7Evalue%3D%3D&client_id=client+id%2B%26%3D%25%7E%E4%B8%96%E7%95%8C&client_secret=secret+value%2B%26%3D%25%7E%E4%B8%96%E7%95%8C"
+        assert equal (($token_bodies | get 2.body | split row "&") | length) 4
+        assert equal (($token_bodies | get 3.body | split row "&") | length) 4
+        assert equal (decode-form-body ($token_bodies | get 2.body)) {
+            grant_type: "client_credentials"
+            client_id: $client_id
+            client_secret: $client_secret
+            scope: $scope
+        }
+        assert equal (decode-form-body ($token_bodies | get 3.body)) {
+            grant_type: "refresh_token"
+            refresh_token: $refresh_token
+            client_id: $client_id
+            client_secret: $client_secret
+        }
         null
     } catch {|error|
         $error
@@ -1104,6 +1175,27 @@ def command-error-wire-events [server: record] {
     | lines
     | where {|line| not ($line | is-empty) }
     | parse --regex '^(?<path>[^\t]+)\t(?<authorization>[^\t]*)\t(?<api_key>[^\t]*)\t(?<trace>[^\t]*)\t(?<password>[^\t]*)\t(?<authorization_count>\d+)$'
+}
+
+def command-error-token-bodies [server: record] {
+    if not ($server.token_body_file | path exists) {
+        return []
+    }
+    open $server.token_body_file --raw
+    | lines
+    | where {|line| not ($line | is-empty) }
+    | parse --regex '^(?<path>[^\t]+)\t(?<body>.*)$'
+}
+
+def decode-form-body [body: string] {
+    $body
+    | split row "&"
+    | reduce -f {} {|pair, decoded|
+        let parts = ($pair | split row "=")
+        let key = ($parts | first | str replace --all "+" " " | url decode)
+        let value = ($parts | skip 1 | str join "=" | str replace --all "+" " " | url decode)
+        $decoded | upsert $key $value
+    }
 }
 
 def assert-no-auth-leak [result: record, secrets: list<string>, label: string] {

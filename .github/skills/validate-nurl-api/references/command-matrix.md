@@ -78,8 +78,8 @@ Use a temp credential name; secrets live in gitignored `secrets.nuon`.
 | api auth apikey get | `api auth apikey get tmpcred` | Returns the key config. |
 | api auth apikey delete | `api auth apikey delete tmpcred` | Removed. |
 | api auth oauth2 configure | `api auth oauth2 configure tmpcred --client-id id --client-secret s --token-url https://example.com/token` | Config saved. |
-| api auth oauth2 token | `api auth oauth2 token tmpcred` | **Needs a real provider.** Without one: config/HTTP error (smoke only). |
-| api auth oauth2 refresh | `api auth oauth2 refresh tmpcred` | **Needs a real provider + refresh token** (smoke only). |
+| api auth oauth2 token | `api auth oauth2 token tmpcred` | With a local provider, persists the token and sends client ID, client secret, and optional scope as exact UTF-8 form fields. |
+| api auth oauth2 refresh | `api auth oauth2 refresh tmpcred` | With a local provider, sends its raw stored refresh token plus client credentials as exact UTF-8 form fields and persists rotated tokens. |
 | api auth oauth2 delete | `api auth oauth2 delete tmpcred` | Removed. |
 | api auth show | `api auth bearer set tmpcred abc; api auth show --full; api auth bearer delete tmpcred` | Shows credential type/status and the isolated `tmpcred` value; never run `--full` against real secrets in captured logs. |
 | api auth list | `api auth list` | Lists configured credentials by type. |

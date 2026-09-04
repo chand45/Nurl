@@ -70,6 +70,7 @@ cleaned up after each test.
 | `test_features.nu` | C4-C11: `--form`, `--save`, `--follow-redirects`, saved-request tests, `--retries`, content-type, `api head`/`api options`, `api request export` |
 | `test_vars.nu` | Vars: `{{var}}` interpolation, builtins (`{{$uuid}}`, `{{$timestamp}}`), `api vars extract` dot-path, precedence |
 | `test_chain.nu` | Chain: POST+GET, string body, variable extraction, `--stop-on-error` |
+| `test_command_errors.nu` | Public error streams plus exact OAuth client-credentials and refresh form bodies |
 | `test_auth_replay.nu` | Credential-safe previews, canonical history auth metadata, replay rotation, URL/header policy, and OAuth failures |
 | `test_credential_boundaries.nu` | Live response-header and config/environment/extra-variable interpolation boundaries |
 | `test_credential_blackbox.nu` | Nine independent public-CLI reproductions with literal policy tables and byte/network mutation checks |

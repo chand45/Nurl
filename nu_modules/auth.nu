@@ -2,7 +2,7 @@
 # Handles Bearer, SAML, Basic, API Key, and OAuth2 authentication
 
 use command-error.nu [fail-command]
-use string-compat.nu [ascii-upcase optional-get]
+use string-compat.nu [ascii-upcase form-encode-record optional-get]
 use state-store.nu [open-state-record save-state-replace]
 
 export const SAML_AUTH_SCHEME = "http://schemas.microsoft.com/dsts/saml2-bearer"
@@ -303,14 +303,25 @@ def acquire-oauth2-token [
         }
     }
 
-    # Request new token using client credentials
-    let body = $"grant_type=client_credentials&client_id=($config.client_id)&client_secret=($config.client_secret)"
-    let scope_param = if not ($config.scope | default "" | is-empty) {
-        $"&scope=($config.scope)"
-    } else { "" }
+    # Request new token using client credentials.
+    let fields = if not ($config.scope | default "" | is-empty) {
+        {
+            grant_type: "client_credentials"
+            client_id: $config.client_id
+            client_secret: $config.client_secret
+            scope: $config.scope
+        }
+    } else {
+        {
+            grant_type: "client_credentials"
+            client_id: $config.client_id
+            client_secret: $config.client_secret
+        }
+    }
+    let body = (form-encode-record $fields)
 
     let output = (do {
-        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $"($body)($scope_param)" --write-out "\n%{http_code}"
+        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" --data-raw $body --write-out "\n%{http_code}"
     } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 token request failed")
@@ -358,10 +369,15 @@ def refresh-oauth2-token [name: string] {
         return (acquire-oauth2-token $name --force)
     }
 
-    let body = $"grant_type=refresh_token&refresh_token=($refresh_token)&client_id=($config.client_id)&client_secret=($config.client_secret)"
+    let body = (form-encode-record {
+        grant_type: "refresh_token"
+        refresh_token: $refresh_token
+        client_id: $config.client_id
+        client_secret: $config.client_secret
+    })
 
     let output = (do {
-        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" -d $body --write-out "\n%{http_code}"
+        curl -q -s -X POST $config.token_url -H "Content-Type: application/x-www-form-urlencoded" --data-raw $body --write-out "\n%{http_code}"
     } | complete)
 
     let parsed = (parse-oauth-provider-response $output "OAuth2 refresh failed")
