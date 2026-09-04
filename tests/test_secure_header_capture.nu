@@ -213,7 +213,7 @@ public static class FakeCurl
     {
         string version = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_VERSION") ?? "8.13.0";
         string log = Environment.GetEnvironmentVariable("NURL_FAKE_CURL_LOG");
-        if (args.Length > 0 && args[0] == "--version")
+        if ((args.Length > 0 && args[0] == "--version") || (args.Length > 1 && args[0] == "-q" && args[1] == "--version"))
         {
             if (!String.IsNullOrEmpty(log))
             {
@@ -315,7 +315,9 @@ public static class FakeCurl
                 .Replace("%{time_total}", "0.001")
                 .Replace("%{size_download}", String.IsNullOrEmpty(outputPath) ? "0" : "2")
                 .Replace("%{size_header}", "0")
-                .Replace("%{exitcode}", exitCode.ToString());
+                .Replace("%{exitcode}", exitCode.ToString())
+                .Replace("%{redirect_url}", "")
+                .Replace("%{num_redirects}", "0");
             Console.Error.Write(metadata);
             return exitCode;
         }
@@ -355,7 +357,9 @@ public static class FakeCurl
                 .Replace("%{time_total}", "0.001")
                 .Replace("%{size_download}", "4")
                 .Replace("%{size_header}", headerSize)
-                .Replace("%{exitcode}", "0");
+                .Replace("%{exitcode}", "0")
+                .Replace("%{redirect_url}", "")
+                .Replace("%{num_redirects}", "0");
             Console.Error.Write(metadata);
             return 0;
         }
@@ -416,7 +420,9 @@ metadata=$(printf "%s" "$format" | sed \
   -e "s/%{time_total}/0.001/g" \
   -e "s/%{size_download}/4/g" \
   -e "s/%{size_header}/52/g" \
-  -e "s/%{exitcode}/0/g")
+  -e "s/%{exitcode}/0/g" \
+  -e "s#%{redirect_url}##g" \
+  -e "s/%{num_redirects}/0/g")
 printf "%s" "$metadata" >&2
 exit 0'
         } else if $mode in ["transport-failure" "transport-eventual-success" "partial-timeout"] {
@@ -470,7 +476,9 @@ if [ "x$NURL_FAKE_CURL_MODE" = "xtransport-failure" ] || [ "x$NURL_FAKE_CURL_MOD
     -e "s/%{time_total}/0.001/g" \
     -e "s/%{size_download}/$download_size/g" \
     -e "s/%{size_header}/0/g" \
-    -e "s/%{exitcode}/$exit_code/g")
+    -e "s/%{exitcode}/$exit_code/g" \
+    -e "s#%{redirect_url}##g" \
+    -e "s/%{num_redirects}/0/g")
   printf "%s" "$metadata" >&2
   exit "$exit_code"
 fi
@@ -485,7 +493,9 @@ metadata=$(printf "%s" "$format" | sed \
   -e "s/%{time_total}/0.001/g" \
   -e "s/%{size_download}/4/g" \
   -e "s/%{size_header}/52/g" \
-  -e "s/%{exitcode}/0/g")
+  -e "s/%{exitcode}/0/g" \
+  -e "s#%{redirect_url}##g" \
+  -e "s/%{num_redirects}/0/g")
 printf "%s" "$metadata" >&2
 exit 0'
         } else if $mode in ["supported" "supported-oauth" "size-too-large" "size-too-small" "malformed-trailer"] or ($mode | str starts-with "invalid-trailer") {
@@ -546,7 +556,9 @@ metadata=$(printf "%s" "$format" | sed \
   -e "s/%{time_total}/0.001/g" \
   -e "s/%{size_download}/4/g" \
   -e "s/%{size_header}/HEADER_SIZE/g" \
-  -e "s/%{exitcode}/0/g")
+  -e "s/%{exitcode}/0/g" \
+  -e "s#%{redirect_url}##g" \
+  -e "s/%{num_redirects}/0/g")
 metadata=$(printf "%s" "$metadata" | sed "s/HEADER_SIZE/' + $header_size + '/g")
 printf "%s" "$metadata" >&2
 exit 0' | str replace "TRAILER_TEXT" $trailer
@@ -555,7 +567,7 @@ exit 0' | str replace "TRAILER_TEXT" $trailer
 exit 99'
         }
         $"#!/bin/sh
-if [ \"x$1\" = \"x--version\" ]; then
+if [ \"x$1\" = \"x--version\" ] || { [ \"x$1\" = \"x-q\" ] && [ \"x$2\" = \"x--version\" ]; }; then
   echo version >> \"$NURL_FAKE_CURL_LOG\"
   if [ -n \"$NURL_FAKE_CURL_VERSION_LINE\" ]; then
     printf \"%s\\n\" \"$NURL_FAKE_CURL_VERSION_LINE\"

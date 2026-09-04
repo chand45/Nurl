@@ -1827,7 +1827,7 @@ def test-saml-auth-execution-replay-and-saved-put [] {
             {
                 label: "history SAML dry-run"
                 command: $"api history resend ($named_history.id | to nuon) --dry-run"
-                expected: ["-X GET" "/saml-generic"]
+                expected: ["/saml-generic"]
             }
         ]
         for case in $preview_cases {

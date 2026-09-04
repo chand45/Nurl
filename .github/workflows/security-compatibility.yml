@@ -146,10 +146,17 @@ jobs:
               $fallbackMarker = "STATE_FB_POSIX_089=EXECUTED uid=$uid destination=empty source=retained"
               if (-not $text.Contains($fallbackMarker)) { throw "Required durability evidence missing: $fallbackMarker" }
             }
+
           } else {
             $fallbackMarker = "STATE_FB_WINDOWS=EXECUTED runtime=${{ matrix.nu_version }} fixtures=A1,A2,A2b,A3-source,A3-destination,A4 paired=A4-POSIX-destructive-counterexample"
             if (-not $text.Contains($fallbackMarker)) { throw "Required durability evidence missing: $fallbackMarker" }
           }
+
+      - name: Run redirect compatibility suite
+        shell: pwsh
+        run: |
+          & $env:NU_EXE --no-config-file tests/run-redirect-compat.nu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   current-suite:
     name: Full suite / Nushell 0.114.1

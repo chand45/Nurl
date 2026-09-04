@@ -179,32 +179,38 @@ def test-real-auth-secret-redaction [] {
         let cases = [
             {
                 label: "direct bearer reference"
-                secret: $bearer_secret
+                wire_secret: $bearer_secret
+                secrets: [$bearer_secret]
                 command: ("api get 'http://transport.invalid/bearer' -a {type: bearer, token_ref: transport-bearer} --output none --no-history --save " + ($save_path | to nuon))
             }
             {
                 label: "direct basic reference"
-                secret: $basic_secret
+                wire_secret: ($"transport-user:($basic_secret)" | encode base64)
+                secrets: [$basic_secret ($"transport-user:($basic_secret)" | encode base64)]
                 command: "api get 'http://transport.invalid/basic' -a {type: basic, creds_ref: transport-basic} --output none --no-history"
             }
             {
                 label: "direct API-key reference"
-                secret: $apikey_secret
+                wire_secret: $apikey_secret
+                secrets: [$apikey_secret]
                 command: "api get 'http://transport.invalid/apikey' -a {type: api_key, key_ref: transport-apikey} --output none --no-history"
             }
             {
                 label: "direct cached OAuth token"
-                secret: $oauth_secret
+                wire_secret: $oauth_secret
+                secrets: [$oauth_secret]
                 command: "api get 'http://transport.invalid/oauth' -a {type: oauth2, ref: transport-oauth} --output none --no-history"
             }
             {
                 label: "saved bearer request"
-                secret: $bearer_secret
+                wire_secret: $bearer_secret
+                secrets: [$bearer_secret]
                 command: ("api send saved-auth --collection transport --output none --no-history --save " + ($save_path | to nuon))
             }
             {
                 label: "history resend bearer override"
-                secret: $bearer_secret
+                wire_secret: $bearer_secret
+                secrets: [$bearer_secret]
                 command: ("api history resend " + ($history_id | to nuon) + " -a {type: bearer, token_ref: transport-bearer} --raw")
             }
         ]
@@ -212,13 +218,13 @@ def test-real-auth-secret-redaction [] {
         for case in $cases {
             let fake = (
                 transport-fake-mode $fake_base "transport-failure" (($case.label | str replace --all " " "-") + ".log")
-                | insert expected_secret $case.secret
+                | insert expected_secret $case.wire_secret
             )
             let before = (command-error-snapshot $root)
             let result = (run-with-fake-curl $root $fake $case.command)
             assert equal (fake-request-count $fake) 1 $"($case.label) did not execute exactly one transfer"
             assert ("exact-sensitive-match" in (open $fake.log --raw | lines)) $"($case.label) fake curl did not receive the exact expected raw secret"
-            assert-safe-transport-error $result 7 1 $case.label [$case.secret]
+            assert-safe-transport-error $result 7 1 $case.label $case.secrets
             assert equal (command-error-snapshot $root) $before $"($case.label) mutated config, auth, history, or output state"
             assert (not ($save_path | path exists)) $"($case.label) created --save output"
         }
