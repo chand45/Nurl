@@ -1,4 +1,4 @@
-# ASCII-only case helpers for protocol tokens.
+# Protocol text helpers compatible with supported Nushell runtimes.
 
 export def ascii-upcase []: string -> string {
     $in
@@ -43,4 +43,24 @@ export def optional-get [key: any] {
     } else {
         try { $value | get $key } catch { null }
     }
+}
+
+# Encode one application/x-www-form-urlencoded component as UTF-8 bytes.
+export def form-encode-component [value: string] {
+    $value
+    | url encode --all
+    | str replace --all "%20" "+"
+    | str replace --all "%2A" "*"
+    | str replace --all "%2D" "-"
+    | str replace --all "%2E" "."
+    | str replace --all "%5F" "_"
+}
+
+export def form-encode-record [data: record] {
+    $data | transpose key value | each {|field|
+        let key = (form-encode-component $field.key)
+        let raw_value = ($field.value | default "" | into string)
+        let value = (form-encode-component $raw_value)
+        $"($key)=($value)"
+    } | str join "&"
 }
